@@ -3268,6 +3268,7 @@ struct C_SetManifestRefCountDone : public Context {
     auto it = pg->manifest_ops.find(soid);
     if (it == pg->manifest_ops.end()) {
       // raced with cancel_manifest_ops
+      cb = nullptr;
       return;
     }
     pg->manifest_ops.erase(it);
