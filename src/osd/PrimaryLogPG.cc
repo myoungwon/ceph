@@ -9293,7 +9293,7 @@ void PrimaryLogPG::_copy_some_manifest(ObjectContextRef obc, CopyOpRef cop, uint
 	    << " length: " << length << " pool id: " << oloc.pool
 	    << " tid: " << tid << dendl;
 
-    if (last_offset < iter->first) {
+    if (last_offset <= iter->first) {
       break;
     }
   }
