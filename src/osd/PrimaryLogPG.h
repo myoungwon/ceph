@@ -1465,6 +1465,7 @@ protected:
 			      Context *cb, std::optional<bufferlist> chunk);
   void dec_all_refcount_manifest(const object_info_t& oi, OpContext* ctx);
   void dec_refcount(const hobject_t& soid, const object_ref_delta_t& refs);
+  void update_chunk_map_by_dirty(OpContext* ctx);
   void dec_refcount_by_dirty(OpContext* ctx);
   ObjectContextRef get_prev_clone_obc(ObjectContextRef obc);
   void get_adjacent_clones(ObjectContextRef src_obc, 
