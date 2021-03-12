@@ -3266,12 +3266,23 @@ public:
 };
 
 struct SetManifestFinisher : public PrimaryLogPG::OpFinisher {
+  PrimaryLogPGRef pg;
+  ObjectContextRef rollback_to;
   OSDOp& osd_op;
+  PrimaryLogPG::OpContext *ctx;
 
-  explicit SetManifestFinisher(OSDOp& osd_op) : osd_op(osd_op) {
+  explicit SetManifestFinisher(PrimaryLogPG *p, ObjectContextRef r,
+      OSDOp& osd_op, PrimaryLogPG::OpContext *ctx) : 
+    pg(p), rollback_to(r), osd_op(osd_op), ctx(ctx) {
   }
 
   int execute() override {
+    // if rollback_to is not nullptr, this is a callback from rollback_to()
+    if (rollback_to) {
+      ceph_assert(pg);
+      pg->_do_rollback_to(ctx, rollback_to, osd_op);
+      return 0;
+    }
     return osd_op.rval;
   }
 };
@@ -3502,6 +3513,14 @@ bool PrimaryLogPG::inc_refcount_by_set(OpContext* ctx, object_manifest_t& set_ch
 }
 
 void PrimaryLogPG::update_chunk_map_by_dirty(OpContext* ctx) {
+  /* 
+   * We should consider two cases here: 
+   *  1) just modification: This created dirty regions, but didn't update chunk_map.
+   *  2) rollback: In rollback, head will be converted to the clone the rollback targets.
+   *  		Also, rollback already updated chunk_map.  
+   * So, we should do here is to check whether chunk_map is updated and the clean_region has dirty regions.
+   * In case of the rollback, chunk_map doesn't need to be clear
+   */
   for (auto &p : ctx->obs->oi.manifest.chunk_map) {
     if (!ctx->clean_regions.is_clean_region(p.first, p.second.length)) {
       ctx->new_obs.oi.manifest.chunk_map.erase(p.first);
@@ -6666,7 +6685,12 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
     case CEPH_OSD_OP_ROLLBACK :
       ++ctx->num_write;
       tracepoint(osd, do_osd_op_pre_rollback, soid.oid.name.c_str(), soid.snap.val);
-      result = _rollback_to(ctx, osd_op);
+      if (op_finisher == nullptr) {
+	result = _rollback_to(ctx, osd_op);
+      } else {
+	op_finisher->execute();
+	ctx->op_finishers.erase(ctx->current_osd_subop_num);
+      }
       break;
 
     case CEPH_OSD_OP_ZERO:
@@ -6976,7 +7000,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	if (op_finisher == nullptr && need_reference) {
 	  // start
 	  ctx->op_finishers[ctx->current_osd_subop_num].reset(
-	    new SetManifestFinisher(osd_op));
+	    new SetManifestFinisher(this, nullptr, osd_op, nullptr));
 	  ManifestOpRef mop = std::make_shared<ManifestOp>(new RefCountCallback(ctx, osd_op));
 	  C_SetManifestRefCountDone* fin = new C_SetManifestRefCountDone(this, mop, soid, 0);
 	  ceph_tid_t tid = refcount_manifest(soid, target, 
@@ -7122,7 +7146,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	if (op_finisher == nullptr)  {
 	  // start
 	  ctx->op_finishers[ctx->current_osd_subop_num].reset(
-	    new SetManifestFinisher(osd_op));
+	    new SetManifestFinisher(this, nullptr, osd_op, nullptr));
 	  object_manifest_t set_chunk;
 	  bool need_inc_ref = false;
 	  set_chunk.chunk_map[src_offset] = chunk_info;
@@ -8216,6 +8240,33 @@ int PrimaryLogPG::_rollback_to(OpContext *ctx, OSDOp& op)
       // rolling back to the head; we just need to clone it.
       ctx->modify = true;
     } else {
+      if (rollback_to->obs.oi.has_manifest() && rollback_to->obs.oi.manifest.is_chunked()) {
+	/*
+	 * looking at the following case, the foo head needs the reference of chunk4 and chunk5
+	 * in case snap[1] is removed.
+	 * 
+	 * Before rollback to snap[1]:
+	 *
+	 * foo snap[1]:          [chunk4]          [chunk5]
+	 * foo snap[0]: [                  chunk2                   ]
+	 * foo head   :          [chunk1]                    [chunk3]
+	 *
+	 * After:
+	 *
+	 * foo snap[1]:          [chunk4]          [chunk5]
+	 * foo snap[0]: [                  chunk2                   ]
+	 * foo head   :          [chunk4]          [chunk5] 
+	 *
+	 */
+	bool need_inc_ref = inc_refcount_by_set(ctx, rollback_to->obs.oi.manifest, op);
+	if (need_inc_ref) {
+	  auto op_finisher_it = ctx->op_finishers.find(ctx->current_osd_subop_num);
+	  ceph_assert(op_finisher_it == ctx->op_finishers.end());
+	  ctx->op_finishers[ctx->current_osd_subop_num].reset(
+	      new SetManifestFinisher(this, rollback_to, op, ctx));
+	  return -EINPROGRESS;
+	}
+      }
       _do_rollback_to(ctx, rollback_to, op);
     }
   }
