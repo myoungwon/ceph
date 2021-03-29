@@ -23,6 +23,15 @@ with patch('builtins.open', create=True):
 
 class TestCephAdm(object):
 
+    def test_docker_unit_file(self):
+        ctx = mock.Mock()
+        ctx.container_path = '/usr/bin/docker'
+        r = cd.get_unit_file(ctx, '9b9d7609-f4d5-4aba-94c8-effa764d96c9')
+        assert 'Requires=docker.service' in r
+        ctx.container_path = '/usr/sbin/podman'
+        r = cd.get_unit_file(ctx, '9b9d7609-f4d5-4aba-94c8-effa764d96c9')
+        assert 'Requires=docker.service' not in r
+
     @mock.patch('cephadm.logger')
     def test_attempt_bind(self, logger):
         ctx = None
@@ -374,6 +383,18 @@ default via fe80::2480:28ec:5097:3fe2 dev wlp2s0 proto ra metric 20600 pref medi
             'repo_digests': ['quay.ceph.io/ceph-ci/ceph@sha256:4e13da36c1bd6780b312a985410ae678984c37e6a9493a74c87e4a50b9bda41f']
         }
 
+        # multiple digests (podman)
+        out = """e935122ab143a64d92ed1fbb27d030cf6e2f0258207be1baf1b509c466aeeb42,[docker.io/prom/prometheus@sha256:e4ca62c0d62f3e886e684806dfe9d4e0cda60d54986898173c1083856cfda0f4 docker.io/prom/prometheus@sha256:efd99a6be65885c07c559679a0df4ec709604bcdd8cd83f0d00a1a683b28fb6a]"""
+        r = cd.get_image_info_from_inspect(out, 'registry/prom/prometheus:latest')
+        assert r == {
+            'image_id': 'e935122ab143a64d92ed1fbb27d030cf6e2f0258207be1baf1b509c466aeeb42',
+            'repo_digests': [
+                'docker.io/prom/prometheus@sha256:e4ca62c0d62f3e886e684806dfe9d4e0cda60d54986898173c1083856cfda0f4',
+                'docker.io/prom/prometheus@sha256:efd99a6be65885c07c559679a0df4ec709604bcdd8cd83f0d00a1a683b28fb6a',
+            ]
+        }
+
+
     def test_dict_get(self):
         result = cd.dict_get({'a': 1}, 'a', require=True)
         assert result == 1
@@ -598,13 +619,10 @@ iMN28C2bKGao5UHvdER1rGy7
         assert exporter.unit_run
         lines = exporter.unit_run.split('\n')
         assert len(lines) == 2
-        assert "/var/lib/ceph/foobar/cephadm exporter --fsid foobar --id test --port 9443 &" in lines[1]
+        assert "cephadm exporter --fsid foobar --id test --port 9443 &" in lines[1]
 
     def test_binary_path(self, exporter):
-        # fsid = foobar
-        args = cd._parse_args([])
-        cd.args = args
-        assert exporter.binary_path == "/var/lib/ceph/foobar/cephadm"
+        assert os.path.isfile(exporter.binary_path)
 
     def test_systemd_unit(self, exporter):
         assert exporter.unit_file
@@ -807,3 +825,39 @@ class TestMaintenance:
     def test_parser_BAD(self):
         with pytest.raises(SystemExit):
             cd._parse_args(['host-maintenance', 'wah'])
+
+
+class TestMonitoring(object):
+    @mock.patch('cephadm.call')
+    def test_get_version_alertmanager(self, _call):
+        ctx = mock.Mock()
+        daemon_type = 'alertmanager'
+
+        # binary `prometheus`
+        _call.return_value = '', '{}, version 0.16.1'.format(daemon_type), 0
+        version = cd.Monitoring.get_version(ctx, 'container_id', daemon_type)
+        assert version == '0.16.1'
+
+        # binary `prometheus-alertmanager`
+        _call.side_effect = (
+            ('', '', 1),
+            ('', '{}, version 0.16.1'.format(daemon_type), 0),
+        )
+        version = cd.Monitoring.get_version(ctx, 'container_id', daemon_type)
+        assert version == '0.16.1'
+
+    @mock.patch('cephadm.call')
+    def test_get_version_prometheus(self, _call):
+        ctx = mock.Mock()
+        daemon_type = 'prometheus'
+        _call.return_value = '', '{}, version 0.16.1'.format(daemon_type), 0
+        version = cd.Monitoring.get_version(ctx, 'container_id', daemon_type)
+        assert version == '0.16.1'
+
+    @mock.patch('cephadm.call')
+    def test_get_version_node_exporter(self, _call):
+        ctx = mock.Mock()
+        daemon_type = 'node-exporter'
+        _call.return_value = '', '{}, version 0.16.1'.format(daemon_type.replace('-', '_')), 0
+        version = cd.Monitoring.get_version(ctx, 'container_id', daemon_type)
+        assert version == '0.16.1'

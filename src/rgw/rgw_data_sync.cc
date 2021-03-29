@@ -2,7 +2,6 @@
 // vim: ts=8 sw=2 smarttab ft=cpp
 
 #include "common/ceph_json.h"
-#include "common/RWLock.h"
 #include "common/RefCountedObj.h"
 #include "common/WorkQueue.h"
 #include "common/Throttle.h"
@@ -2644,7 +2643,7 @@ int RGWDataSyncStatusManager::init()
   const RGWZoneParams& zone_params = store->svc()->zone->get_zone_params();
 
   if (sync_module == nullptr) { 
-    sync_module = store->getRados()->get_sync_module();
+    sync_module = store->get_sync_module();
   }
 
   conn = store->svc()->zone->get_zone_conn(source_zone);

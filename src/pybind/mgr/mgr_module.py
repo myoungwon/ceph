@@ -780,6 +780,14 @@ class MgrStandbyModule(ceph_module.BaseMgrStandbyModule, MgrModuleLoggingMixin):
         """
         return self._ceph_get_store(key)
 
+    def get_localized_store(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        r = self._ceph_get_store(_get_localized_key(self.get_mgr_id(), key))
+        if r is None:
+            r = self._ceph_get_store(key)
+            if r is None:
+                r = default
+        return r
+
     def get_active_uri(self) -> str:
         return self._ceph_get_active_uri()
 
@@ -792,6 +800,13 @@ class MgrStandbyModule(ceph_module.BaseMgrStandbyModule, MgrModuleLoggingMixin):
 
 
 HealthChecksT = Mapping[str, Mapping[str, Union[int, str, Sequence[str]]]]
+# {"type": service_type, "id": service_id}
+ServiceInfoT = Dict[str, str]
+# {"hostname": hostname,
+#  "ceph_version": version,
+#  "services": [service_info, ..]}
+ServerInfoT = Dict[str, Union[str, List[ServiceInfoT]]]
+PerfCounterT = Dict[str, Any]
 
 
 class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
@@ -1026,8 +1041,8 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
 
         return ''
 
-    def _perfpath_to_path_labels(self, daemon, path):
-        # type: (str, str) -> Tuple[str, Tuple[str, ...], Tuple[str, ...]]
+    def _perfpath_to_path_labels(self, daemon: str,
+                                 path: str) -> Tuple[str, Tuple[str, ...], Tuple[str, ...]]:
         label_names = ("ceph_daemon",)  # type: Tuple[str, ...]
         labels = (daemon,)  # type: Tuple[str, ...]
 
@@ -1115,8 +1130,7 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
 
         return ret
 
-    def get_server(self, hostname: str) -> Union[Dict[str, str],
-                                                 List[Dict[str, str]]]:
+    def get_server(self, hostname) -> ServerInfoT:
         """
         Called by the plugin to fetch metadata about a particular hostname from
         ceph-mgr.
@@ -1126,7 +1140,7 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
 
         :param hostname: a hostname
         """
-        return self._ceph_get_server(hostname)
+        return cast(ServerInfoT, self._ceph_get_server(hostname))
 
     def get_perf_schema(self,
                         svc_type: str,
@@ -1180,7 +1194,7 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
         """
         return self._ceph_get_latest_counter(svc_type, svc_name, path)
 
-    def list_servers(self) -> List[Dict[str, List[Dict[str, str]]]]:
+    def list_servers(self) -> List[ServerInfoT]:
         """
         Like ``get_server``, but gives information about all servers (i.e. all
         unique hostnames that have been mentioned in daemon metadata)
@@ -1188,7 +1202,7 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
         :return: a list of information about all servers
         :rtype: list
         """
-        return self._ceph_get_server(None)
+        return cast(List[ServerInfoT], self._ceph_get_server(None))
 
     def get_metadata(self,
                      svc_type: str,
@@ -1516,7 +1530,7 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
         OSDMap.
         :return: OSDMap
         """
-        return self._ceph_get_osdmap()
+        return cast(OSDMap, self._ceph_get_osdmap())
 
     def get_latest(self, daemon_type: str, daemon_name: str, counter: str) -> int:
         data = self.get_latest_counter(
@@ -1556,7 +1570,7 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
         result = defaultdict(dict)  # type: Dict[str, dict]
 
         for server in self.list_servers():
-            for service in server['services']:
+            for service in cast(List[ServiceInfoT], server['services']):
                 if service['type'] not in services:
                     continue
 
@@ -1736,7 +1750,7 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
         """
         return self._ceph_remove_osd_perf_query(query_id)
 
-    def get_osd_perf_counters(self, query_id: int) -> Optional[Dict[str, Any]]:
+    def get_osd_perf_counters(self, query_id: int) -> Optional[Dict[str, List[PerfCounterT]]]:
         """
         Get stats collected for an OSD perf query.
 
@@ -1781,7 +1795,7 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
         """
         return self._ceph_remove_mds_perf_query(query_id)
 
-    def get_mds_perf_counters(self, query_id: int) -> Optional[Dict[str, Any]]:
+    def get_mds_perf_counters(self, query_id: int) -> Optional[Dict[str, List[PerfCounterT]]]:
         """
         Get stats collected for an MDS perf query.
 

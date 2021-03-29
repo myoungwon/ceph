@@ -1,10 +1,13 @@
+import errno
 import json
 import logging
-from typing import List, cast
+from typing import List, cast, Optional
+from ipaddress import ip_address, IPv6Address
 
+from mgr_module import HandleCommandResult
 from ceph.deployment.service_spec import IscsiServiceSpec
 
-from orchestrator import DaemonDescription
+from orchestrator import DaemonDescription, DaemonDescriptionStatus
 from .cephadmservice import CephadmDaemonDeploySpec, CephService
 from .. import utils
 
@@ -25,15 +28,12 @@ class IscsiService(CephService):
         spec = cast(IscsiServiceSpec, self.mgr.spec_store[daemon_spec.service_name].spec)
         igw_id = daemon_spec.daemon_id
 
-        ret, keyring, err = self.mgr.check_mon_command({
-            'prefix': 'auth get-or-create',
-            'entity': self.get_auth_entity(igw_id),
-            'caps': ['mon', 'profile rbd, '
-                            'allow command "osd blocklist", '
-                            'allow command "config-key get" with "key" prefix "iscsi/"',
-                     'mgr', 'allow command "service status"',
-                     'osd', 'allow rwx'],
-        })
+        keyring = self.get_keyring_with_caps(self.get_auth_entity(igw_id),
+                                             ['mon', 'profile rbd, '
+                                              'allow command "osd blocklist", '
+                                              'allow command "config-key get" with "key" prefix "iscsi/"',
+                                              'mgr', 'allow command "service status"',
+                                              'osd', 'allow rwx'])
 
         if spec.ssl_cert:
             if isinstance(spec.ssl_cert, list):
@@ -96,6 +96,9 @@ class IscsiService(CephService):
                     logger.warning('No ServiceSpec found for %s', dd)
                     continue
                 ip = utils.resolve_ip(dd.hostname)
+                # IPv6 URL encoding requires square brackets enclosing the ip
+                if type(ip_address(ip)) is IPv6Address:
+                    ip = f'[{ip}]'
                 protocol = "http"
                 if spec.api_secure and spec.ssl_cert and spec.ssl_key:
                     protocol = "https"
@@ -118,3 +121,24 @@ class IscsiService(CephService):
             get_cmd='dashboard iscsi-gateway-list',
             get_set_cmd_dicts=get_set_cmd_dicts
         )
+
+    def ok_to_stop(self,
+                   daemon_ids: List[str],
+                   force: bool = False,
+                   known: Optional[List[str]] = None) -> HandleCommandResult:
+        # if only 1 iscsi, alert user (this is not passable with --force)
+        warn, warn_message = self._enough_daemons_to_stop(self.TYPE, daemon_ids, 'Iscsi', 1, True)
+        if warn:
+            return HandleCommandResult(-errno.EBUSY, '', warn_message)
+
+        # if reached here, there is > 1 nfs daemon. make sure none are down
+        warn_message = (
+            'ALERT: 1 iscsi daemon is already down. Please bring it back up before stopping this one')
+        iscsi_daemons = self.mgr.cache.get_daemons_by_type(self.TYPE)
+        for i in iscsi_daemons:
+            if i.status != DaemonDescriptionStatus.running:
+                return HandleCommandResult(-errno.EBUSY, '', warn_message)
+
+        names = [f'{self.TYPE}.{d_id}' for d_id in daemon_ids]
+        warn_message = f'It is presumed safe to stop {names}'
+        return HandleCommandResult(0, warn_message, '')

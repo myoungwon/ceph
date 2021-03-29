@@ -131,16 +131,16 @@ Your branch with the qa changes can be tested by passing two extra arguments to 
 
 For example, if you want to make changes in ``qa/`` after testing ``branch-x``
 (for which the ceph-ci branch is ``wip-username-branch-x``), run the following
-command::
+command
 
 .. prompt:: bash $
 
    teuthology-suite -v \
-   -m smithi \
-   -c wip-username-branch-x \
-   -s fs \
-   -p 50
-   --filter cephfs-shell
+    -m smithi \
+    -c wip-username-branch-x \
+    -s fs \
+    -p 50 \
+    --filter cephfs-shell
 
 Then make modifications locally, update the PR branch, and trigger tests from
 your PR branch as follows:
@@ -148,12 +148,12 @@ your PR branch as follows:
 .. prompt:: bash $
 
    teuthology-suite -v \
-   -m smithi \
-   -c wip-username-branch-x \
-   -s fs -p 50 \
-   --filter cephfs-shell \
-   --suite-repo https://github.com/$username/ceph \
-   --suite-branch branch-x
+    -m smithi \
+    -c wip-username-branch-x \
+    -s fs -p 50 \
+    --filter cephfs-shell \
+    --suite-repo https://github.com/$username/ceph \
+    --suite-branch branch-x
 
 You can verify that the tests were run using this branch by looking at the
 values for the keys ``suite_branch``, ``suite_repo`` and ``suite_sha1`` in the
@@ -238,10 +238,13 @@ example, for the above test ID, the link is - http://pulpito.front.sepia.ceph.co
 
 Re-running Tests
 ----------------
-You can pass ``--rerun`` option, with test ID as an argument to it, to
-``teuthology-suite`` command. Generally, this is useful in cases where teuthology test
-batch has some failed/dead jobs that we might want to retrigger. We can trigger
-jobs based on their status using::
+
+The ``teuthology-suite`` command has a ``--rerun`` option, which allows you to
+re-run tests. This is handy when your test has failed or is dead. The
+``--rerun`` option takes the name of a teuthology run as an argument, as you
+can see in the example below:
+
+.. prompt:: bash $ 
 
    teuthology-suite -v \
     -m smithi \
@@ -251,8 +254,8 @@ jobs based on their status using::
     -R fail,dead,queued,running \
     -e $CEPH_QA_MAIL
 
-The meaning of the rest the options is already covered in `Triggering Tests`_
-section.
+The meaning and function of the other options is covered in the table in the
+`Triggering Tests`_ section.
 
 Naming the ceph-ci branch
 -------------------------

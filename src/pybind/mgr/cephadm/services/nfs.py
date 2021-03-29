@@ -1,5 +1,8 @@
+import errno
 import logging
-from typing import Dict, Tuple, Any, List, cast
+from typing import Dict, Tuple, Any, List, cast, Optional
+
+from mgr_module import HandleCommandResult
 
 from ceph.deployment.service_spec import NFSServiceSpec
 import rados
@@ -114,13 +117,10 @@ class NFSService(CephService):
         if spec.namespace:
             osd_caps = '%s namespace=%s' % (osd_caps, spec.namespace)
 
-        logger.info('Create keyring: %s' % entity)
-        ret, keyring, err = self.mgr.check_mon_command({
-            'prefix': 'auth get-or-create',
-            'entity': entity,
-            'caps': ['mon', 'allow r',
-                     'osd', osd_caps],
-        })
+        logger.info('Creating key for %s' % entity)
+        keyring = self.get_keyring_with_caps(entity,
+                                             ['mon', 'allow r',
+                                              'osd', osd_caps])
 
         return keyring
 
@@ -128,13 +128,10 @@ class NFSService(CephService):
         daemon_id = daemon_spec.daemon_id
         entity: AuthEntity = self.get_auth_entity(f'{daemon_id}-rgw')
 
-        logger.info('Create keyring: %s' % entity)
-        ret, keyring, err = self.mgr.check_mon_command({
-            'prefix': 'auth get-or-create',
-            'entity': entity,
-            'caps': ['mon', 'allow r',
-                     'osd', 'allow rwx tag rgw *=*'],
-        })
+        logger.info('Creating key for %s' % entity)
+        keyring = self.get_keyring_with_caps(entity,
+                                             ['mon', 'allow r',
+                                              'osd', 'allow rwx tag rgw *=*'])
 
         return keyring
 
@@ -143,7 +140,7 @@ class NFSService(CephService):
         daemon_id: str = daemon.daemon_id
         entity: AuthEntity = self.get_auth_entity(f'{daemon_id}-rgw')
 
-        logger.info(f'Remove keyring: {entity}')
+        logger.info(f'Removing key for {entity}')
         ret, out, err = self.mgr.check_mon_command({
             'prefix': 'auth rm',
             'entity': entity,
@@ -152,3 +149,21 @@ class NFSService(CephService):
     def post_remove(self, daemon: DaemonDescription) -> None:
         super().post_remove(daemon)
         self.remove_rgw_keyring(daemon)
+
+    def ok_to_stop(self,
+                   daemon_ids: List[str],
+                   force: bool = False,
+                   known: Optional[List[str]] = None) -> HandleCommandResult:
+        # if only 1 nfs, alert user (this is not passable with --force)
+        warn, warn_message = self._enough_daemons_to_stop(self.TYPE, daemon_ids, 'NFS', 1, True)
+        if warn:
+            return HandleCommandResult(-errno.EBUSY, '', warn_message)
+
+        # if reached here, there is > 1 nfs daemon.
+        if force:
+            return HandleCommandResult(0, warn_message, '')
+
+        # if reached here, > 1 nfs daemon and no force flag.
+        # Provide warning
+        warn_message = "WARNING: Removing NFS daemons can cause clients to lose connectivity. "
+        return HandleCommandResult(-errno.EBUSY, '', warn_message)

@@ -39,7 +39,10 @@ LBAInternalNode::lookup_ret LBAInternalNode::lookup(
   }
   assert(meta.begin <= addr);
   assert(meta.end > addr);
-  auto iter = lower_bound(addr);
+
+  [[maybe_unused]] auto [iter, biter] = bound(addr, addr + 1);
+  assert(iter != biter);
+  assert(iter + 1 == biter);
   return get_lba_btree_extent(
     c,
     this,
@@ -166,6 +169,11 @@ LBAInternalNode::mutate_internal_address_ret LBAInternalNode::mutate_internal_ad
     }
     auto iter = get_containing_child(laddr);
     if (iter->get_key() != laddr) {
+      logger().debug(
+	"LBAInternalNode::mutate_internal_address laddr {} "
+	"not found in extent {}",
+	laddr,
+	*this);
       return crimson::ct_error::enoent::make();
     }
 
@@ -391,12 +399,13 @@ LBAInternalNode::merge_entry(
 	    auto mut_croot = c.cache.duplicate_for_write(c.trans, croot);
 	    croot = mut_croot->cast<RootBlock>();
 	  }
-	  croot->root.lba_root_addr = begin()->get_val();
+	  croot->get_root().lba_root = lba_root_t{
+	    begin()->get_val(),
+	    get_meta().depth - 1};
 	  logger().debug(
 	    "LBAInternalNode::merge_entry: collapsing root {} to addr {}",
 	    *this,
 	    begin()->get_val());
-	  croot->root.lba_depth = get_meta().depth - 1;
 	  c.cache.retire_extent(c.trans, this);
 	  return merge_ertr::make_ready_future<LBANodeRef>(replacement);
 	});

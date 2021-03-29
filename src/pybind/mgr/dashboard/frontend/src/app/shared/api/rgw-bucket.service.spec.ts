@@ -16,6 +16,7 @@ describe('RgwBucketService', () => {
   beforeEach(() => {
     service = TestBed.inject(RgwBucketService);
     httpTesting = TestBed.inject(HttpTestingController);
+    RgwHelper.selectDaemon();
   });
 
   afterEach(() => {
@@ -28,14 +29,12 @@ describe('RgwBucketService', () => {
 
   it('should call list', () => {
     service.list().subscribe();
-    RgwHelper.getCurrentDaemon();
     const req = httpTesting.expectOne(`api/rgw/bucket?${RgwHelper.DAEMON_QUERY_PARAM}&stats=true`);
     expect(req.request.method).toBe('GET');
   });
 
   it('should call get', () => {
     service.get('foo').subscribe();
-    RgwHelper.getCurrentDaemon();
     const req = httpTesting.expectOne(`api/rgw/bucket/foo?${RgwHelper.DAEMON_QUERY_PARAM}`);
     expect(req.request.method).toBe('GET');
   });
@@ -64,7 +63,6 @@ describe('RgwBucketService', () => {
 
   it('should call delete, with purgeObjects = true', () => {
     service.delete('foo').subscribe();
-    RgwHelper.getCurrentDaemon();
     const req = httpTesting.expectOne(
       `api/rgw/bucket/foo?${RgwHelper.DAEMON_QUERY_PARAM}&purge_objects=true`
     );
@@ -73,7 +71,6 @@ describe('RgwBucketService', () => {
 
   it('should call delete, with purgeObjects = false', () => {
     service.delete('foo', false).subscribe();
-    RgwHelper.getCurrentDaemon();
     const req = httpTesting.expectOne(
       `api/rgw/bucket/foo?${RgwHelper.DAEMON_QUERY_PARAM}&purge_objects=false`
     );
@@ -85,7 +82,6 @@ describe('RgwBucketService', () => {
     service.exists('foo').subscribe((resp) => {
       result = resp;
     });
-    RgwHelper.getCurrentDaemon();
     const req = httpTesting.expectOne(`api/rgw/bucket?${RgwHelper.DAEMON_QUERY_PARAM}`);
     expect(req.request.method).toBe('GET');
     req.flush(['foo', 'bar']);

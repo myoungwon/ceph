@@ -37,9 +37,6 @@ public:
     virtual std::string key() {
       return {};
     }
-    virtual seastar::future<std::string> tail_key() {
-      return seastar::make_ready_future<std::string>();
-    }
     virtual ceph::buffer::list value() {
       return {};
     }
@@ -122,7 +119,7 @@ public:
     CollectionRef c,           ///< [in] collection
     const ghobject_t &oid,     ///< [in] oid
     const std::optional<std::string> &start ///< [in] start, empty for begin
-    ) = 0; ///< @return <done, values> values.empty() iff done
+    ) = 0; ///< @return <done, values> values.empty() only if done
 
   virtual read_errorator::future<bufferlist> omap_get_header(
     CollectionRef c,

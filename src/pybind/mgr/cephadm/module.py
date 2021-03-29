@@ -11,7 +11,7 @@ from threading import Event
 
 import string
 from typing import List, Dict, Optional, Callable, Tuple, TypeVar, \
-    Any, Set, TYPE_CHECKING, cast, NamedTuple, Sequence
+    Any, Set, TYPE_CHECKING, cast, NamedTuple, Sequence, Type
 
 import datetime
 import os
@@ -19,6 +19,7 @@ import random
 import tempfile
 import multiprocessing.pool
 import subprocess
+from prettytable import PrettyTable
 
 from ceph.deployment import inventory
 from ceph.deployment.drive_group import DriveGroupSpec
@@ -33,8 +34,11 @@ from mgr_module import MgrModule, HandleCommandResult, Option
 from mgr_util import create_self_signed_cert
 import secrets
 import orchestrator
+from orchestrator.module import to_format, Format
+
 from orchestrator import OrchestratorError, OrchestratorValidationError, HostSpec, \
-    CLICommandMeta, DaemonDescription, DaemonDescriptionStatus
+    CLICommandMeta, DaemonDescription, DaemonDescriptionStatus, handle_orch_error, \
+    service_to_daemon_types
 from orchestrator._interface import GenericSpec
 from orchestrator._interface import daemon_type_to_service
 
@@ -42,7 +46,7 @@ from . import remotes
 from . import utils
 from .migrations import Migrations
 from .services.cephadmservice import MonService, MgrService, MdsService, RgwService, \
-    RbdMirrorService, CrashService, CephadmService, CephadmExporter, CephadmExporterConfig
+    RbdMirrorService, CrashService, CephadmService, CephfsMirrorService
 from .services.container import CustomContainerService
 from .services.iscsi import IscsiService
 from .services.ha_rgw import HA_RGWService
@@ -50,11 +54,13 @@ from .services.nfs import NFSService
 from .services.osd import OSDRemovalQueue, OSDService, OSD, NotFoundError
 from .services.monitoring import GrafanaService, AlertmanagerService, PrometheusService, \
     NodeExporterService
+from .services.exporter import CephadmExporter, CephadmExporterConfig
 from .schedule import HostAssignment
 from .inventory import Inventory, SpecStore, HostCache, EventStore
-from .upgrade import CEPH_UPGRADE_ORDER, CephadmUpgrade
+from .upgrade import CephadmUpgrade
 from .template import TemplateMgr
-from .utils import forall_hosts, cephadmNoImage
+from .utils import CEPH_TYPES, GATEWAY_TYPES, forall_hosts, cephadmNoImage
+from .configchecks import CephadmConfigChecks
 
 try:
     import remoto
@@ -84,8 +90,6 @@ Host *
   ConnectTimeout=30
 """
 
-CEPH_TYPES = set(CEPH_UPGRADE_ORDER)
-
 # Default container images -----------------------------------------------------
 DEFAULT_IMAGE = 'docker.io/ceph/ceph'
 DEFAULT_PROMETHEUS_IMAGE = 'docker.io/prom/prometheus:v2.18.1'
@@ -93,24 +97,6 @@ DEFAULT_NODE_EXPORTER_IMAGE = 'docker.io/prom/node-exporter:v0.18.1'
 DEFAULT_GRAFANA_IMAGE = 'docker.io/ceph/ceph-grafana:6.7.4'
 DEFAULT_ALERT_MANAGER_IMAGE = 'docker.io/prom/alertmanager:v0.20.0'
 # ------------------------------------------------------------------------------
-
-
-class CephadmCompletion(orchestrator.Completion[T]):
-    def evaluate(self) -> None:
-        self.finalize(None)
-
-
-def trivial_completion(f: Callable[..., T]) -> Callable[..., CephadmCompletion[T]]:
-    """
-    Decorator to make CephadmCompletion methods return
-    a completion object that executes themselves.
-    """
-
-    @wraps(f)
-    def wrapper(*args: Any, **kwargs: Any) -> CephadmCompletion:
-        return CephadmCompletion(on_complete=lambda _: f(*args, **kwargs))
-
-    return wrapper
 
 
 def service_inactive(spec_name: str) -> Callable:
@@ -162,6 +148,12 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             type='secs',
             default=30 * 60,
             desc='seconds to cache device inventory',
+        ),
+        Option(
+            'device_enhanced_scan',
+            type='bool',
+            default=False,
+            desc='Use libstoragemgmt during device scans',
         ),
         Option(
             'daemon_cache_timeout',
@@ -263,7 +255,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         Option(
             'container_init',
             type='bool',
-            default=False,
+            default=True,
             desc='Run podman/docker with `--init`'
         ),
         Option(
@@ -315,11 +307,17 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             default=True,
             desc='Automatically convert image tags to image digest. Make sure all daemons use the same image',
         ),
+        Option(
+            'config_checks_enabled',
+            type='bool',
+            default=False,
+            desc='Enable or disable the cephadm configuration analysis',
+        ),
     ]
 
     def __init__(self, *args: Any, **kwargs: Any):
         super(CephadmOrchestrator, self).__init__(*args, **kwargs)
-        self._cluster_fsid = self.get('mon_map')['fsid']
+        self._cluster_fsid: str = self.get('mon_map')['fsid']
         self.last_monmap: Optional[datetime.datetime] = None
 
         # for serve()
@@ -350,7 +348,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             self.warn_on_stray_daemons = True
             self.warn_on_failed_host_check = True
             self.allow_ptrace = False
-            self.container_init = False
+            self.container_init = True
             self.prometheus_alerts_path = ''
             self.migration_current: Optional[int] = None
             self.config_dashboard = True
@@ -375,6 +373,8 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             raise RuntimeError("unable to read cephadm at '%s': %s" % (
                 path, str(e)))
 
+        self.cephadm_binary_path = self._get_cephadm_binary_path()
+
         self._worker_pool = multiprocessing.pool.ThreadPool(10)
 
         self._reconfig_ssh()
@@ -384,8 +384,6 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         self.upgrade = CephadmUpgrade(self)
 
         self.health_checks: Dict[str, dict] = {}
-
-        self.all_progress_references = list()  # type: List[orchestrator.ProgressReference]
 
         self.inventory = Inventory(self)
 
@@ -412,45 +410,25 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
 
         self.migration = Migrations(self)
 
-        # services:
-        self.osd_service = OSDService(self)
-        self.nfs_service = NFSService(self)
-        self.mon_service = MonService(self)
-        self.mgr_service = MgrService(self)
-        self.mds_service = MdsService(self)
-        self.rgw_service = RgwService(self)
-        self.rbd_mirror_service = RbdMirrorService(self)
-        self.grafana_service = GrafanaService(self)
-        self.alertmanager_service = AlertmanagerService(self)
-        self.prometheus_service = PrometheusService(self)
-        self.node_exporter_service = NodeExporterService(self)
-        self.crash_service = CrashService(self)
-        self.iscsi_service = IscsiService(self)
-        self.ha_rgw_service = HA_RGWService(self)
-        self.container_service = CustomContainerService(self)
-        self.cephadm_exporter_service = CephadmExporter(self)
-        self.cephadm_services = {
-            'mon': self.mon_service,
-            'mgr': self.mgr_service,
-            'osd': self.osd_service,
-            'mds': self.mds_service,
-            'rgw': self.rgw_service,
-            'rbd-mirror': self.rbd_mirror_service,
-            'nfs': self.nfs_service,
-            'grafana': self.grafana_service,
-            'alertmanager': self.alertmanager_service,
-            'prometheus': self.prometheus_service,
-            'node-exporter': self.node_exporter_service,
-            'crash': self.crash_service,
-            'iscsi': self.iscsi_service,
-            'ha-rgw': self.ha_rgw_service,
-            'container': self.container_service,
-            'cephadm-exporter': self.cephadm_exporter_service,
-        }
+        _service_clses: Sequence[Type[CephadmService]] = [
+            OSDService, NFSService, MonService, MgrService, MdsService,
+            RgwService, RbdMirrorService, GrafanaService, AlertmanagerService,
+            PrometheusService, NodeExporterService, CrashService, IscsiService,
+            HA_RGWService, CustomContainerService, CephadmExporter, CephfsMirrorService
+        ]
+
+        # https://github.com/python/mypy/issues/8993
+        self.cephadm_services: Dict[str, CephadmService] = {
+            cls.TYPE: cls(self) for cls in _service_clses}  # type: ignore
+
+        self.mgr_service: MgrService = cast(MgrService, self.cephadm_services['mgr'])
+        self.osd_service: OSDService = cast(OSDService, self.cephadm_services['osd'])
 
         self.template = TemplateMgr(self)
 
         self.requires_post_actions: Set[str] = set()
+
+        self.config_checker = CephadmConfigChecks(self)
 
     def shutdown(self) -> None:
         self.log.debug('shutdown')
@@ -462,6 +440,12 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
     def _get_cephadm_service(self, service_type: str) -> CephadmService:
         assert service_type in ServiceSpec.KNOWN_SERVICE_TYPES
         return self.cephadm_services[service_type]
+
+    def _get_cephadm_binary_path(self) -> str:
+        import hashlib
+        m = hashlib.sha256()
+        m.update(self._cephadm.encode())
+        return f'/var/lib/ceph/{self._cluster_fsid}/cephadm.{m.hexdigest()}'
 
     def _kick_serve_loop(self) -> None:
         self.log.debug('_kick_serve_loop')
@@ -694,17 +678,6 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         }
 
         return True, err, ret
-
-    def process(self, completions: List[CephadmCompletion]) -> None:  # type: ignore
-        """
-        Does nothing, as completions are processed in another thread.
-        """
-        if completions:
-            self.log.debug("process: completions={0}".format(
-                orchestrator.pretty_print(completions)))
-
-            for p in completions:
-                p.evaluate()
 
     @orchestrator._cli_write_command(
         prefix='cephadm set-ssh-config')
@@ -1070,6 +1043,104 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         cfg = self._get_exporter_config()
         return 0, json.dumps(cfg, indent=2), ""
 
+    @orchestrator._cli_read_command('cephadm config-check ls')
+    def _config_checks_list(self, format: Format = Format.plain) -> HandleCommandResult:
+        """List the available configuration checks and their current state"""
+
+        if format not in [Format.plain, Format.json, Format.json_pretty]:
+            return HandleCommandResult(
+                retval=1,
+                stderr="Requested format is not supported when listing configuration checks"
+            )
+
+        if format in [Format.json, Format.json_pretty]:
+            return HandleCommandResult(
+                stdout=to_format(self.config_checker.health_checks,
+                                 format,
+                                 many=True,
+                                 cls=None))
+
+        # plain formatting
+        table = PrettyTable(
+            ['NAME',
+             'HEALTHCHECK',
+             'STATUS',
+             'DESCRIPTION'
+             ], border=False)
+        table.align['NAME'] = 'l'
+        table.align['HEALTHCHECK'] = 'l'
+        table.align['STATUS'] = 'l'
+        table.align['DESCRIPTION'] = 'l'
+        table.left_padding_width = 0
+        table.right_padding_width = 2
+        for c in self.config_checker.health_checks:
+            table.add_row((
+                c.name,
+                c.healthcheck_name,
+                c.status,
+                c.description,
+            ))
+
+        return HandleCommandResult(stdout=table.get_string())
+
+    @orchestrator._cli_read_command('cephadm config-check status')
+    def _config_check_status(self) -> HandleCommandResult:
+        """Show whether the configuration checker feature is enabled/disabled"""
+        status = self.get_module_option('config_checks_enabled')
+        return HandleCommandResult(stdout="Enabled" if status else "Disabled")
+
+    @orchestrator._cli_write_command('cephadm config-check enable')
+    def _config_check_enable(self, check_name: str) -> HandleCommandResult:
+        """Enable a specific configuration check"""
+        if not self._config_check_valid(check_name):
+            return HandleCommandResult(retval=1, stderr="Invalid check name")
+
+        err, msg = self._update_config_check(check_name, 'enabled')
+        if err:
+            return HandleCommandResult(
+                retval=err,
+                stderr=f"Failed to enable check '{check_name}' : {msg}")
+
+        return HandleCommandResult(stdout="ok")
+
+    @orchestrator._cli_write_command('cephadm config-check disable')
+    def _config_check_disable(self, check_name: str) -> HandleCommandResult:
+        """Disable a specific configuration check"""
+        if not self._config_check_valid(check_name):
+            return HandleCommandResult(retval=1, stderr="Invalid check name")
+
+        err, msg = self._update_config_check(check_name, 'disabled')
+        if err:
+            return HandleCommandResult(retval=err, stderr=f"Failed to disable check '{check_name}': {msg}")
+        else:
+            # drop any outstanding raised healthcheck for this check
+            config_check = self.config_checker.lookup_check(check_name)
+            if config_check:
+                if config_check.healthcheck_name in self.health_checks:
+                    self.health_checks.pop(config_check.healthcheck_name, None)
+                    self.set_health_checks(self.health_checks)
+            else:
+                self.log.error(
+                    f"Unable to resolve a check name ({check_name}) to a healthcheck definition?")
+
+        return HandleCommandResult(stdout="ok")
+
+    def _config_check_valid(self, check_name: str) -> bool:
+        return check_name in [chk.name for chk in self.config_checker.health_checks]
+
+    def _update_config_check(self, check_name: str, status: str) -> Tuple[int, str]:
+        checks_raw = self.get_store('config_checks')
+        if not checks_raw:
+            return 1, "config_checks setting is not available"
+
+        checks = json.loads(checks_raw)
+        checks.update({
+            check_name: status
+        })
+        self.log.info(f"updated config check '{check_name}' : {status}")
+        self.set_store('config_checks', json.dumps(checks))
+        return 0, ""
+
     class ExtraCephConf(NamedTuple):
         conf: str
         last_modified: Optional[datetime.datetime]
@@ -1091,6 +1162,20 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         if not conf.last_modified:
             return False
         return conf.last_modified > dt
+
+    @orchestrator._cli_write_command(
+        'cephadm osd activate'
+    )
+    def _osd_activate(self, host: List[str]) -> HandleCommandResult:
+        """
+        Start OSD containers for existing OSDs
+        """
+
+        @forall_hosts
+        def run(h: str) -> str:
+            return self.osd_service.deploy_osd_daemons_for_existing_osds(h, 'osd')
+
+        return HandleCommandResult(stdout='\n'.join(run(host)))
 
     def _get_connection(self, host: str) -> Tuple['remoto.backends.BaseConnection',
                                                   'remoto.backends.LegacyModuleExecute']:
@@ -1141,8 +1226,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         daemon_type = daemon_name.split('.', 1)[0]  # type: ignore
         image: Optional[str] = None
         if daemon_type in CEPH_TYPES or \
-                daemon_type == 'nfs' or \
-                daemon_type == 'iscsi':
+                daemon_type in GATEWAY_TYPES:
             # get container image
             image = str(self.get_foreign_ceph_option(
                 utils.name_to_config_section(daemon_name),
@@ -1213,11 +1297,11 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         self.log.info('Added host %s' % spec.hostname)
         return "Added host '{}'".format(spec.hostname)
 
-    @trivial_completion
+    @handle_orch_error
     def add_host(self, spec: HostSpec) -> str:
         return self._add_host(spec)
 
-    @trivial_completion
+    @handle_orch_error
     def remove_host(self, host):
         # type: (str) -> str
         """
@@ -1232,7 +1316,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         self.log.info('Removed host %s' % host)
         return "Removed host '{}'".format(host)
 
-    @trivial_completion
+    @handle_orch_error
     def update_host_addr(self, host: str, addr: str) -> str:
         self.inventory.set_addr(host, addr)
         self._reset_con(host)
@@ -1240,7 +1324,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         self.log.info('Set host %s addr to %s' % (host, addr))
         return "Updated host '{}' addr to '{}'".format(host, addr)
 
-    @trivial_completion
+    @handle_orch_error
     def get_hosts(self):
         # type: () -> List[orchestrator.HostSpec]
         """
@@ -1251,13 +1335,13 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         """
         return list(self.inventory.all_specs())
 
-    @trivial_completion
+    @handle_orch_error
     def add_host_label(self, host: str, label: str) -> str:
         self.inventory.add_label(host, label)
         self.log.info('Added label %s to host %s' % (label, host))
         return 'Added label %s to host %s' % (label, host)
 
-    @trivial_completion
+    @handle_orch_error
     def remove_host_label(self, host: str, label: str) -> str:
         self.inventory.rm_label(host, label)
         self.log.info('Removed label %s to host %s' % (label, host))
@@ -1279,7 +1363,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         okay: bool = True
         for daemon_type, daemon_ids in daemon_map.items():
             r = self.cephadm_services[daemon_type_to_service(
-                daemon_type)].ok_to_stop(daemon_ids, force)
+                daemon_type)].ok_to_stop(daemon_ids, force=force)
             if r.retval:
                 okay = False
                 # collect error notifications so user can see every daemon causing host
@@ -1298,7 +1382,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                        + 'Note the following:\n\n' + '\n'.join(notifications))
         return 0, f'It is presumed safe to stop host {hostname}'
 
-    @trivial_completion
+    @handle_orch_error
     def host_ok_to_stop(self, hostname: str) -> str:
         if hostname not in self.cache.get_hosts():
             raise OrchestratorError(f'Cannot find host "{hostname}"')
@@ -1325,7 +1409,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             }
         self.set_health_checks(self.health_checks)
 
-    @trivial_completion
+    @handle_orch_error
     @host_exists()
     def enter_host_maintenance(self, hostname: str, force: bool = False) -> str:
         """ Attempt to place a cluster host in maintenance
@@ -1395,7 +1479,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
 
         return f"Ceph cluster {self._cluster_fsid} on {hostname} moved to maintenance"
 
-    @trivial_completion
+    @handle_orch_error
     @host_exists()
     def exit_host_maintenance(self, hostname: str) -> str:
         """Exit maintenance mode and return a host to an operational state
@@ -1464,7 +1548,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
 
         self._kick_serve_loop()
 
-    @trivial_completion
+    @handle_orch_error
     def describe_service(self, service_type: Optional[str] = None, service_name: Optional[str] = None,
                          refresh: bool = False) -> List[orchestrator.ServiceDescription]:
         if refresh:
@@ -1521,7 +1605,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                         osd_count += 1
                         sm[n].size = osd_count
                     else:
-                        sm[n].size = spec.placement.get_host_selection_size(
+                        sm[n].size = spec.placement.get_target_count(
                             self.inventory.all_specs())
 
                     sm[n].created = self.spec_store.spec_created[n]
@@ -1552,7 +1636,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                 continue
             sm[n] = orchestrator.ServiceDescription(
                 spec=spec,
-                size=spec.placement.get_host_selection_size(self.inventory.all_specs()),
+                size=spec.placement.get_target_count(self.inventory.all_specs()),
                 running=0,
                 events=self.events.get_for_service(spec.service_name()),
             )
@@ -1564,7 +1648,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                 sm[n].size = sm[n].size * 2
         return list(sm.values())
 
-    @trivial_completion
+    @handle_orch_error
     def list_daemons(self,
                      service_name: Optional[str] = None,
                      daemon_type: Optional[str] = None,
@@ -1589,7 +1673,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                 result.append(dd)
         return result
 
-    @trivial_completion
+    @handle_orch_error
     def service_action(self, action: str, service_name: str) -> List[str]:
         dds: List[DaemonDescription] = self.cache.get_daemons_by_service(service_name)
         if not dds:
@@ -1601,29 +1685,22 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             for dd in dds
         ]
 
-    def _daemon_action(self, daemon_type: str, daemon_id: str, host: str, action: str, image: Optional[str] = None) -> str:
-        dd = DaemonDescription(
-            hostname=host,
-            daemon_type=daemon_type,
-            daemon_id=daemon_id
-        )
-        daemon_spec: CephadmDaemonDeploySpec = CephadmDaemonDeploySpec(
-            host=host,
-            daemon_id=daemon_id,
-            daemon_type=daemon_type,
-            service_name=dd.service_name(),
-        )
+    def _daemon_action(self,
+                       daemon_spec: CephadmDaemonDeploySpec,
+                       action: str,
+                       image: Optional[str] = None) -> str:
+        self._daemon_action_set_image(action, image, daemon_spec.daemon_type,
+                                      daemon_spec.daemon_id)
 
-        self._daemon_action_set_image(action, image, daemon_type, daemon_id)
-
-        if action == 'redeploy' and self.daemon_is_self(daemon_type, daemon_id):
+        if action == 'redeploy' and self.daemon_is_self(daemon_spec.daemon_type,
+                                                        daemon_spec.daemon_id):
             self.mgr_service.fail_over()
             return ''  # unreachable
 
         if action == 'redeploy' or action == 'reconfig':
-            if daemon_type != 'osd':
+            if daemon_spec.daemon_type != 'osd':
                 daemon_spec = self.cephadm_services[daemon_type_to_service(
-                    daemon_type)].prepare_create(daemon_spec)
+                    daemon_spec.daemon_type)].prepare_create(daemon_spec)
             return CephadmServe(self)._create_daemon(daemon_spec, reconfig=(action == 'reconfig'))
 
         actions = {
@@ -1635,10 +1712,10 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         for a in actions[action]:
             try:
                 out, err, code = CephadmServe(self)._run_cephadm(
-                    host, name, 'unit',
+                    daemon_spec.host, name, 'unit',
                     ['--name', name, a])
             except Exception:
-                self.log.exception(f'`{host}: cephadm unit {name} {a}` failed')
+                self.log.exception(f'`{daemon_spec.host}: cephadm unit {name} {a}` failed')
         self.cache.invalidate_host_daemons(daemon_spec.host)
         msg = "{} {} from host '{}'".format(action, name, daemon_spec.host)
         self.events.for_daemon(name, 'INFO', msg)
@@ -1649,10 +1726,10 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             if action != 'redeploy':
                 raise OrchestratorError(
                     f'Cannot execute {action} with new image. `action` needs to be `redeploy`')
-            if daemon_type not in CEPH_TYPES:
+            if daemon_type not in CEPH_TYPES and daemon_type not in GATEWAY_TYPES:
                 raise OrchestratorError(
                     f'Cannot redeploy {daemon_type}.{daemon_id} with a new image: Supported '
-                    f'types are: {", ".join(CEPH_TYPES)}')
+                    f'types are: {", ".join(CEPH_TYPES + GATEWAY_TYPES)}')
 
             self.check_mon_command({
                 'prefix': 'config set',
@@ -1661,7 +1738,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                 'who': utils.name_to_config_section(daemon_type + '.' + daemon_id),
             })
 
-    @trivial_completion
+    @handle_orch_error
     def daemon_action(self, action: str, daemon_name: str, image: Optional[str] = None) -> str:
         d = self.cache.get_daemon(daemon_name)
         assert d.daemon_type is not None
@@ -1680,6 +1757,11 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
     def daemon_is_self(self, daemon_type: str, daemon_id: str) -> bool:
         return daemon_type == 'mgr' and daemon_id == self.get_mgr_id()
 
+    def get_active_mgr_digests(self) -> List[str]:
+        digests = self.mgr_service.get_active_daemon(
+            self.cache.get_daemons_by_type('mgr')).container_image_digests
+        return digests if digests else []
+
     def _schedule_daemon_action(self, daemon_name: str, action: str) -> str:
         dd = self.cache.get_daemon(daemon_name)
         assert dd.daemon_type is not None
@@ -1694,7 +1776,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         self._kick_serve_loop()
         return msg
 
-    @trivial_completion
+    @handle_orch_error
     def remove_daemons(self, names):
         # type: (List[str]) -> List[str]
         args = []
@@ -1704,10 +1786,10 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                     args.append((name, host))
         if not args:
             raise OrchestratorError('Unable to find daemon(s) %s' % (names))
-        self.log.info('Remove daemons %s' % [a[0] for a in args])
+        self.log.info('Remove daemons %s' % ' '.join([a[0] for a in args]))
         return self._remove_daemons(args)
 
-    @trivial_completion
+    @handle_orch_error
     def remove_service(self, service_name: str) -> str:
         self.log.info('Remove service %s' % service_name)
         self._trigger_preview_refresh(service_name=service_name)
@@ -1723,7 +1805,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             # must be idempotent: still a success.
             return f'Failed to remove service. <{service_name}> was not found.'
 
-    @trivial_completion
+    @handle_orch_error
     def get_inventory(self, host_filter: Optional[orchestrator.InventoryFilter] = None, refresh: bool = False) -> List[orchestrator.InventoryHost]:
         """
         Return the storage inventory of hosts matching the given filter.
@@ -1752,7 +1834,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                                                      inventory.Devices(dls)))
         return result
 
-    @trivial_completion
+    @handle_orch_error
     def zap_device(self, host: str, path: str) -> str:
         self.log.info('Zap device %s:%s' % (host, path))
         out, err, code = CephadmServe(self)._run_cephadm(
@@ -1764,7 +1846,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             raise OrchestratorError('Zap failed: %s' % '\n'.join(out + err))
         return '\n'.join(out + err)
 
-    @trivial_completion
+    @handle_orch_error
     def blink_device_light(self, ident_fault: str, on: bool, locs: List[orchestrator.DeviceLightLoc]) -> List[str]:
         """
         Blink a device light. Calling something like::
@@ -1843,7 +1925,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             self.log.info(f"Marking host: {host} for OSDSpec preview refresh.")
             self.cache.osdspec_previews_refresh_queue.append(host)
 
-    @trivial_completion
+    @handle_orch_error
     def apply_drivegroups(self, specs: List[DriveGroupSpec]) -> List[str]:
         """
         Deprecated. Please use `apply()` instead.
@@ -1852,7 +1934,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         """
         return [self._apply(spec) for spec in specs]
 
-    @trivial_completion
+    @handle_orch_error
     def create_osds(self, drive_group: DriveGroupSpec) -> str:
         return self.osd_service.create_from_spec(drive_group)
 
@@ -1909,8 +1991,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
 
     def _add_daemon(self,
                     daemon_type: str,
-                    spec: ServiceSpec,
-                    create_func: Callable[..., CephadmDaemonDeploySpec]) -> List[str]:
+                    spec: ServiceSpec) -> List[str]:
         """
         Add (and place) a daemon. Require explicit host placement.  Do not
         schedule, and do not apply the related scheduling limitations.
@@ -1926,16 +2007,14 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         count = spec.placement.count or len(spec.placement.hosts)
         daemons = self.cache.get_daemons_by_service(spec.service_name())
         return self._create_daemons(daemon_type, spec, daemons,
-                                    spec.placement.hosts, count,
-                                    create_func)
+                                    spec.placement.hosts, count)
 
     def _create_daemons(self,
                         daemon_type: str,
                         spec: ServiceSpec,
                         daemons: List[DaemonDescription],
                         hosts: List[HostPlacementSpec],
-                        count: int,
-                        create_func: Callable[..., CephadmDaemonDeploySpec]) -> List[str]:
+                        count: int) -> List[str]:
         if count > len(hosts):
             raise OrchestratorError('too few hosts: want %d, have %s' % (
                 count, hosts))
@@ -1953,8 +2032,11 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                 self.cephadm_services[service_type].config(spec, daemon_id)
                 did_config = True
 
+            port = spec.get_port_start()
             daemon_spec = self.cephadm_services[service_type].make_daemon_spec(
-                host, daemon_id, network, spec)
+                host, daemon_id, network, spec,
+                # NOTE: this does not consider port conflicts!
+                ports=[port] if port else None)
             self.log.debug('Placing %s.%s on host %s' % (
                 daemon_type, daemon_id, host))
             args.append(daemon_spec)
@@ -1969,24 +2051,21 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
 
         @ forall_hosts
         def create_func_map(*args: Any) -> str:
-            daemon_spec = create_func(*args)
+            daemon_spec = self.cephadm_services[daemon_type].prepare_create(*args)
             return CephadmServe(self)._create_daemon(daemon_spec)
 
         return create_func_map(args)
 
-    @trivial_completion
+    @handle_orch_error
+    def add_daemon(self, spec: ServiceSpec) -> List[str]:
+        ret: List[str] = []
+        for d_type in service_to_daemon_types(spec.service_type):
+            ret.extend(self._add_daemon(d_type, spec))
+        return ret
+
+    @handle_orch_error
     def apply_mon(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
-
-    @trivial_completion
-    def add_mon(self, spec):
-        # type: (ServiceSpec) -> List[str]
-        return self._add_daemon('mon', spec, self.mon_service.prepare_create)
-
-    @trivial_completion
-    def add_mgr(self, spec):
-        # type: (ServiceSpec) -> List[str]
-        return self._add_daemon('mgr', spec, self.mgr_service.prepare_create)
 
     def _apply(self, spec: GenericSpec) -> str:
         if spec.service_type == 'host':
@@ -2008,22 +2087,21 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         ha = HostAssignment(
             spec=spec,
             hosts=self._hosts_with_daemon_inventory(),
-            get_daemons_func=self.cache.get_daemons_by_service,
+            networks=self.cache.networks,
+            daemons=self.cache.get_daemons_by_service(spec.service_name()),
+            allow_colo=self.cephadm_services[spec.service_type].allow_colo(),
         )
         ha.validate()
-        hosts = ha.place()
-
-        add_daemon_hosts = ha.add_daemon_hosts(hosts)
-        remove_daemon_hosts = ha.remove_daemon_hosts(hosts)
+        hosts, to_add, to_remove = ha.place()
 
         return {
             'service_name': spec.service_name(),
             'service_type': spec.service_type,
-            'add': [hs.hostname for hs in add_daemon_hosts],
-            'remove': [d.hostname for d in remove_daemon_hosts]
+            'add': [hs.hostname for hs in to_add],
+            'remove': [d.hostname for d in to_remove]
         }
 
-    @trivial_completion
+    @handle_orch_error
     def plan(self, specs: Sequence[GenericSpec]) -> List:
         results = [{'warning': 'WARNING! Dry-Runs are snapshots of a certain point in time and are bound \n'
                                'to the current inventory setup. If any on these conditions changes, the \n'
@@ -2046,6 +2124,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
                 'ha-rgw': PlacementSpec(count=2),
                 'iscsi': PlacementSpec(count=1),
                 'rbd-mirror': PlacementSpec(count=2),
+                'cephfs-mirror': PlacementSpec(count=1),
                 'nfs': PlacementSpec(count=1),
                 'grafana': PlacementSpec(count=1),
                 'alertmanager': PlacementSpec(count=1),
@@ -2065,7 +2144,9 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         HostAssignment(
             spec=spec,
             hosts=self.inventory.all_specs(),  # All hosts, even those without daemon refresh
-            get_daemons_func=self.cache.get_daemons_by_service,
+            networks=self.cache.networks,
+            daemons=self.cache.get_daemons_by_service(spec.service_name()),
+            allow_colo=self.cephadm_services[spec.service_type].allow_colo(),
         ).validate()
 
         self.log.info('Saving service %s spec with placement %s' % (
@@ -2074,59 +2155,47 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         self._kick_serve_loop()
         return "Scheduled %s update..." % spec.service_name()
 
-    @trivial_completion
-    def apply(self, specs: Sequence[GenericSpec]) -> List[str]:
+    @handle_orch_error
+    def apply(self, specs: Sequence[GenericSpec], no_overwrite: bool = False) -> List[str]:
         results = []
         for spec in specs:
+            if no_overwrite:
+                if spec.service_type == 'host' and cast(HostSpec, spec).hostname in self.inventory:
+                    results.append('Skipped %s host spec. To change %s spec omit --no-overwrite flag'
+                                   % (cast(HostSpec, spec).hostname, spec.service_type))
+                    continue
+                elif cast(ServiceSpec, spec).service_name() in self.spec_store:
+                    results.append('Skipped %s service spec. To change %s spec omit --no-overwrite flag'
+                                   % (cast(ServiceSpec, spec).service_name(), cast(ServiceSpec, spec).service_name()))
+                    continue
             results.append(self._apply(spec))
         return results
 
-    @trivial_completion
+    @handle_orch_error
     def apply_mgr(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
-    def add_mds(self, spec: ServiceSpec) -> List[str]:
-        return self._add_daemon('mds', spec, self.mds_service.prepare_create)
-
-    @trivial_completion
+    @handle_orch_error
     def apply_mds(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
-    def add_rgw(self, spec: ServiceSpec) -> List[str]:
-        return self._add_daemon('rgw', spec, self.rgw_service.prepare_create)
-
-    @trivial_completion
+    @handle_orch_error
     def apply_rgw(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
+    @handle_orch_error
     def apply_ha_rgw(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
-    def add_iscsi(self, spec):
-        # type: (ServiceSpec) -> List[str]
-        return self._add_daemon('iscsi', spec, self.iscsi_service.prepare_create)
-
-    @trivial_completion
+    @handle_orch_error
     def apply_iscsi(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
-    def add_rbd_mirror(self, spec: ServiceSpec) -> List[str]:
-        return self._add_daemon('rbd-mirror', spec, self.rbd_mirror_service.prepare_create)
-
-    @trivial_completion
+    @handle_orch_error
     def apply_rbd_mirror(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
-    def add_nfs(self, spec: ServiceSpec) -> List[str]:
-        return self._add_daemon('nfs', spec, self.nfs_service.prepare_create)
-
-    @trivial_completion
+    @handle_orch_error
     def apply_nfs(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
@@ -2134,73 +2203,35 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         # type: () -> str
         return self.get('mgr_map').get('services', {}).get('dashboard', '')
 
-    @trivial_completion
-    def add_prometheus(self, spec: ServiceSpec) -> List[str]:
-        return self._add_daemon('prometheus', spec, self.prometheus_service.prepare_create)
-
-    @trivial_completion
+    @handle_orch_error
     def apply_prometheus(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
-    def add_node_exporter(self, spec):
-        # type: (ServiceSpec) -> List[str]
-        return self._add_daemon('node-exporter', spec,
-                                self.node_exporter_service.prepare_create)
-
-    @trivial_completion
+    @handle_orch_error
     def apply_node_exporter(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
-    def add_crash(self, spec):
-        # type: (ServiceSpec) -> List[str]
-        return self._add_daemon('crash', spec,
-                                self.crash_service.prepare_create)
-
-    @trivial_completion
+    @handle_orch_error
     def apply_crash(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
-    def add_grafana(self, spec):
-        # type: (ServiceSpec) -> List[str]
-        return self._add_daemon('grafana', spec, self.grafana_service.prepare_create)
-
-    @trivial_completion
+    @handle_orch_error
     def apply_grafana(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
-    def add_alertmanager(self, spec):
-        # type: (ServiceSpec) -> List[str]
-        return self._add_daemon('alertmanager', spec, self.alertmanager_service.prepare_create)
-
-    @trivial_completion
+    @handle_orch_error
     def apply_alertmanager(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
-    def add_container(self, spec: ServiceSpec) -> List[str]:
-        return self._add_daemon('container', spec,
-                                self.container_service.prepare_create)
-
-    @trivial_completion
+    @handle_orch_error
     def apply_container(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
-    def add_cephadm_exporter(self, spec):
-        # type: (ServiceSpec) -> List[str]
-        return self._add_daemon('cephadm-exporter',
-                                spec,
-                                self.cephadm_exporter_service.prepare_create)
-
-    @trivial_completion
+    @handle_orch_error
     def apply_cephadm_exporter(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
-    @trivial_completion
+    @handle_orch_error
     def upgrade_check(self, image: str, version: str) -> str:
         if self.inventory.get_host_with_state("maintenance"):
             raise OrchestratorError("check aborted - you have hosts in maintenance state")
@@ -2237,29 +2268,29 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
 
         return json.dumps(r, indent=4, sort_keys=True)
 
-    @trivial_completion
+    @handle_orch_error
     def upgrade_status(self) -> orchestrator.UpgradeStatusSpec:
         return self.upgrade.upgrade_status()
 
-    @trivial_completion
+    @handle_orch_error
     def upgrade_start(self, image: str, version: str) -> str:
         if self.inventory.get_host_with_state("maintenance"):
             raise OrchestratorError("upgrade aborted - you have host(s) in maintenance state")
         return self.upgrade.upgrade_start(image, version)
 
-    @trivial_completion
+    @handle_orch_error
     def upgrade_pause(self) -> str:
         return self.upgrade.upgrade_pause()
 
-    @trivial_completion
+    @handle_orch_error
     def upgrade_resume(self) -> str:
         return self.upgrade.upgrade_resume()
 
-    @trivial_completion
+    @handle_orch_error
     def upgrade_stop(self) -> str:
         return self.upgrade.upgrade_stop()
 
-    @trivial_completion
+    @handle_orch_error
     def remove_osds(self, osd_ids: List[str],
                     replace: bool = False,
                     force: bool = False) -> str:
@@ -2293,7 +2324,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         self._kick_serve_loop()
         return "Scheduled OSD(s) for removal"
 
-    @trivial_completion
+    @handle_orch_error
     def stop_remove_osds(self, osd_ids: List[str]) -> str:
         """
         Stops a `removal` process for a List of OSDs.
@@ -2303,14 +2334,14 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             try:
                 self.to_remove_osds.rm(OSD(osd_id=int(osd_id),
                                            remove_util=self.to_remove_osds.rm_util))
-            except (NotFoundError, KeyError):
+            except (NotFoundError, KeyError, ValueError):
                 return f'Unable to find OSD in the queue: {osd_id}'
 
         # trigger the serve loop to halt the removal
         self._kick_serve_loop()
         return "Stopped OSD(s) removal"
 
-    @trivial_completion
+    @handle_orch_error
     def remove_osds_status(self) -> List[OSD]:
         """
         The CLI call to retrieve an osd removal report

@@ -10,14 +10,15 @@ from prettytable import PrettyTable
 
 from ceph.deployment.inventory import Device
 from ceph.deployment.drive_group import DriveGroupSpec, DeviceSelection
-from ceph.deployment.service_spec import PlacementSpec, ServiceSpec
+from ceph.deployment.service_spec import PlacementSpec, ServiceSpec, \
+    ServiceSpecValidationError
 from ceph.utils import datetime_now
 
 from mgr_util import to_pretty_timedelta, format_dimless
 from mgr_module import MgrModule, HandleCommandResult, Option
 
 from ._interface import OrchestratorClientMixin, DeviceLightLoc, _cli_read_command, \
-    raise_if_exception, _cli_write_command, TrivialReadCompletion, OrchestratorError, \
+    raise_if_exception, _cli_write_command, OrchestratorError, \
     NoOrchestrator, OrchestratorValidationError, NFSServiceSpec, \
     RGWSpec, InventoryFilter, InventoryHost, HostSpec, CLICommandMeta, \
     ServiceDescription, DaemonDescription, IscsiServiceSpec, json_to_generic_spec, \
@@ -42,6 +43,7 @@ class ServiceType(enum.Enum):
     mon = 'mon'
     mgr = 'mgr'
     rbd_mirror = 'rbd-mirror'
+    cephfs_mirror = 'cephfs-mirror'
     crash = 'crash'
     alertmanager = 'alertmanager'
     grafana = 'grafana'
@@ -264,7 +266,6 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         self._save()
         self._refresh_health()
         completion = self.blink_device_light(fault_ident, True, locs)
-        self._orchestrator_wait([completion])
         return HandleCommandResult(stdout=str(completion.result))
 
     def light_off(self, fault_ident, devid, force):
@@ -277,7 +278,6 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
 
         try:
             completion = self.blink_device_light(fault_ident, False, locs)
-            self._orchestrator_wait([completion])
 
             if devid in getattr(self, fault_ident):
                 getattr(self, fault_ident).remove(devid)
@@ -334,7 +334,6 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
     def _remove_host(self, hostname: str) -> HandleCommandResult:
         """Remove a host"""
         completion = self.remove_host(hostname)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -342,7 +341,6 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
     def _update_set_addr(self, hostname: str, addr: str) -> HandleCommandResult:
         """Update a host address"""
         completion = self.update_host_addr(hostname, addr)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -350,10 +348,10 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
     def _get_hosts(self, format: Format = Format.plain) -> HandleCommandResult:
         """List hosts"""
         completion = self.get_hosts()
-        self._orchestrator_wait([completion])
-        raise_if_exception(completion)
+        hosts = raise_if_exception(completion)
+
         if format != Format.plain:
-            output = to_format(completion.result, format, many=True, cls=HostSpec)
+            output = to_format(hosts, format, many=True, cls=HostSpec)
         else:
             table = PrettyTable(
                 ['HOST', 'ADDR', 'LABELS', 'STATUS'],
@@ -361,7 +359,7 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
             table.align = 'l'
             table.left_padding_width = 0
             table.right_padding_width = 2
-            for host in sorted(completion.result, key=lambda h: h.hostname):
+            for host in sorted(hosts, key=lambda h: h.hostname):
                 table.add_row((host.hostname, host.addr, ' '.join(
                     host.labels), host.status.capitalize()))
             output = table.get_string()
@@ -371,7 +369,6 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
     def _host_label_add(self, hostname: str, label: str) -> HandleCommandResult:
         """Add a host label"""
         completion = self.add_host_label(hostname, label)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -379,7 +376,6 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
     def _host_label_rm(self, hostname: str, label: str) -> HandleCommandResult:
         """Remove a host label"""
         completion = self.remove_host_label(hostname, label)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -387,7 +383,6 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
     def _host_ok_to_stop(self, hostname: str) -> HandleCommandResult:
         """Check if the specified host can be safely stopped without reducing availability"""""
         completion = self.host_ok_to_stop(hostname)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -398,7 +393,6 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         Prepare a host for maintenance by shutting down and disabling all Ceph daemons (cephadm only)
         """
         completion = self.enter_host_maintenance(hostname, force=force)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
 
         return HandleCommandResult(stdout=completion.result_str())
@@ -410,7 +404,6 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         Return a host from maintenance, restarting all Ceph daemons (cephadm only)
         """
         completion = self.exit_host_maintenance(hostname)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
 
         return HandleCommandResult(stdout=completion.result_str())
@@ -433,11 +426,10 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
 
         completion = self.get_inventory(host_filter=nf, refresh=refresh)
 
-        self._orchestrator_wait([completion])
-        raise_if_exception(completion)
+        inv_hosts = raise_if_exception(completion)
 
         if format != Format.plain:
-            return HandleCommandResult(stdout=to_format(completion.result,
+            return HandleCommandResult(stdout=to_format(inv_hosts,
                                                         format,
                                                         many=True,
                                                         cls=InventoryHost))
@@ -467,7 +459,7 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
             table._align['SIZE'] = 'r'
             table.left_padding_width = 0
             table.right_padding_width = 2
-            for host_ in sorted(completion.result, key=lambda h: h.name):  # type: InventoryHost
+            for host_ in sorted(inv_hosts, key=lambda h: h.name):  # type: InventoryHost
                 for d in host_.devices.devices:  # type: Device
 
                     led_ident = 'N/A'
@@ -525,7 +517,6 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         if not force:
             raise OrchestratorError('must pass --force to PERMANENTLY ERASE DEVICE DATA')
         completion = self.zap_device(hostname, path)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -545,9 +536,8 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         completion = self.describe_service(service_type,
                                            service_name,
                                            refresh=refresh)
-        self._orchestrator_wait([completion])
-        raise_if_exception(completion)
-        services: List[ServiceDescription] = completion.result
+
+        services = raise_if_exception(completion)
 
         def ukn(s: Optional[str]) -> str:
             return '<unknown>' if s is None else s
@@ -567,15 +557,13 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
             now = datetime_now()
             table = PrettyTable(
                 ['NAME', 'RUNNING', 'REFRESHED', 'AGE',
-                 'PLACEMENT',
-                 'IMAGE NAME', 'IMAGE ID'
+                 'PLACEMENT', 'IMAGE ID'
                  ],
                 border=False)
             table.align['NAME'] = 'l'
             table.align['RUNNING'] = 'r'
             table.align['REFRESHED'] = 'l'
             table.align['AGE'] = 'l'
-            table.align['IMAGE NAME'] = 'l'
             table.align['IMAGE ID'] = 'l'
             table.align['PLACEMENT'] = 'l'
             table.left_padding_width = 0
@@ -598,7 +586,6 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
                     refreshed,
                     nice_delta(now, s.created),
                     pl,
-                    ukn(s.container_image_name),
                     ukn(s.container_image_id)[0:12],
                 ))
 
@@ -620,9 +607,8 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
                                        daemon_id=daemon_id,
                                        host=hostname,
                                        refresh=refresh)
-        self._orchestrator_wait([completion])
-        raise_if_exception(completion)
-        daemons: List[DaemonDescription] = completion.result
+
+        daemons = raise_if_exception(completion)
 
         def ukn(s: Optional[str]) -> str:
             return '<unknown>' if s is None else s
@@ -637,8 +623,9 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
 
             now = datetime_now()
             table = PrettyTable(
-                ['NAME', 'HOST', 'STATUS', 'REFRESHED', 'AGE',
-                 'VERSION', 'IMAGE NAME', 'IMAGE ID', 'CONTAINER ID'],
+                ['NAME', 'HOST', 'PORTS',
+                 'STATUS', 'REFRESHED', 'AGE',
+                 'VERSION', 'IMAGE ID', 'CONTAINER ID'],
                 border=False)
             table.align = 'l'
             table.left_padding_width = 0
@@ -659,11 +646,11 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
                 table.add_row((
                     s.name(),
                     ukn(s.hostname),
+                    s.get_port_summary() or '-',
                     status,
                     nice_delta(now, s.last_refresh, ' ago'),
                     nice_delta(now, s.created),
                     ukn(s.version),
-                    ukn(s.container_image_name),
                     ukn(s.container_image_id)[0:12],
                     ukn(s.container_id)))
 
@@ -687,6 +674,7 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
                    format: Format = Format.plain,
                    unmanaged: Optional[bool] = None,
                    dry_run: bool = False,
+                   no_overwrite: bool = False,
                    inbuf: Optional[str] = None) -> HandleCommandResult:
         """
         Create OSD daemon(s) using a drive group spec
@@ -757,7 +745,7 @@ Examples:
                     spec.preview_only = True
                 dg_specs.append(spec)
 
-            return self._apply_misc(dg_specs, dry_run, format)
+            return self._apply_misc(dg_specs, dry_run, format, no_overwrite)
 
         if all_available_devices:
             if unmanaged is None:
@@ -771,7 +759,7 @@ Examples:
                     preview_only=dry_run
                 )
             ]
-            return self._apply_misc(dg_specs, dry_run, format)
+            return self._apply_misc(dg_specs, dry_run, format, no_overwrite)
 
         return HandleCommandResult(-errno.EINVAL, stderr=usage)
 
@@ -797,7 +785,6 @@ Usage:
             return HandleCommandResult(-errno.EINVAL, stderr=msg)
 
         completion = self.create_osds(drive_group)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -808,7 +795,6 @@ Usage:
                       force: bool = False) -> HandleCommandResult:
         """Remove OSD services"""
         completion = self.remove_osds(svc_id, replace=replace, force=force)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -816,7 +802,6 @@ Usage:
     def _osd_rm_stop(self, svc_id: List[str]) -> HandleCommandResult:
         """Remove OSD services"""
         completion = self.stop_remove_osds(svc_id)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -824,7 +809,6 @@ Usage:
     def _osd_rm_status(self, format: Format = Format.plain) -> HandleCommandResult:
         """status of OSD removal operation"""
         completion = self.remove_osds_status()
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         report = completion.result
 
@@ -869,39 +853,7 @@ Usage:
         return self._daemon_add_misc(spec)
 
     def _daemon_add_misc(self, spec: ServiceSpec) -> HandleCommandResult:
-        daemon_type = ServiceType(spec.service_type)
-
-        if daemon_type == ServiceType.mon:
-            completion = self.add_mon(spec)
-        elif daemon_type == ServiceType.mgr:
-            completion = self.add_mgr(spec)
-        elif daemon_type == ServiceType.rbd_mirror:
-            completion = self.add_rbd_mirror(spec)
-        elif daemon_type == ServiceType.crash:
-            completion = self.add_crash(spec)
-        elif daemon_type == ServiceType.alertmanager:
-            completion = self.add_alertmanager(spec)
-        elif daemon_type == ServiceType.grafana:
-            completion = self.add_grafana(spec)
-        elif daemon_type == ServiceType.node_exporter:
-            completion = self.add_node_exporter(spec)
-        elif daemon_type == ServiceType.prometheus:
-            completion = self.add_prometheus(spec)
-        elif daemon_type == ServiceType.mds:
-            completion = self.add_mds(spec)
-        elif daemon_type == ServiceType.rgw:
-            completion = self.add_rgw(cast(RGWSpec, spec))
-        elif daemon_type == ServiceType.nfs:
-            completion = self.add_nfs(cast(NFSServiceSpec, spec))
-        elif daemon_type == ServiceType.iscsi:
-            completion = self.add_iscsi(cast(IscsiServiceSpec, spec))
-        elif daemon_type == ServiceType.cephadm_exporter:
-            completion = self.add_cephadm_exporter(spec)
-        else:
-            tp = type(daemon_type)
-            raise OrchestratorValidationError(f'unknown daemon type `{tp}`')
-
-        self._orchestrator_wait([completion])
+        completion = self.add_daemon(spec)
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -923,9 +875,7 @@ Usage:
 
     @_cli_write_command('orch daemon add rgw')
     def _rgw_add(self,
-                 realm_name: str,
-                 zone_name: str,
-                 subcluster: Optional[str] = None,
+                 svc_id: str,
                  port: Optional[int] = None,
                  ssl: bool = False,
                  placement: Optional[str] = None,
@@ -935,9 +885,7 @@ Usage:
             raise OrchestratorValidationError('unrecognized command -i; -h or --help for usage')
 
         spec = RGWSpec(
-            rgw_realm=realm_name,
-            rgw_zone=zone_name,
-            subcluster=subcluster,
+            service_id=svc_id,
             rgw_frontend_port=port,
             ssl=ssl,
             placement=PlacementSpec.from_string(placement),
@@ -989,7 +937,6 @@ Usage:
     def _service_action(self, action: ServiceAction, service_name: str) -> HandleCommandResult:
         """Start, stop, restart, redeploy, or reconfig an entire service (i.e. all daemons)"""
         completion = self.service_action(action.value, service_name)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -999,7 +946,6 @@ Usage:
         if '.' not in name:
             raise OrchestratorError('%s is not a valid daemon name' % name)
         completion = self.daemon_action(action.value, name)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -1009,7 +955,6 @@ Usage:
         if '.' not in name:
             raise OrchestratorError('%s is not a valid daemon name' % name)
         completion = self.daemon_action("redeploy", name, image=image)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -1026,7 +971,6 @@ Usage:
                 raise OrchestratorError(
                     'must pass --force to REMOVE daemon with potentially PRECIOUS DATA for %s' % name)
         completion = self.remove_daemons(names)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -1038,7 +982,6 @@ Usage:
         if service_name in ['mon', 'mgr'] and not force:
             raise OrchestratorError('The mon and mgr services cannot be removed')
         completion = self.remove_service(service_name)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -1049,6 +992,7 @@ Usage:
                    dry_run: bool = False,
                    format: Format = Format.plain,
                    unmanaged: bool = False,
+                   no_overwrite: bool = False,
                    inbuf: Optional[str] = None) -> HandleCommandResult:
         """Update the size or placement for a service or apply a large yaml spec"""
         usage = """Usage:
@@ -1062,6 +1006,15 @@ Usage:
             specs: List[Union[ServiceSpec, HostSpec]] = []
             for s in content:
                 spec = json_to_generic_spec(s)
+
+                # validate the config (we need MgrModule for that)
+                if isinstance(spec, ServiceSpec) and spec.config:
+                    for k, v in spec.config.items():
+                        try:
+                            self.get_foreign_ceph_option('mon', k)
+                        except KeyError:
+                            raise ServiceSpecValidationError(f'Invalid config option {k} in spec')
+
                 if dry_run and not isinstance(spec, HostSpec):
                     spec.preview_only = dry_run
                 specs.append(spec)
@@ -1071,16 +1024,14 @@ Usage:
                 raise OrchestratorValidationError(usage)
             specs = [ServiceSpec(service_type.value, placement=placementspec,
                                  unmanaged=unmanaged, preview_only=dry_run)]
-        return self._apply_misc(specs, dry_run, format)
+        return self._apply_misc(specs, dry_run, format, no_overwrite)
 
-    def _apply_misc(self, specs: Sequence[GenericSpec], dry_run: bool, format: Format) -> HandleCommandResult:
-        completion = self.apply(specs)
-        self._orchestrator_wait([completion])
+    def _apply_misc(self, specs: Sequence[GenericSpec], dry_run: bool, format: Format, no_overwrite: bool = False) -> HandleCommandResult:
+        completion = self.apply(specs, no_overwrite)
         raise_if_exception(completion)
         out = completion.result_str()
         if dry_run:
             completion = self.plan(specs)
-            self._orchestrator_wait([completion])
             raise_if_exception(completion)
             data = completion.result
             if format == Format.plain:
@@ -1096,6 +1047,7 @@ Usage:
                    dry_run: bool = False,
                    unmanaged: bool = False,
                    format: Format = Format.plain,
+                   no_overwrite: bool = False,
                    inbuf: Optional[str] = None) -> HandleCommandResult:
         """Update the number of MDS instances for the given fs_name"""
         if inbuf:
@@ -1107,28 +1059,29 @@ Usage:
             placement=PlacementSpec.from_string(placement),
             unmanaged=unmanaged,
             preview_only=dry_run)
-        return self._apply_misc([spec], dry_run, format)
+        return self._apply_misc([spec], dry_run, format, no_overwrite)
 
     @_cli_write_command('orch apply rgw')
     def _apply_rgw(self,
-                   realm_name: str,
-                   zone_name: str,
-                   subcluster: Optional[str] = None,
+                   svc_id: str,
+                   realm: Optional[str] = None,
+                   zone: Optional[str] = None,
                    port: Optional[int] = None,
                    ssl: bool = False,
                    placement: Optional[str] = None,
                    dry_run: bool = False,
                    format: Format = Format.plain,
                    unmanaged: bool = False,
+                   no_overwrite: bool = False,
                    inbuf: Optional[str] = None) -> HandleCommandResult:
         """Update the number of RGW instances for the given zone"""
         if inbuf:
             raise OrchestratorValidationError('unrecognized command -i; -h or --help for usage')
 
         spec = RGWSpec(
-            rgw_realm=realm_name,
-            rgw_zone=zone_name,
-            subcluster=subcluster,
+            service_id=svc_id,
+            rgw_realm=realm,
+            rgw_zone=zone,
             rgw_frontend_port=port,
             ssl=ssl,
             placement=PlacementSpec.from_string(placement),
@@ -1136,7 +1089,7 @@ Usage:
             preview_only=dry_run
         )
 
-        return self._apply_misc([spec], dry_run, format)
+        return self._apply_misc([spec], dry_run, format, no_overwrite)
 
     @_cli_write_command('orch apply nfs')
     def _apply_nfs(self,
@@ -1147,6 +1100,7 @@ Usage:
                    format: Format = Format.plain,
                    dry_run: bool = False,
                    unmanaged: bool = False,
+                   no_overwrite: bool = False,
                    inbuf: Optional[str] = None) -> HandleCommandResult:
         """Scale an NFS service"""
         if inbuf:
@@ -1161,7 +1115,7 @@ Usage:
             preview_only=dry_run
         )
 
-        return self._apply_misc([spec], dry_run, format)
+        return self._apply_misc([spec], dry_run, format, no_overwrite)
 
     @_cli_write_command('orch apply iscsi')
     def _apply_iscsi(self,
@@ -1173,13 +1127,14 @@ Usage:
                      unmanaged: bool = False,
                      dry_run: bool = False,
                      format: Format = Format.plain,
+                     no_overwrite: bool = False,
                      inbuf: Optional[str] = None) -> HandleCommandResult:
         """Scale an iSCSI service"""
         if inbuf:
             raise OrchestratorValidationError('unrecognized command -i; -h or --help for usage')
 
         spec = IscsiServiceSpec(
-            service_id='iscsi',
+            service_id=pool,
             pool=pool,
             api_user=api_user,
             api_password=api_password,
@@ -1189,7 +1144,7 @@ Usage:
             preview_only=dry_run
         )
 
-        return self._apply_misc([spec], dry_run, format)
+        return self._apply_misc([spec], dry_run, format, no_overwrite)
 
     @_cli_write_command('orch set backend')
     def _set_backend(self, module_name: Optional[str] = None) -> HandleCommandResult:
@@ -1313,9 +1268,6 @@ Usage:
         except OrchestratorError as e:
             assert e.args == ('hello, world',)
 
-        c = TrivialReadCompletion(result=True)
-        assert c.has_result
-
     @staticmethod
     def _upgrade_check_image_name(image: Optional[str], ceph_version: Optional[str]) -> None:
         """
@@ -1338,7 +1290,6 @@ Usage:
         """Check service versions vs available and target containers"""
         self._upgrade_check_image_name(image, ceph_version)
         completion = self.upgrade_check(image=image, version=ceph_version)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -1346,13 +1297,13 @@ Usage:
     def _upgrade_status(self) -> HandleCommandResult:
         """Check service versions vs available and target containers"""
         completion = self.upgrade_status()
-        self._orchestrator_wait([completion])
-        raise_if_exception(completion)
+        status = raise_if_exception(completion)
         r = {
-            'target_image': completion.result.target_image,
-            'in_progress': completion.result.in_progress,
-            'services_complete': completion.result.services_complete,
-            'message': completion.result.message,
+            'target_image': status.target_image,
+            'in_progress': status.in_progress,
+            'services_complete': status.services_complete,
+            'progress': status.progress,
+            'message': status.message,
         }
         out = json.dumps(r, indent=4)
         return HandleCommandResult(stdout=out)
@@ -1364,7 +1315,6 @@ Usage:
         """Initiate upgrade"""
         self._upgrade_check_image_name(image, ceph_version)
         completion = self.upgrade_start(image, ceph_version)
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -1372,7 +1322,6 @@ Usage:
     def _upgrade_pause(self) -> HandleCommandResult:
         """Pause an in-progress upgrade"""
         completion = self.upgrade_pause()
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -1380,7 +1329,6 @@ Usage:
     def _upgrade_resume(self) -> HandleCommandResult:
         """Resume paused upgrade"""
         completion = self.upgrade_resume()
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -1388,6 +1336,5 @@ Usage:
     def _upgrade_stop(self) -> HandleCommandResult:
         """Stop an in-progress upgrade"""
         completion = self.upgrade_stop()
-        self._orchestrator_wait([completion])
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())

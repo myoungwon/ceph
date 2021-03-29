@@ -881,6 +881,10 @@ void DaemonServer::_check_offlines_pgs(
   for (const auto& q : pgmap.pg_stat) {
     set<int32_t> pg_acting;  // net acting sets (with no missing if degraded)
     bool found = false;
+    if (q.second.state == 0) {
+      report->unknown.insert(q.first);
+      continue;
+    }
     if (q.second.state & PG_STATE_DEGRADED) {
       for (auto& anm : q.second.avail_no_missing) {
 	if (osds.count(anm.osd)) {
@@ -931,7 +935,9 @@ void DaemonServer::_check_offlines_pgs(
     }
   }
   dout(20) << osds << " -> " << report->ok.size() << " ok, "
-	   << report->not_ok.size() << " not ok" << dendl;
+	   << report->not_ok.size() << " not ok, "
+	   << report->unknown.size() << " unknown"
+	   << dendl;
 }
 
 void DaemonServer::_maximize_ok_to_stop_set(
@@ -1229,20 +1235,13 @@ bool DaemonServer::_handle_command(
       return true;
     }
     for (auto& con : p->second) {
-      if (HAVE_FEATURE(con->get_features(), SERVER_MIMIC)) {
-	vector<spg_t> pgs = { spgid };
-	con->send_message(new MOSDScrub2(monc->get_fsid(),
-					 epoch,
-					 pgs,
-					 scrubop == "repair",
-					 scrubop == "deep-scrub"));
-      } else {
-	vector<pg_t> pgs = { pgid };
-	con->send_message(new MOSDScrub(monc->get_fsid(),
-					pgs,
-					scrubop == "repair",
-					scrubop == "deep-scrub"));
-      }
+      assert(HAVE_FEATURE(con->get_features(), SERVER_OCTOPUS));
+      vector<spg_t> pgs = { spgid };
+      con->send_message(new MOSDScrub2(monc->get_fsid(),
+				       epoch,
+				       pgs,
+				       scrubop == "repair",
+				       scrubop == "deep-scrub"));
     }
     ss << "instructing pg " << spgid << " on osd." << acting_primary
        << " to " << scrubop;
@@ -1744,28 +1743,23 @@ bool DaemonServer::_handle_command(
     }
     offline_pg_report out_report;
     cluster_state.with_osdmap_and_pgmap([&](const OSDMap& osdmap, const PGMap& pg_map) {
-	if (pg_map.num_pg_unknown > 0) {
-	  ss << pg_map.num_pg_unknown << " pgs have unknown state; "
-	     << "cannot draw any conclusions";
-	  r = -EAGAIN;
-	  return;
-	}
 	_maximize_ok_to_stop_set(
 	  osds, max, osdmap, pg_map,
 	  &out_report);
       });
-    if (r < 0) {
-      cmdctx->reply(r, ss);
-      return true;
-    }
     if (!f) {
       f.reset(Formatter::create("json"));
     }
     f->dump_object("ok_to_stop", out_report);
     f->flush(cmdctx->odata);
     cmdctx->odata.append("\n");
+    if (!out_report.unknown.empty()) {
+      ss << out_report.unknown.size() << " pgs have unknown state; "
+	 << "cannot draw any conclusions";
+      cmdctx->reply(-EAGAIN, ss);
+    }
     if (!out_report.ok_to_stop()) {
-      ss << "unsafe to stop osd(s)";
+      ss << "unsafe to stop osd(s) at this time (" << out_report.not_ok.size() << " PGs are or would become offline)";
       cmdctx->reply(-EBUSY, ss);
     } else {
       cmdctx->reply(0, ss);
@@ -2531,6 +2525,7 @@ void DaemonServer::send_report()
   }
 
   auto m = ceph::make_message<MMonMgrReport>();
+  m->gid = monc->get_global_id();
   py_modules.get_health_checks(&m->health_checks);
   py_modules.get_progress_events(&m->progress_events);
 

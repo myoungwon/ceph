@@ -31,13 +31,8 @@ BtreeLBAManager::mkfs_ret BtreeLBAManager::mkfs(
     lba_node_meta_t meta{0, L_ADDR_MAX, 1};
     root_leaf->set_meta(meta);
     root_leaf->pin.set_range(meta);
-    croot->get_root() =
-      root_t{
-        1,
-        0,
-        root_leaf->get_paddr(),
-        make_record_relative_paddr(0),
-        L_ADDR_NULL};
+    croot->get_root().lba_root =
+      lba_root_t{root_leaf->get_paddr(), 1u};
     return mkfs_ertr::now();
   }).handle_error(
     mkfs_ertr::pass_further{},
@@ -53,13 +48,13 @@ BtreeLBAManager::get_root(Transaction &t)
   return cache.get_root(t).safe_then([this, &t](auto croot) {
     logger().debug(
       "BtreeLBAManager::get_root: reading root at {} depth {}",
-      paddr_t{croot->get_root().lba_root_addr},
-      unsigned(croot->get_root().lba_depth));
+      paddr_t{croot->get_root().lba_root.get_location()},
+      croot->get_root().lba_root.get_depth());
     return get_lba_btree_extent(
       get_context(t),
       croot,
-      croot->get_root().lba_depth,
-      croot->get_root().lba_root_addr,
+      croot->get_root().lba_root.get_depth(),
+      croot->get_root().lba_root.get_location(),
       paddr_t());
   });
 }
@@ -350,6 +345,19 @@ BtreeLBAManager::rewrite_extent_ret BtreeLBAManager::rewrite_extent(
   Transaction &t,
   CachedExtentRef extent)
 {
+  if (extent->has_been_invalidated()) {
+    logger().debug(
+      "BTreeLBAManager::rewrite_extent: {} is invalid, returning eagain",
+      *extent
+    );
+    return crimson::ct_error::eagain::make();
+  }
+
+  logger().debug(
+    "{}: rewriting {}", 
+    __func__,
+    *extent);
+
   if (extent->is_logical()) {
     auto lextent = extent->cast<LogicalCachedExtent>();
     cache.retire_extent(t, extent);
@@ -379,7 +387,12 @@ BtreeLBAManager::rewrite_extent_ret BtreeLBAManager::rewrite_extent(
 	ceph_assert(in.paddr == prev_addr);
 	ret.paddr = addr;
 	return ret;
-      }).safe_then([nlextent](auto e) {}).handle_error(
+      }).safe_then(
+	[nlextent](auto) {},
+	crimson::ct_error::enoent::handle([extent]() -> rewrite_extent_ret {
+	  ceph_assert(extent->has_been_invalidated());
+	  return crimson::ct_error::eagain::make();
+	}),
 	rewrite_extent_ertr::pass_further{},
         /* ENOENT in particular should be impossible */
 	crimson::ct_error::assert_all{
@@ -411,13 +424,23 @@ BtreeLBAManager::rewrite_extent_ret BtreeLBAManager::rewrite_extent(
     nlba_extent->resolve_relative_addrs(
       make_record_relative_paddr(0) - nlba_extent->get_paddr());
 
+    logger().debug(
+      "{}: rewriting {} into {}",
+      __func__,
+      *lba_extent,
+      *nlba_extent);
+
     return update_internal_mapping(
       t,
       nlba_extent->get_node_meta().depth,
       nlba_extent->get_node_meta().begin,
       nlba_extent->get_paddr()).safe_then(
 	[](auto) {},
-	rewrite_extent_ertr::pass_further {},
+	crimson::ct_error::enoent::handle([extent]() -> rewrite_extent_ret {
+	  ceph_assert(extent->has_been_invalidated());
+	  return crimson::ct_error::eagain::make();
+	}),
+	rewrite_extent_ertr::pass_further{},
 	crimson::ct_error::assert_all{
 	  "Invalid error in BtreeLBAManager::rewrite_extent update_internal_mapping"
 	});
@@ -497,8 +520,10 @@ BtreeLBAManager::insert_mapping_ret BtreeLBAManager::insert_mapping(
 	  L_ADDR_MIN,
 	  root->get_paddr(),
 	  nullptr);
-	croot->get_root().lba_root_addr = nroot->get_paddr();
-	croot->get_root().lba_depth = root->get_node_meta().depth + 1;
+	croot->get_root().lba_root = lba_root_t{
+	  nroot->get_paddr(),
+	  root->get_node_meta().depth + 1
+	};
 	return nroot->split_entry(
 	  get_context(t),
 	  laddr, nroot->begin(), root);
@@ -525,7 +550,11 @@ BtreeLBAManager::update_refcount_ret BtreeLBAManager::update_refcount(
       out.refcount += delta;
       return out;
     }).safe_then([](auto result) {
-      return ref_update_result_t{result.refcount, result.paddr};
+      return ref_update_result_t{
+	result.refcount,
+	result.paddr,
+	result.len
+       };
     });
 }
 
@@ -551,7 +580,7 @@ BtreeLBAManager::update_internal_mapping(
   paddr_t paddr)
 {
   return cache.get_root(t).safe_then([=, &t](RootBlockRef croot) {
-    if (depth == croot->get_root().lba_depth) {
+    if (depth == croot->get_root().lba_root.get_depth()) {
       logger().debug(
 	"update_internal_mapping: updating lba root to: {}->{}",
 	laddr,
@@ -561,8 +590,8 @@ BtreeLBAManager::update_internal_mapping(
 	croot = mut_croot->cast<RootBlock>();
       }
       ceph_assert(laddr == 0);
-      auto old_paddr = croot->get_root().lba_root_addr;
-      croot->get_root().lba_root_addr = paddr;
+      auto old_paddr = croot->get_root().lba_root.get_location();
+      croot->get_root().lba_root.set_location(paddr);
       return update_internal_mapping_ret(
 	update_internal_mapping_ertr::ready_future_marker{},
 	old_paddr);
@@ -575,8 +604,8 @@ BtreeLBAManager::update_internal_mapping(
       return get_lba_btree_extent(
 	get_context(t),
 	croot,
-	croot->get_root().lba_depth,
-	croot->get_root().lba_root_addr,
+	croot->get_root().lba_root.get_depth(),
+	croot->get_root().lba_root.get_location(),
 	paddr_t()).safe_then([=, &t](LBANodeRef broot) {
 	  return broot->mutate_internal_address(
 	    get_context(t),

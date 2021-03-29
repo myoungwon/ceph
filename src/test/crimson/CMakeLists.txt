@@ -4,7 +4,8 @@ add_executable(unittest-crimson-backfill
   ${PROJECT_SOURCE_DIR}/src/auth/Crypto.cc
   ${PROJECT_SOURCE_DIR}/src/crimson/osd/backfill_state.cc
   ${PROJECT_SOURCE_DIR}/src/osd/recovery_types.cc)
-add_ceph_unittest(unittest-crimson-backfill)
+add_ceph_unittest(unittest-crimson-backfill
+  unittest-crimson-backfill --memory 256M --smp 1)
 target_link_libraries(unittest-crimson-backfill crimson GTest::Main)
 
 add_executable(unittest-seastar-buffer
@@ -15,7 +16,7 @@ target_link_libraries(unittest-seastar-buffer crimson)
 
 add_executable(unittest-seastar-denc
   test_denc.cc)
-add_ceph_unittest(unittest-seastar-denc)
+add_ceph_unittest(unittest-seastar-denc --memory 256M --smp 1)
 target_link_libraries(unittest-seastar-denc crimson GTest::Main)
 
 add_executable(unittest-seastar-socket test_socket.cc)
@@ -50,7 +51,7 @@ target_link_libraries(unittest-seastar-alienstore-thread-pool
 add_executable(unittest-seastar-config
   test_config.cc)
 add_ceph_test(unittest-seastar-config
-  unittest-seastar-config --memory 256M)
+  unittest-seastar-config --memory 256M --smp 4)
 target_link_libraries(unittest-seastar-config crimson)
 
 add_executable(unittest-seastar-monc
@@ -72,6 +73,15 @@ add_executable(unittest-fixed-kv-node-layout
   test_fixed_kv_node_layout.cc)
 add_ceph_unittest(unittest-fixed-kv-node-layout)
 
+add_executable(unittest_interruptible_future
+  test_interruptible_future.cc
+  gtest_seastar.cc)
+add_ceph_unittest(unittest_interruptible_future
+  unittest_interruptible_future --memory 256M --smp 1)
+target_link_libraries(
+  unittest_interruptible_future
+  crimson-common)
+
 add_subdirectory(seastore)
 
 add_library(crimson-gtest STATIC
@@ -84,4 +94,5 @@ add_executable(unittest-seastar-errorator
 target_link_libraries(
   unittest-seastar-errorator
   crimson::gtest)
-add_ceph_unittest(unittest-seastar-errorator)
+add_ceph_unittest(unittest-seastar-errorator
+  unittest-seastar-errorator --memory 256M --smp 1)
