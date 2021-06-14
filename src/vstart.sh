@@ -141,6 +141,7 @@ extra_conf=""
 new=0
 standby=0
 debug=0
+trace=0
 ip=""
 nodaemon=0
 redirect=0
@@ -197,6 +198,7 @@ read -r -d '' usage <<EOF || true
 usage: $0 [option]... \nex: MON=3 OSD=1 MDS=1 MGR=1 RGW=1 NFS=1 $0 -n -d
 options:
 	-d, --debug
+        -t, --trace
 	-s, --standby_mds: Generate standby-replay MDS for each active
 	-l, --localhost: use localhost instead of hostname
 	-i <ip>: bind to specific ip
@@ -268,6 +270,9 @@ while [ $# -ge 1 ]; do
 case $1 in
     -d | --debug)
         debug=1
+        ;;
+    -t | --trace)
+        trace=1
         ;;
     -s | --standby_mds)
         standby=1
@@ -910,6 +915,9 @@ start_osd() {
 	    if [ "$debug" -ne 0 ]; then
 		extra_seastar_args+=" --debug"
 	    fi
+            if [ "$trace" -ne 0]; then
+                extra_seastar_args+=" --trace"
+            fi
 	fi
 	if [ "$new" -eq 1 -o $inc_osd_num -gt 0 ]; then
             wconf <<EOF
