@@ -56,6 +56,12 @@ public:
     >;
   virtual write_ertr::future<> write(uint64_t addr, bufferptr &buf) = 0;
 
+  using mount_ertr = crimson::errorator<
+    crimson::ct_error::input_output_error,
+    crimson::ct_error::invarg,
+    crimson::ct_error::enoent>;
+  virtual mount_ertr::future<> mount() = 0;
+
   using open_ertr = crimson::errorator<
     crimson::ct_error::input_output_error,
     crimson::ct_error::invarg,

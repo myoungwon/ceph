@@ -184,6 +184,7 @@ public:
   mkfs_ertr::future<> mkfs(mkfs_config_t) final;
   read_ertr::future<> read(uint64_t addr, bufferptr &buffer) final;
   write_ertr::future<> write(uint64_t addr, bufferptr &buf) final;
+  mount_ertr::future<> mount() final;
   open_ertr::future<> open(const std::string &path, blk_paddr_t start) final;
   close_ertr::future<> close() final;
 

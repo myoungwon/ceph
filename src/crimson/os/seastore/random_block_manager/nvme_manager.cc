@@ -462,6 +462,10 @@ NVMeManager::write_ertr::future<> NVMeManager::sync_allocation(
     });
   });
 }
+NVMeManager::mount_ertr::future<> NVMeManager::mount()
+{
+  return open(path, super.start);
+}
 
 NVMeManager::open_ertr::future<> NVMeManager::open(
     const std::string &path, blk_paddr_t addr)
