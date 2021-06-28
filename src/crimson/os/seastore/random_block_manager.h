@@ -78,7 +78,9 @@ public:
     crimson::ct_error::invarg,
     crimson::ct_error::enospc
     >;
-  virtual allocate_ertr::future<> alloc_extent(Transaction &t, size_t size) = 0; // allocator, return blocks
+  using allocate_ret = allocate_ertr::future<blk_paddr_t>;
+  // allocator, return start addr of allocated blocks
+  virtual allocate_ret alloc_extent(Transaction &t, size_t size) = 0;
 
   using free_block_ertr = crimson::errorator<
     crimson::ct_error::input_output_error,
@@ -100,6 +102,14 @@ public:
     crimson::ct_error::erange
     >;
   virtual write_ertr::future<> complete_allocation(Transaction &t) = 0;
+
+  using submit_record_ertr = crimson::errorator<
+    crimson::ct_error::erange,
+    crimson::ct_error::input_output_error
+    >;
+  virtual submit_record_ertr::future<> submit_record(
+    record_t &record,
+    OrderingHandle &handle) = 0;
 
   virtual size_t get_size() const = 0;
   virtual size_t get_block_size() const = 0;

@@ -36,7 +36,7 @@ struct seastore_meta_t {
 };
 
 // Identifies segment location on disk, see SegmentManager,
-using segment_id_t = uint32_t;
+using segment_id_t = uint64_t;
 constexpr segment_id_t MAX_SEG_ID =
   std::numeric_limits<segment_id_t>::max();
 constexpr segment_id_t NULL_SEG_ID =
@@ -81,6 +81,12 @@ using record_delta_idx_t = uint32_t;
 constexpr record_delta_idx_t NULL_DELTA_IDX =
   std::numeric_limits<record_delta_idx_t>::max();
 
+enum class store_types_t : uint8_t {
+  JOURNAL = 0,
+  CBJOURNAL = 1,
+  RBM = 2
+};
+
 /**
  * paddr_t
  *
@@ -101,6 +107,7 @@ constexpr record_delta_idx_t NULL_DELTA_IDX =
 struct paddr_t {
   segment_id_t segment = NULL_SEG_ID;
   segment_off_t offset = NULL_SEG_OFF;
+  store_types_t s_type = store_types_t::JOURNAL;
 
   bool is_relative() const {
     return segment == RECORD_REL_SEG_ID ||
@@ -217,7 +224,7 @@ constexpr paddr_t zero_paddr() {
 }
 
 struct __attribute((packed)) paddr_le_t {
-  ceph_le32 segment = ceph_le32(NULL_SEG_ID);
+  ceph_le64 segment = ceph_le64(NULL_SEG_ID);
   ceph_les32 offset = ceph_les32(NULL_SEG_OFF);
 
   paddr_le_t() = default;
@@ -365,6 +372,8 @@ struct extent_t {
   extent_types_t type;  ///< type of extent
   laddr_t addr;         ///< laddr of extent (L_ADDR_NULL for non-logical)
   ceph::bufferlist bl;  ///< payload, bl.length() == length, aligned
+  paddr_t rb_addr;
+  store_types_t s_type = store_types_t::JOURNAL;
 };
 
 using extent_version_t = uint32_t;
@@ -380,6 +389,8 @@ struct delta_info_t {
   segment_off_t length = NULL_SEG_OFF;         ///< extent length
   extent_version_t pversion;                   ///< prior version
   ceph::bufferlist bl;                         ///< payload
+  paddr_t rb_addr;
+  store_types_t s_type = store_types_t::JOURNAL;
 
   DENC(delta_info_t, v, p) {
     DENC_START(1, 1, p);
@@ -391,6 +402,8 @@ struct delta_info_t {
     denc(v.length, p);
     denc(v.pversion, p);
     denc(v.bl, p);
+    denc(v.rb_addr, p);
+    denc(v.s_type, p);
     DENC_FINISH(p);
   }
 
@@ -710,6 +723,8 @@ struct rbm_alloc_delta_t {
   interval_set<blk_id_t> alloc_blk_ids;
   op_types_t op;
 };
+
+constexpr uint32_t rbm_min_write = 8192;
 
 }
 

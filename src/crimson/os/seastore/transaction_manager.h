@@ -537,6 +537,9 @@ public:
     return segment_cleaner->stat();
   }
 
+  submit_transaction_direct_ret submit_transaction_hybrid(TransactionRef t);
+  submit_transaction_direct_ret submit_transaction_journal(TransactionRef t);
+
   ~TransactionManager();
 
 private:

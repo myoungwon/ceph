@@ -202,7 +202,7 @@ public:
    * TODO: multiple allocation
    *
    */
-  allocate_ertr::future<> alloc_extent(
+  allocate_ret alloc_extent(
       Transaction &t, size_t size) final; // allocator, return blocks
 
   /*
@@ -360,6 +360,9 @@ public:
       std::vector<rbm_alloc_delta_t>& alloc_blocks);
   free_block_ertr::future<> add_free_extent(
       std::vector<rbm_alloc_delta_t>& v, blk_paddr_t from, size_t len);
+  submit_record_ertr::future<> submit_record(
+      record_t &record,
+      OrderingHandle &handle) final;
 
 private:
   /*

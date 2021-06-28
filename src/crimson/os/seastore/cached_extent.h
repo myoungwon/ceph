@@ -285,10 +285,18 @@ public:
 
   virtual ~CachedExtent();
 
+  bool is_rb() const { return for_rb; }
+  bool is_rb_small() const {
+    return (ptr.length() < rbm_min_write);
+  }
+  paddr_t get_rbm_addr() const { return rb_addr; }
+  paddr_t get_cbj_addr() const { return cbj_addr; }
+
 private:
   friend struct paddr_cmp;
   friend struct ref_paddr_cmp;
   friend class ExtentIndex;
+  friend class TransactionManager;
 
   /// Pointer to containing index (or null)
   ExtentIndex *parent_index = nullptr;
@@ -333,6 +341,12 @@ private:
 
   /// used to wait while in-progress commit completes
   std::optional<seastar::shared_promise<>> io_wait_promise;
+
+  /// block allocated from randomblockmanager
+  bool for_rb = false;
+  paddr_t rb_addr; // randomblock location
+  paddr_t cbj_addr; // circularboundedjournal location
+
   void set_io_wait() {
     ceph_assert(!io_wait_promise);
     io_wait_promise = seastar::shared_promise<>();
@@ -389,6 +403,10 @@ protected:
   }
 
   void set_paddr(paddr_t offset) { poffset = offset; }
+
+  void set_rb() { for_rb = true; }
+  void set_rbm_addr(paddr_t addr) { rb_addr = addr; }
+  void set_cbj_addr(paddr_t addr) { cbj_addr = addr; }
 
   /**
    * maybe_generate_relative

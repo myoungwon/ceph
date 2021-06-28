@@ -47,7 +47,7 @@ public:
     return segment_manager->open(id);
   }
 
-  allocate_ertr::future<> allocate(
+  allocate_ertr::future<blk_paddr_t> allocate(
     Transaction &transaction,
     size_t size) {
     return rbm_manager->alloc_extent(transaction, size);
@@ -147,6 +147,23 @@ public:
     } else {
       ceph_abort();
     }
+  }
+  using submit_record_ertr = crimson::errorator<
+    crimson::ct_error::erange,
+    crimson::ct_error::input_output_error
+	  >;
+  submit_record_ertr::future<> submit_record(
+	  record_t &record,
+	  OrderingHandle &handle) {
+    return rbm_manager->submit_record(record, handle);
+  }
+
+  bool is_journal() {
+    return segment_manager != nullptr;
+  }
+
+  bool is_rbm() {
+    return rbm_manager != nullptr;
   }
 
   ExtentAllocator(SegmentManager *segment_manager) :

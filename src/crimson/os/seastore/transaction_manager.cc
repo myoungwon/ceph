@@ -224,42 +224,89 @@ TransactionManager::submit_transaction(
 }
 
 TransactionManager::submit_transaction_direct_ret
-TransactionManager::submit_transaction_direct(
+TransactionManager::submit_transaction_hybrid(
   TransactionRef t)
 {
-  LOG_PREFIX(TransactionManager::submit_transaction_direct);
-  DEBUGT("about to prepare", *t);
+  LOG_PREFIX(TransactionManager::submit_transaction_hybrid);
   auto &tref = *t;
-  return tref.handle.enter(write_pipeline.prepare
-  ).then([this, FNAME, &tref]() mutable
-	 -> submit_transaction_ertr::future<> {
-    auto record = cache->try_construct_record(tref);
-    if (!record) {
-      DEBUGT("conflict detected, returning eagain.", tref);
-      return crimson::ct_error::eagain::make();
+  auto record = cache->try_construct_record(tref);
+  if (!record) {
+    DEBUGT("conflict detected, returning eagain.", tref);
+    return crimson::ct_error::eagain::make();
+  }
+
+  DEBUGT("about to submit to rbm", tref);
+
+  /*
+   * After try_construct_record(), record_t contains both extents and deltas.
+   * Among them, extents presumably contains large writes, so rbm handles such
+   * extents before journaling records.
+   *
+   * rbm will write records if transaction includes large writes,
+   * otherwise it does nothing.
+   *
+   * Once the writes to rbm is complete, other small writes including metadata
+   * updates will be appended to journal (CircularBoundedJournal here).
+   */
+  return extent_allocator.submit_record(*record, tref.handle
+  ).safe_then([this, FNAME, record, &tref]() mutable {
+    vector<pair<paddr_t, bufferlist>> to_rbm;
+    // The following code is added to store items which will be written to rbm
+    // before submit_record.
+    // This will be deleted after CircularBoundedJournal is in place.
+    for (const auto &i: record->extents) {
+      if (i.s_type == store_types_t::CBJOURNAL) {
+	to_rbm.push_back(make_pair(i.rb_addr, i.bl));
+      }
     }
-
-    DEBUGT("about to submit to journal", tref);
-
+    for (const auto &i: record->deltas) {
+      if (i.s_type == store_types_t::CBJOURNAL) {
+	to_rbm.push_back(make_pair(i.rb_addr, i.bl));
+      }
+    }
     return journal->submit_record(std::move(*record), tref.handle
-    ).safe_then([this, FNAME, &tref](auto p) mutable {
+    ).safe_then([this, FNAME, &tref, &to_rbm](auto p) mutable {
       auto [addr, journal_seq] = p;
-      DEBUGT("journal commit to {} seq {}", tref, addr, journal_seq);
-      segment_cleaner->set_journal_head(journal_seq);
-      cache->complete_commit(tref, addr, journal_seq, segment_cleaner.get());
+      cache->complete_commit(tref, addr, journal_seq, nullptr);
       return lba_manager->complete_transaction(tref).safe_then(
-	[&tref, journal_seq=journal_seq, this] {
-	segment_cleaner->update_journal_tail_target(
-	  cache->get_oldest_dirty_from().value_or(journal_seq));
-	auto to_release = tref.get_segment_to_release();
-	if (to_release != NULL_SEG_ID) {
-	  return extent_allocator.release(to_release
-	  ).safe_then([this, to_release] {
-	    segment_cleaner->mark_segment_released(to_release);
+	[&tref, this, &to_rbm] {
+	/*
+	 * TODO: move data from journal to rbm
+	 * Due to lack of implemenation for CircularBoundedJournal,
+	 * we just write records to rbm directly here.
+	 */
+	return crimson::do_for_each(to_rbm.begin(), to_rbm.end(),
+	  [&tref, this] (auto &val) {
+	  //auto addr = paddr_t{0, (segment_off_t)val.first.paddr};
+	  // TODO: need to find CacheExtentRef via rb_addr_t, not paddr_t
+	  return cache->get_extent_if_cached(tref, val.first
+	  ).then([&tref, &val, this](CachedExtentRef extent) mutable {
+	    ceph_assert(extent);
+	    auto ref = extent->cast<LogicalCachedExtent>();
+	    paddr_t rbm_addr = ref->get_rbm_addr();
+	    auto bptr =
+	      bufferptr(ceph::buffer::create_page_aligned(val.second.length()));
+	    auto iter = val.second.cbegin();
+	    iter.copy(val.second.length(), bptr.c_str());
+	    auto rbm_abs_addr = rbm_addr.segment * extent_allocator.get_block_size() +
+			    rbm_addr.offset;
+	    return extent_allocator.write(rbm_abs_addr, bptr
+	    ).safe_then([&tref, &ref, extent, rbm_addr, this]() {
+	      // set rbm address
+	      extent->set_rbm_addr(rbm_addr);
+	      /*
+	       * What we should do here is only updating physical address.
+	       * But, rewrite_extent creates another copy of CachedExtent.
+	       * How about exporting update_mapping to public to avoid
+	       * unnecessary copy overhead?
+	       */
+	      return lba_manager->rewrite_extent(tref, extent
+	      ).safe_then([]() {
+		return SegmentManager::release_ertr::now();
+	      });
+	    });
 	  });
-	} else {
-	  return ExtentAllocator::release_ertr::now();
-	}
+	});
       });
     }).safe_then([&tref] {
       return tref.handle.complete();
@@ -268,9 +315,76 @@ TransactionManager::submit_transaction_direct(
       crimson::ct_error::all_same_way([](auto e) {
 	ceph_assert(0 == "Hit error submitting to journal");
       }));
-    }).finally([t=std::move(t)]() mutable {
-      t->handle.exit();
+  }).handle_error(
+    submit_transaction_ertr::pass_further{},
+    crimson::ct_error::all_same_way([](auto e) {
+      ceph_assert(0 == "Hit error submitting to rbm");
+    }));
+}
+
+TransactionManager::submit_transaction_direct_ret
+TransactionManager::submit_transaction_journal(
+  TransactionRef t)
+{
+  LOG_PREFIX(TransactionManager::submit_transaction_journal);
+  auto &tref = *t;
+  auto record = cache->try_construct_record(tref);
+  if (!record) {
+    DEBUGT("conflict detected, returning eagain.", tref);
+    return crimson::ct_error::eagain::make();
+  }
+
+  DEBUGT("about to submit to journal", tref);
+
+  return journal->submit_record(std::move(*record), tref.handle
+  ).safe_then([this, FNAME, &tref](auto p) mutable {
+    auto [addr, journal_seq] = p;
+    DEBUGT("journal commit to {} seq {}", tref, addr, journal_seq);
+    segment_cleaner->set_journal_head(journal_seq);
+    cache->complete_commit(tref, addr, journal_seq, segment_cleaner.get());
+    return lba_manager->complete_transaction(tref).safe_then(
+      [&tref, journal_seq=journal_seq, this] {
+      segment_cleaner->update_journal_tail_target(
+	cache->get_oldest_dirty_from().value_or(journal_seq));
+      auto to_release = tref.get_segment_to_release();
+      if (to_release != NULL_SEG_ID) {
+	return extent_allocator.release(to_release
+	).safe_then([this, to_release] {
+	  segment_cleaner->mark_segment_released(to_release);
+	});
+      } else {
+	return SegmentManager::release_ertr::now();
+      }
     });
+  }).safe_then([&tref] {
+    return tref.handle.complete();
+  }).handle_error(
+    submit_transaction_ertr::pass_further{},
+    crimson::ct_error::all_same_way([](auto e) {
+      ceph_assert(0 == "Hit error submitting to journal");
+    }));
+}
+
+TransactionManager::submit_transaction_direct_ret
+TransactionManager::submit_transaction_direct(
+  TransactionRef t)
+{
+  LOG_PREFIX(TransactionManager::submit_transaction_direct);
+  DEBUGT("about to prepare", *t);
+  auto &tref = *t;
+  return tref.handle.enter(write_pipeline.prepare
+  ).then([this, FNAME, t=std::move(t)]() mutable
+	 -> submit_transaction_ertr::future<> {
+    if (extent_allocator.is_journal()) {
+      return submit_transaction_journal(std::move(t));
+    } else if (extent_allocator.is_rbm()) {
+      return submit_transaction_hybrid(std::move(t));
+    }
+    ceph_assert(0 == "no registered transaction mode");
+    return crimson::ct_error::input_output_error::make();
+  }).finally([t=std::move(t)]() mutable {
+    t->handle.exit();
+  });
 }
 
 TransactionManager::get_next_dirty_extents_ret

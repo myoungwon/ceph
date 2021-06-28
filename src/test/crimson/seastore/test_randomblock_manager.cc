@@ -29,7 +29,6 @@ constexpr uint64_t DEFAULT_BLOCK_SIZE = 4096;
 struct rbm_test_t : public  seastar_test_suite_t,
   TMTestState {
   segment_manager::EphemeralSegmentManagerRef segment_manager; // Need to be deleted, just for Cache
-  Cache cache;
   std::unique_ptr<NVMeManager> rbm_manager;
   nvme_device::NVMeBlockDevice *device;
 
@@ -56,8 +55,7 @@ struct rbm_test_t : public  seastar_test_suite_t,
   paddr_t current;
 
   rbm_test_t() :
-      segment_manager(segment_manager::create_test_ephemeral()),
-      cache(*segment_manager)
+      segment_manager(segment_manager::create_test_ephemeral())
   {
     device = new nvme_device::TestMemory(DEFAULT_TEST_SIZE);
     rbm_manager.reset(new NVMeManager(device, std::string()));

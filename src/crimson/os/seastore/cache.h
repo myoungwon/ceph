@@ -17,6 +17,7 @@
 #include "crimson/os/seastore/cached_extent.h"
 #include "crimson/os/seastore/root_block.h"
 #include "crimson/os/seastore/segment_cleaner.h"
+#include "crimson/os/seastore/random_block_manager.h"
 
 namespace crimson::os::seastore {
 
@@ -352,6 +353,39 @@ public:
     return ret;
   }
 
+  using alloc_extent_ertr = base_ertr;
+  template <typename T>
+  using alloc_extent_ret = alloc_extent_ertr::future<TCachedExtentRef<T>>;
+  template <typename T>
+  alloc_extent_ret<T> alloc_new_extent_rb(
+    Transaction &t,      ///< [in, out] current transaction
+    size_t length ///< [in] length
+  ) {
+    auto ret = CachedExtent::make_cached_extent_ref<T>(
+      alloc_cache_buf(length));
+    if (rbm_manager) {
+      ret->set_rb();
+      return rbm_manager->alloc_extent(
+	t,
+	length
+	).safe_then([&t, ret, this](auto addr) -> alloc_extent_ret<T> {
+	paddr_t rbm_addr {addr / rbm_manager->get_block_size(),
+			  addr % rbm_manager->get_block_size(),
+			  store_types_t::RBM};
+	ret->set_rbm_addr(rbm_addr);
+	t.add_fresh_extent(ret);
+	ret->state = CachedExtent::extent_state_t::INITIAL_WRITE_PENDING;
+	return alloc_extent_ertr::make_ready_future<TCachedExtentRef<T>>(
+	  std::move(ret));
+      });
+
+    }
+    t.add_fresh_extent(ret);
+    ret->state = CachedExtent::extent_state_t::INITIAL_WRITE_PENDING;
+    return alloc_extent_ertr::make_ready_future<TCachedExtentRef<T>>(
+      std::move(ret));
+  }
+
   /**
    * alloc_new_extent
    *
@@ -547,6 +581,7 @@ private:
   ExtentAllocator &extent_allocator; ///< ref to extent_allocator
   RootBlockRef root;               ///< ref to current root
   ExtentIndex extents;             ///< set of live extents
+  RandomBlockManagerRef rbm_manager; ///< ref to rbm_manager
 
   journal_seq_t last_commit = JOURNAL_SEQ_MIN;
 
