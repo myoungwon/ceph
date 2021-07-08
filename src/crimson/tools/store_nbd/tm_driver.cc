@@ -136,7 +136,7 @@ void TMDriver::init()
     false /* detailed */);
   auto extent_allocator = std::make_unique<ExtentAllocator>(segment_manager.get());
   segment_cleaner->mount(*extent_allocator);
-  auto journal = std::make_unique<Journal>(*extent_allocator);
+  auto journal = std::make_unique<SegmentJournal>(*extent_allocator);
   auto cache = std::make_unique<Cache>(*extent_allocator);
   auto lba_manager = lba_manager::create_lba_manager(*extent_allocator, *cache);
 

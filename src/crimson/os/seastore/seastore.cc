@@ -1122,7 +1122,7 @@ std::unique_ptr<SeaStore> make_seastore(
     SegmentCleaner::config_t::get_default(),
     false /* detailed */);
 
-  auto journal = std::make_unique<Journal>(*ea);
+  auto journal = std::make_unique<SegmentJournal>(*ea);
   auto cache = std::make_unique<Cache>(*ea);
   auto lba_manager = lba_manager::create_lba_manager(*ea, *cache);
 

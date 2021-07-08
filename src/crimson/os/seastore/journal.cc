@@ -48,12 +48,11 @@ segment_nonce_t generate_nonce(
     sizeof(meta.seastore_id.uuid));
 }
 
-Journal::Journal(ExtentAllocator &extent_allocator)
+SegmentJournal::SegmentJournal(ExtentAllocator &extent_allocator)
   : extent_allocator(extent_allocator) {}
 
-
-Journal::initialize_segment_ertr::future<segment_seq_t>
-Journal::initialize_segment(Segment &segment)
+SegmentJournal::initialize_segment_ertr::future<segment_seq_t>
+SegmentJournal::initialize_segment(Segment &segment)
 {
   auto new_tail = segment_provider->get_journal_tail_target();
   logger().debug(
@@ -92,11 +91,11 @@ Journal::initialize_segment(Segment &segment)
     },
     initialize_segment_ertr::pass_further{},
     crimson::ct_error::assert_all{
-      "Invalid error in Journal::initialize_segment"
+      "Invalid error in SegmentJournal::initialize_segment"
     });
 }
 
-ceph::bufferlist Journal::encode_record(
+ceph::bufferlist SegmentJournal::encode_record(
   record_size_t rsize,
   record_t &&record)
 {
@@ -153,7 +152,7 @@ ceph::bufferlist Journal::encode_record(
   return bl;
 }
 
-bool Journal::validate_metadata(const bufferlist &bl)
+bool SegmentJournal::validate_metadata(const bufferlist &bl)
 {
   auto bliter = bl.cbegin();
   auto test_crc = bliter.crc32c(
@@ -168,7 +167,7 @@ bool Journal::validate_metadata(const bufferlist &bl)
   return test_crc == recorded_crc;
 }
 
-Journal::read_validate_data_ret Journal::read_validate_data(
+SegmentJournal::read_validate_data_ret SegmentJournal::read_validate_data(
   paddr_t record_base,
   const record_header_t &header)
 {
@@ -182,7 +181,7 @@ Journal::read_validate_data_ret Journal::read_validate_data(
   });
 }
 
-Journal::write_record_ret Journal::write_record(
+SegmentJournal::write_record_ret SegmentJournal::write_record(
   record_size_t rsize,
   record_t &&record,
   OrderingHandle &handle)
@@ -210,7 +209,7 @@ Journal::write_record_ret Journal::write_record(
     ).handle_error(
       write_record_ertr::pass_further{},
       crimson::ct_error::assert_all{
-	"Invalid error in Journal::write_record"
+	"Invalid error in SegmentJournal::write_record"
       }
     );
   }).safe_then([this, &handle] {
@@ -231,7 +230,7 @@ Journal::write_record_ret Journal::write_record(
   });
 }
 
-Journal::record_size_t Journal::get_encoded_record_length(
+SegmentJournal::record_size_t SegmentJournal::get_encoded_record_length(
   const record_t &record) const {
   extent_len_t metadata =
     (extent_len_t)ceph::encoded_sizeof_bounded<record_header_t>();
@@ -249,14 +248,14 @@ Journal::record_size_t Journal::get_encoded_record_length(
   return record_size_t{metadata, data};
 }
 
-bool Journal::needs_roll(segment_off_t length) const
+bool SegmentJournal::needs_roll(segment_off_t length) const
 {
   return length + written_to >
     current_journal_segment->get_write_capacity();
 }
 
-Journal::roll_journal_segment_ertr::future<segment_seq_t>
-Journal::roll_journal_segment()
+SegmentJournal::roll_journal_segment_ertr::future<segment_seq_t>
+SegmentJournal::roll_journal_segment()
 {
   auto old_segment_id = current_journal_segment ?
     current_journal_segment->get_segment_id() :
@@ -286,8 +285,8 @@ Journal::roll_journal_segment()
     );
 }
 
-Journal::read_segment_header_ret
-Journal::read_segment_header(segment_id_t segment)
+SegmentJournal::read_segment_header_ret
+SegmentJournal::read_segment_header(segment_id_t segment)
 {
   return extent_allocator.read(
     paddr_t{segment, 0},
@@ -295,7 +294,7 @@ Journal::read_segment_header(segment_id_t segment)
   ).handle_error(
     read_segment_header_ertr::pass_further{},
     crimson::ct_error::assert_all{
-      "Invalid error in Journal::read_segment_header"
+      "Invalid error in SegmentJournal::read_segment_header"
     }
   ).safe_then([=](bufferptr bptr) -> read_segment_header_ret {
     logger().debug("segment {} bptr size {}", segment, bptr.length());
@@ -305,7 +304,7 @@ Journal::read_segment_header(segment_id_t segment)
     bl.push_back(bptr);
 
     logger().debug(
-      "Journal::read_segment_header: segment {} block crc {}",
+      "SegmentJournal::read_segment_header: segment {} block crc {}",
       segment,
       bl.begin().crc32c(extent_allocator.get_block_size(), 0));
 
@@ -314,13 +313,13 @@ Journal::read_segment_header(segment_id_t segment)
       decode(header, bp);
     } catch (ceph::buffer::error &e) {
       logger().debug(
-	"Journal::read_segment_header: segment {} unable to decode "
+	"SegmentJournal::read_segment_header: segment {} unable to decode "
 	"header, skipping",
 	segment);
       return crimson::ct_error::enodata::make();
     }
     logger().debug(
-      "Journal::read_segment_header: segment {} header {}",
+      "SegmentJournal::read_segment_header: segment {} header {}",
       segment,
       header);
     return read_segment_header_ret(
@@ -329,7 +328,7 @@ Journal::read_segment_header(segment_id_t segment)
   });
 }
 
-Journal::open_for_write_ret Journal::open_for_write()
+SegmentJournal::open_for_write_ret SegmentJournal::open_for_write()
 {
   return roll_journal_segment().safe_then([this](auto seq) {
     return open_for_write_ret(
@@ -343,7 +342,7 @@ Journal::open_for_write_ret Journal::open_for_write()
   });
 }
 
-Journal::find_replay_segments_fut Journal::find_replay_segments()
+SegmentJournal::find_replay_segments_fut SegmentJournal::find_replay_segments()
 {
   return seastar::do_with(
     std::vector<std::pair<segment_id_t, segment_header_t>>(),
@@ -382,7 +381,7 @@ Journal::find_replay_segments_fut Journal::find_replay_segments()
 	    }),
 	    find_replay_segments_ertr::pass_further{},
 	    crimson::ct_error::assert_all{
-	      "Invalid error in Journal::find_replay_segments"
+	      "Invalid error in SegmentJournal::find_replay_segments"
             }
 	  );
 	}).safe_then([this, &segments]() mutable -> find_replay_segments_fut {
@@ -415,7 +414,7 @@ Journal::find_replay_segments_fut Journal::find_replay_segments()
 	  segment_provider->update_journal_tail_committed(journal_tail);
 	  auto replay_from = journal_tail.offset;
 	  logger().debug(
-	    "Journal::find_replay_segments: journal_tail={}",
+	    "SegmentJournal::find_replay_segments: journal_tail={}",
 	    journal_tail);
 	  auto from = segments.begin();
 	  if (replay_from != P_ADDR_NULL) {
@@ -447,7 +446,7 @@ Journal::find_replay_segments_fut Journal::find_replay_segments()
 		  p.first,
 		  (segment_off_t)extent_allocator.get_block_size()}};
 	      logger().debug(
-		"Journal::find_replay_segments: replaying from  {}",
+		"SegmentJournal::find_replay_segments: replaying from  {}",
 		ret);
 	      return std::make_pair(ret, p.second);
 	    });
@@ -459,7 +458,7 @@ Journal::find_replay_segments_fut Journal::find_replay_segments()
     });
 }
 
-Journal::read_validate_record_metadata_ret Journal::read_validate_record_metadata(
+SegmentJournal::read_validate_record_metadata_ret SegmentJournal::read_validate_record_metadata(
   paddr_t start,
   segment_nonce_t nonce)
 {
@@ -526,7 +525,7 @@ Journal::read_validate_record_metadata_ret Journal::read_validate_record_metadat
     });
 }
 
-std::optional<std::vector<delta_info_t>> Journal::try_decode_deltas(
+std::optional<std::vector<delta_info_t>> SegmentJournal::try_decode_deltas(
   record_header_t header,
   const bufferlist &bl)
 {
@@ -546,7 +545,7 @@ std::optional<std::vector<delta_info_t>> Journal::try_decode_deltas(
   return deltas;
 }
 
-std::optional<std::vector<extent_info_t>> Journal::try_decode_extent_infos(
+std::optional<std::vector<extent_info_t>> SegmentJournal::try_decode_extent_infos(
   record_header_t header,
   const bufferlist &bl)
 {
@@ -565,8 +564,8 @@ std::optional<std::vector<extent_info_t>> Journal::try_decode_extent_infos(
   return extent_infos;
 }
 
-Journal::replay_ertr::future<>
-Journal::replay_segment(
+SegmentJournal::replay_ertr::future<>
+SegmentJournal::replay_segment(
   journal_seq_t seq,
   segment_header_t header,
   delta_handler_t &handler)
@@ -584,7 +583,7 @@ Journal::replay_segment(
 	if (!deltas) {
 	  // This should be impossible, we did check the crc on the mdbuf
 	  logger().error(
-	    "Journal::replay_segment unable to decode deltas for record {}",
+	    "SegmentJournal::replay_segment unable to decode deltas for record {}",
 	    base);
 	  assert(deltas);
 	}
@@ -627,7 +626,7 @@ Journal::replay_segment(
     });
 }
 
-Journal::replay_ret Journal::replay(delta_handler_t &&delta_handler)
+SegmentJournal::replay_ret SegmentJournal::replay(delta_handler_t &&delta_handler)
 {
   return seastar::do_with(
     std::move(delta_handler), replay_segments_t(),
@@ -643,7 +642,7 @@ Journal::replay_ret Journal::replay(delta_handler_t &&delta_handler)
     });
 }
 
-Journal::scan_extents_ret Journal::scan_extents(
+SegmentJournal::scan_extents_ret SegmentJournal::scan_extents(
   scan_extents_cursor &cursor,
   extent_len_t bytes_to_read)
 {
@@ -653,7 +652,7 @@ Journal::scan_extents_ret Journal::scan_extents(
   ).handle_error(
     scan_extents_ertr::pass_further{},
     crimson::ct_error::assert_all{
-      "Invalid error in Journal::scan_extents"
+      "Invalid error in SegmentJournal::scan_extents"
     }
   ).safe_then([&](auto segment_header) {
     auto segment_nonce = segment_header.segment_nonce;
@@ -670,7 +669,7 @@ Journal::scan_extents_ret Journal::scan_extents(
 	  if (!infos) {
 	    // This should be impossible, we did check the crc on the mdbuf
 	    logger().error(
-	      "Journal::scan_extents unable to decode extents for record {}",
+	      "SegmentJournal::scan_extents unable to decode extents for record {}",
 	      base);
 	    assert(infos);
 	  }
@@ -694,7 +693,7 @@ Journal::scan_extents_ret Journal::scan_extents(
   });
 }
 
-Journal::scan_valid_records_ret Journal::scan_valid_records(
+SegmentJournal::scan_valid_records_ret SegmentJournal::scan_valid_records(
     scan_valid_records_cursor &cursor,
     segment_nonce_t nonce,
     size_t budget,
@@ -713,17 +712,17 @@ Journal::scan_valid_records_ret Journal::scan_valid_records(
 	  return read_validate_record_metadata(cursor.offset, nonce
 	  ).safe_then([=, &cursor](auto md) {
 	    logger().debug(
-	      "Journal::scan_valid_records: read complete {}",
+	      "SegmentJournal::scan_valid_records: read complete {}",
 	      cursor.offset);
 	    if (!md) {
 	      logger().debug(
-		"Journal::scan_valid_records: found invalid header at {}, presumably at end",
+		"SegmentJournal::scan_valid_records: found invalid header at {}, presumably at end",
 		cursor.offset);
 	      cursor.last_valid_header_found = true;
 	      return scan_valid_records_ertr::now();
 	    } else {
 	      logger().debug(
-		"Journal::scan_valid_records: valid record read at {}",
+		"SegmentJournal::scan_valid_records: valid record read at {}",
 		cursor.offset);
 	      cursor.last_committed = paddr_t{
 		cursor.offset.segment,
@@ -740,7 +739,7 @@ Journal::scan_valid_records_ret Journal::scan_valid_records(
 	    return crimson::do_until(
 	      [=, &budget_used, &cursor, &handler] {
 		logger().debug(
-		  "Journal::scan_valid_records: valid record read, processing queue");
+		  "SegmentJournal::scan_valid_records: valid record read, processing queue");
 		if (cursor.pending_records.empty()) {
 		  /* This is only possible if the segment is empty.
 		   * A record's last_commited must be prior to its own

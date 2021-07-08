@@ -65,16 +65,20 @@ struct record_validator_t {
 struct journal_test_t : seastar_test_suite_t, JournalSegmentProvider {
   segment_manager::EphemeralSegmentManagerRef segment_manager;
   WritePipeline pipeline;
-  std::unique_ptr<Journal> journal;
+  std::unique_ptr<SegmentJournal> journal;
 
   std::vector<record_validator_t> records;
 
   std::default_random_engine generator;
 
+  SegmentManagerRef sm_manager;
+  ExtentAllocator extent_allocator;
   const segment_off_t block_size;
 
   journal_test_t()
     : segment_manager(segment_manager::create_test_ephemeral()),
+      sm_manager(segment_manager.get()),
+      extent_allocator(sm_manager.get()),
       block_size(segment_manager->get_block_size())
   {
   }
@@ -90,7 +94,7 @@ struct journal_test_t : seastar_test_suite_t, JournalSegmentProvider {
   void update_journal_tail_committed(journal_seq_t paddr) final {}
 
   seastar::future<> set_up_fut() final {
-    journal.reset(new Journal(*segment_manager));
+    journal.reset(new SegmentJournal(extent_allocator));
     journal->set_segment_provider(this);
     journal->set_write_pipeline(&pipeline);
     return segment_manager->init(
@@ -107,7 +111,7 @@ struct journal_test_t : seastar_test_suite_t, JournalSegmentProvider {
   auto replay(T &&f) {
     return journal->close(
     ).safe_then([this, f=std::move(f)]() mutable {
-      journal.reset(new Journal(*segment_manager));
+      journal.reset(new SegmentJournal(extent_allocator));
       journal->set_segment_provider(this);
       journal->set_write_pipeline(&pipeline);
       return journal->replay(std::forward<T>(std::move(f)));
@@ -142,7 +146,7 @@ struct journal_test_t : seastar_test_suite_t, JournalSegmentProvider {
 	  delta_checker = std::nullopt;
 	  advance();
 	}
-	return Journal::replay_ertr::now();
+	return SegmentJournal::replay_ertr::now();
       }).unsafe_get0();
     ASSERT_EQ(record_iter, records.end());
     for (auto &i : records) {

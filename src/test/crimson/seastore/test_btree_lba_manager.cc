@@ -29,7 +29,7 @@ struct btree_lba_manager_test :
   segment_manager::EphemeralSegmentManagerRef segment_manager;
   SegmentManagerRef sm_manager;
   ExtentAllocator extent_allocator;
-  Journal journal;
+  SegmentJournal journal;
   Cache cache;
   BtreeLBAManagerRef lba_manager;
 

@@ -420,7 +420,7 @@ public:
   scan_extents_ret scan_extents(
     scan_extents_cursor &cursor,
     extent_len_t bytes_to_read) final {
-    return journal->scan_extents(cursor, bytes_to_read);
+    return static_cast<SegmentJournal*>(journal.get())->scan_extents(cursor, bytes_to_read);
   }
 
   using release_segment_ret =

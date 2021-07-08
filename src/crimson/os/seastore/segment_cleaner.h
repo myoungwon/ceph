@@ -301,11 +301,11 @@ public:
     /**
      * scan_extents
      *
-     * Interface shim for Journal::scan_extents
+     * Interface shim for SegmentJournal::scan_extents
      */
-    using scan_extents_cursor = Journal::scan_valid_records_cursor;
-    using scan_extents_ertr = Journal::scan_extents_ertr;
-    using scan_extents_ret = Journal::scan_extents_ret;
+    using scan_extents_cursor = SegmentJournal::scan_valid_records_cursor;
+    using scan_extents_ertr = SegmentJournal::scan_extents_ertr;
+    using scan_extents_ret = SegmentJournal::scan_extents_ret;
     virtual scan_extents_ret scan_extents(
       scan_extents_cursor &cursor,
       extent_len_t bytes_to_read) = 0;

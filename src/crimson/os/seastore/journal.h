@@ -121,12 +121,53 @@ public:
   virtual ~JournalSegmentProvider() {}
 };
 
+class Journal {
+public:
+
+  using open_for_write_ertr = crimson::errorator<
+    crimson::ct_error::input_output_error
+    >;
+  using open_for_write_ret = open_for_write_ertr::future<journal_seq_t>;
+  virtual open_for_write_ret open_for_write() = 0;
+
+  using close_ertr = crimson::errorator<
+    crimson::ct_error::input_output_error>;
+  virtual close_ertr::future<> close() = 0;
+
+  using submit_record_ertr = crimson::errorator<
+    crimson::ct_error::erange,
+    crimson::ct_error::input_output_error
+    >;
+  using submit_record_ret = submit_record_ertr::future<
+    std::pair<paddr_t, journal_seq_t>
+    >;
+  virtual submit_record_ret submit_record(
+    record_t &&record,
+    OrderingHandle &handle
+  ) = 0;
+
+  using replay_ertr = crimson::errorator<
+    crimson::ct_error::input_output_error,
+    crimson::ct_error::invarg,
+    crimson::ct_error::enoent,
+    crimson::ct_error::erange>;
+  using replay_ret = replay_ertr::future<>;
+  using delta_handler_t = std::function<
+    replay_ret(journal_seq_t seq,
+	       paddr_t record_block_base,
+	       const delta_info_t&)>;
+  virtual replay_ret replay(delta_handler_t &&delta_handler) = 0;
+
+  virtual void set_write_pipeline(WritePipeline *_write_pipeline) = 0;
+};
+using JournalRef = std::unique_ptr<Journal>;
+
 /**
  * Manages stream of atomically written records to a ExtentAllocator.
  */
-class Journal {
+class SegmentJournal : public Journal{
 public:
-  Journal(ExtentAllocator &extent_allocator);
+  SegmentJournal(ExtentAllocator &extent_allocator);
 
   /**
    * Sets the JournalSegmentProvider.
@@ -146,10 +187,6 @@ public:
    * to submit_record.  Should be called after replay if not a new
    * Journal.
    */
-  using open_for_write_ertr = crimson::errorator<
-    crimson::ct_error::input_output_error
-    >;
-  using open_for_write_ret = open_for_write_ertr::future<journal_seq_t>;
   open_for_write_ret open_for_write();
 
   /**
@@ -157,8 +194,6 @@ public:
    *
    * TODO: should probably flush and disallow further writes
    */
-  using close_ertr = crimson::errorator<
-    crimson::ct_error::input_output_error>;
   close_ertr::future<> close() {
     return (
       current_journal_segment ?
@@ -180,13 +215,6 @@ public:
    *
    * @param write record and returns offset of first block and seq
    */
-  using submit_record_ertr = crimson::errorator<
-    crimson::ct_error::erange,
-    crimson::ct_error::input_output_error
-    >;
-  using submit_record_ret = submit_record_ertr::future<
-    std::pair<paddr_t, journal_seq_t>
-    >;
   submit_record_ret submit_record(
     record_t &&record,
     OrderingHandle &handle
@@ -197,7 +225,7 @@ public:
     if (total > max_record_length()) {
       auto &logger = crimson::get_logger(ceph_subsys_seastore);
       logger.error(
-	"Journal::submit_record: record size {} exceeds max {}",
+	"SegmentJournal::submit_record: record size {} exceeds max {}",
 	total,
 	max_record_length()
       );
@@ -226,12 +254,6 @@ public:
    * record_block_start (argument to delta_handler) is the start of the
    * of the first block in the record
    */
-  using replay_ertr = ExtentAllocator::read_ertr;
-  using replay_ret = replay_ertr::future<>;
-  using delta_handler_t = std::function<
-    replay_ret(journal_seq_t seq,
-	       paddr_t record_block_base,
-	       const delta_info_t&)>;
   replay_ret replay(delta_handler_t &&delta_handler);
 
   /**
@@ -435,7 +457,7 @@ private:
 
   extent_len_t max_record_length() const;
 };
-using JournalRef = std::unique_ptr<Journal>;
+using SegmentJournalRef = std::unique_ptr<SegmentJournal>;
 
 }
 WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::segment_header_t)
@@ -444,7 +466,7 @@ WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::extent_info_t)
 
 namespace crimson::os::seastore {
 
-inline extent_len_t Journal::max_record_length() const {
+inline extent_len_t SegmentJournal::max_record_length() const {
   return extent_allocator.get_allocation_unit_size() -
     p2align(ceph::encoded_sizeof_bounded<segment_header_t>(),
 	    size_t(extent_allocator.get_block_size()));
