@@ -173,8 +173,16 @@ protected:
 
 class TestSegmentManagerWrapper final : public SegmentManager {
   SegmentManager &sm;
+  device_id_t device_id = 0;
 public:
-  TestSegmentManagerWrapper(SegmentManager &sm) : sm(sm) {}
+  TestSegmentManagerWrapper(
+    SegmentManager &sm,
+    device_id_t device_id = 0)
+    : sm(sm), device_id(device_id) {}
+
+  device_id_t get_device_id() const {
+    return device_id;
+  }
 
   mount_ret mount() final {
     return mount_ertr::now(); // we handle this above
@@ -185,17 +193,37 @@ public:
   }
 
 
-  open_ertr::future<SegmentRef> open(segment_id_t id) final {
+  open_ertr::future<SegmentRef> open(device_segment_t id) final {
     return sm.open(id);
   }
 
-  release_ertr::future<> release(segment_id_t id) final {
+  release_ertr::future<> release(device_segment_t id) final {
     return sm.release(id);
   }
 
   read_ertr::future<> read(
     paddr_t addr, size_t len, ceph::bufferptr &out) final {
     return sm.read(addr, len, out);
+  }
+
+  boost::counting_iterator<
+    device_segment_t,
+    std::forward_iterator_tag,
+    device_segment_id_t> begin() final {
+    return boost::counting_iterator<
+      device_segment_t,
+      std::forward_iterator_tag,
+      device_segment_id_t>(device_segment_t{device_id, 0});
+  }
+
+  boost::counting_iterator<
+    device_segment_t,
+    std::forward_iterator_tag,
+    device_segment_id_t> end() final {
+    return boost::counting_iterator<
+      device_segment_t,
+      std::forward_iterator_tag,
+      device_segment_id_t>(device_segment_t{device_id, get_num_segments()});
   }
 
   size_t get_size() const final { return sm.get_size(); }

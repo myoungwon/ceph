@@ -7,6 +7,7 @@
 
 #include <boost/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
+#include <boost/iterator/counting_iterator.hpp>
 #include <seastar/core/future.hh>
 
 #include "include/ceph_assert.h"
@@ -30,7 +31,7 @@ public:
   /**
    * get_segment_id
    */
-  virtual segment_id_t get_segment_id() const = 0;
+  virtual device_segment_t get_segment_id() const = 0;
 
   /**
    * min next write location
@@ -96,13 +97,13 @@ public:
     crimson::ct_error::input_output_error,
     crimson::ct_error::invarg,
     crimson::ct_error::enoent>;
-  virtual open_ertr::future<SegmentRef> open(segment_id_t id) = 0;
+  virtual open_ertr::future<SegmentRef> open(device_segment_t id) = 0;
 
   using release_ertr = crimson::errorator<
     crimson::ct_error::input_output_error,
     crimson::ct_error::invarg,
     crimson::ct_error::enoent>;
-  virtual release_ertr::future<> release(segment_id_t id) = 0;
+  virtual release_ertr::future<> release(device_segment_t id) = 0;
 
   using read_ertr = crimson::errorator<
     crimson::ct_error::input_output_error,
@@ -134,7 +135,19 @@ public:
   }
   virtual const seastore_meta_t &get_meta() const = 0;
 
+  virtual device_id_t get_device_id() const = 0;
+
   virtual ~SegmentManager() {}
+
+  virtual boost::counting_iterator<
+    device_segment_t,
+    std::forward_iterator_tag,
+    device_segment_id_t> begin() = 0;
+
+  virtual boost::counting_iterator<
+    device_segment_t,
+    std::forward_iterator_tag,
+    device_segment_id_t> end() = 0;
 };
 using SegmentManagerRef = std::unique_ptr<SegmentManager>;
 

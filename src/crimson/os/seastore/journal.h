@@ -224,7 +224,7 @@ private:
     >;
   using read_segment_header_ret = read_segment_header_ertr::future<
     segment_header_t>;
-  read_segment_header_ret read_segment_header(segment_id_t segment);
+  read_segment_header_ret read_segment_header(device_segment_t segment);
 
   /// return ordered vector of segments to replay
   using replay_segments_t = std::vector<

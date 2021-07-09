@@ -216,7 +216,7 @@ Journal::roll_journal_segment()
 }
 
 Journal::read_segment_header_ret
-Journal::read_segment_header(segment_id_t segment)
+Journal::read_segment_header(device_segment_t segment)
 {
   return segment_manager.read(
     paddr_t{segment, 0},
@@ -275,11 +275,11 @@ Journal::open_for_write_ret Journal::open_for_write()
 Journal::find_replay_segments_fut Journal::find_replay_segments()
 {
   return seastar::do_with(
-    std::vector<std::pair<segment_id_t, segment_header_t>>(),
+    std::vector<std::pair<device_segment_t, segment_header_t>>(),
     [this](auto &&segments) mutable {
       return crimson::do_for_each(
-	boost::make_counting_iterator(segment_id_t{0}),
-	boost::make_counting_iterator(segment_manager.get_num_segments()),
+	segment_manager.begin(),
+	segment_manager.end(),
 	[this, &segments](auto i) {
 	  return read_segment_header(i
 	  ).safe_then([this, &segments, i](auto header) mutable {
@@ -337,6 +337,7 @@ Journal::find_replay_segments_fut Journal::find_replay_segments()
 	    [this](auto &seg) {
 	      segment_provider->init_mark_segment_closed(
 		seg.first,
+		segment_manager.get_num_segments(),
 		seg.second.journal_segment_seq);
 	    });
 

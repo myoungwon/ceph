@@ -401,7 +401,7 @@ public:
   using release_segment_ret =
     SegmentCleaner::ExtentCallbackInterface::release_segment_ret;
   release_segment_ret release_segment(
-    segment_id_t id) final {
+    device_segment_t id) final {
     return segment_manager.release(id);
   }
 

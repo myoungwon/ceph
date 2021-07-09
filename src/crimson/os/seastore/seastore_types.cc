@@ -5,17 +5,17 @@
 
 namespace crimson::os::seastore {
 
-std::ostream &segment_to_stream(std::ostream &out, const segment_id_t &t)
+std::ostream &segment_to_stream(std::ostream &out, const device_segment_t &t)
 {
-  if (t == NULL_SEG_ID)
+  if (t.segment == NULL_SEG_ID)
     return out << "NULL_SEG";
-  else if (t == BLOCK_REL_SEG_ID)
+  else if (t.segment == BLOCK_REL_SEG_ID)
     return out << "BLOCK_REL_SEG";
-  else if (t == RECORD_REL_SEG_ID)
+  else if (t.segment == RECORD_REL_SEG_ID)
     return out << "RECORD_REL_SEG";
-  else if (t == ZERO_SEG_ID)
+  else if (t.segment == ZERO_SEG_ID)
     return out << "ZERO_SEG";
-  else if (t == FAKE_SEG_ID)
+  else if (t.segment == FAKE_SEG_ID)
     return out << "FAKE_SEG";
   else
     return out << t;
@@ -27,6 +27,12 @@ std::ostream &offset_to_stream(std::ostream &out, const segment_off_t &t)
     return out << "NULL_OFF";
   else
     return out << t;
+}
+
+std::ostream &operator<<(std::ostream &out, const device_segment_t& segment)
+{
+  return out << "[" << (uint64_t)segment.device_id() << ","
+    << segment.segment_id() << "]";
 }
 
 std::ostream &operator<<(std::ostream &out, const paddr_t &rhs)
@@ -95,6 +101,13 @@ std::ostream &operator<<(std::ostream &out, const paddr_list_t &rhs)
     first = true;
   }
   return out << ']';
+}
+
+device_segment_t::device_segment_t(device_id_t id, segment_id_t segment)
+  : segment(add_device_id(segment, id)) {
+  // only lower 4 bits are effective, and we have to reserve 0x0F for
+  // special XXX_SEG_IDs
+  assert(id < 15);
 }
 
 std::ostream &operator<<(std::ostream &lhs, const delta_info_t &rhs)

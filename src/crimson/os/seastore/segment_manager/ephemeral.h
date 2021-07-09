@@ -34,12 +34,12 @@ EphemeralSegmentManagerRef create_test_ephemeral();
 class EphemeralSegment final : public Segment {
   friend class EphemeralSegmentManager;
   EphemeralSegmentManager &manager;
-  const segment_id_t id;
+  const device_segment_t id;
   segment_off_t write_pointer = 0;
 public:
-  EphemeralSegment(EphemeralSegmentManager &manager, segment_id_t id);
+  EphemeralSegment(EphemeralSegmentManager &manager, device_segment_t id);
 
-  segment_id_t get_segment_id() const final { return id; }
+  device_segment_t get_segment_id() const final { return id; }
   segment_off_t get_write_capacity() const final;
   segment_off_t get_write_ptr() const final { return write_pointer; }
   close_ertr::future<> close() final;
@@ -56,18 +56,27 @@ class EphemeralSegmentManager final : public SegmentManager {
   std::optional<seastore_meta_t> meta;
 
   size_t get_offset(paddr_t addr) {
-    return (addr.segment * config.segment_size) + addr.offset;
+    return (addr.segment.segment_id() * config.segment_size) + addr.offset;
   }
 
   std::vector<segment_state_t> segment_state;
 
   char *buffer = nullptr;
 
-  Segment::close_ertr::future<> segment_close(segment_id_t id);
+  Segment::close_ertr::future<> segment_close(device_segment_t id);
+
+  device_id_t device_id = 0;
 
 public:
-  EphemeralSegmentManager(ephemeral_config_t config) : config(config) {}
+  EphemeralSegmentManager(
+    ephemeral_config_t config,
+    device_id_t device_id = 0)
+    : config(config), device_id(device_id) {}
   ~EphemeralSegmentManager();
+
+  device_id_t get_device_id() const {
+    return device_id;
+  }
 
   using init_ertr = crimson::errorator<
     crimson::ct_error::enospc,
@@ -83,9 +92,9 @@ public:
     return mkfs_ertr::now();
   }
 
-  open_ertr::future<SegmentRef> open(segment_id_t id) final;
+  open_ertr::future<SegmentRef> open(device_segment_t id) final;
 
-  release_ertr::future<> release(segment_id_t id) final;
+  release_ertr::future<> release(device_segment_t id) final;
 
   read_ertr::future<> read(
     paddr_t addr,
@@ -105,6 +114,26 @@ public:
   const seastore_meta_t &get_meta() const final {
     assert(meta);
     return *meta;
+  }
+
+  boost::counting_iterator<
+    device_segment_t,
+    std::forward_iterator_tag,
+    device_segment_id_t> begin() final {
+    return boost::counting_iterator<
+      device_segment_t,
+      std::forward_iterator_tag,
+      device_segment_id_t>(device_segment_t{device_id, 0});
+  }
+
+  boost::counting_iterator<
+    device_segment_t,
+    std::forward_iterator_tag,
+    device_segment_id_t> end() final {
+    return boost::counting_iterator<
+      device_segment_t,
+      std::forward_iterator_tag,
+      device_segment_id_t>(device_segment_t{device_id, get_num_segments()});
   }
 
   void remount();

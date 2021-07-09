@@ -109,12 +109,12 @@ class BlockSegmentManager;
 class BlockSegment final : public Segment {
   friend class BlockSegmentManager;
   BlockSegmentManager &manager;
-  const segment_id_t id;
+  const device_segment_t id;
   segment_off_t write_pointer = 0;
 public:
-  BlockSegment(BlockSegmentManager &manager, segment_id_t id);
+  BlockSegment(BlockSegmentManager &manager, device_segment_t id);
 
-  segment_id_t get_segment_id() const final { return id; }
+  device_segment_t get_segment_id() const final { return id; }
   segment_off_t get_write_capacity() const final;
   segment_off_t get_write_ptr() const final { return write_pointer; }
   close_ertr::future<> close() final;
@@ -141,14 +141,18 @@ public:
     >;
   close_ertr::future<> close();
 
-  BlockSegmentManager(const std::string &path) : device_path(path) {
+  BlockSegmentManager(
+    const std::string &path,
+    device_id_t device_id = 0)
+  : device_path(path),
+    device_id(device_id) {
     register_metrics();
   }
   ~BlockSegmentManager();
 
-  open_ertr::future<SegmentRef> open(segment_id_t id) final;
+  open_ertr::future<SegmentRef> open(device_segment_t id) final;
 
-  release_ertr::future<> release(segment_id_t id) final;
+  release_ertr::future<> release(device_segment_t id) final;
 
   read_ertr::future<> read(
     paddr_t addr,
@@ -165,11 +169,35 @@ public:
     return superblock.segment_size;
   }
 
+  device_id_t get_device_id() const final {
+    return device_id;
+  }
+
   // public so tests can bypass segment interface when simpler
   Segment::write_ertr::future<> segment_write(
     paddr_t addr,
     ceph::bufferlist bl,
     bool ignore_check=false);
+
+  boost::counting_iterator<
+    device_segment_t,
+    std::forward_iterator_tag,
+    device_segment_id_t> begin() final {
+    return boost::counting_iterator<
+      device_segment_t,
+      std::forward_iterator_tag,
+      device_segment_id_t>(device_segment_t{device_id, 0});
+  }
+
+  boost::counting_iterator<
+    device_segment_t,
+    std::forward_iterator_tag,
+    device_segment_id_t> end() final {
+    return boost::counting_iterator<
+      device_segment_t,
+      std::forward_iterator_tag,
+      device_segment_id_t>(device_segment_t{device_id, get_num_segments()});
+  }
 
 private:
   friend class BlockSegment;
@@ -213,9 +241,11 @@ private:
   block_sm_superblock_t superblock;
   seastar::file device;
 
+  device_id_t device_id = 0;
+
   size_t get_offset(paddr_t addr) {
     return superblock.first_segment_offset +
-      (addr.segment * superblock.segment_size) +
+      (addr.segment.segment_id() * superblock.segment_size) +
       addr.offset;
   }
 
@@ -228,7 +258,7 @@ private:
   char *buffer = nullptr;
 
   Segment::close_ertr::future<> segment_close(
-      segment_id_t id, segment_off_t write_pointer);
+      device_segment_t id, segment_off_t write_pointer);
 };
 
 }

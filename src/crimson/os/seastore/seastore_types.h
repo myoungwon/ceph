@@ -37,26 +37,119 @@ struct seastore_meta_t {
 
 // Identifies segment location on disk, see SegmentManager,
 using segment_id_t = uint32_t;
-constexpr segment_id_t MAX_SEG_ID =
-  std::numeric_limits<segment_id_t>::max();
-constexpr segment_id_t NULL_SEG_ID =
-  std::numeric_limits<segment_id_t>::max() - 1;
-/* Used to denote relative paddr_t */
-constexpr segment_id_t RECORD_REL_SEG_ID =
-  std::numeric_limits<segment_id_t>::max() - 2;
-constexpr segment_id_t BLOCK_REL_SEG_ID =
-  std::numeric_limits<segment_id_t>::max() - 3;
-// for tests which generate fake paddrs
-constexpr segment_id_t FAKE_SEG_ID =
-  std::numeric_limits<segment_id_t>::max() - 4;
+using device_id_t = uint8_t;
+constexpr uint16_t device_id_len = 4;
+// mask for segment manager id
+constexpr segment_id_t SM_ID_MASK =
+  0xF << (std::numeric_limits<segment_id_t>::digits - device_id_len);
 
+using device_segment_id_t = segment_id_t;
+
+constexpr device_segment_id_t MAX_SEG_ID =
+  std::numeric_limits<device_segment_id_t>::max();
+constexpr device_segment_id_t NULL_SEG_ID =
+  std::numeric_limits<device_segment_id_t>::max() - 1;
+/* Used to denote relative paddr_t */
+constexpr device_segment_id_t RECORD_REL_SEG_ID =
+  std::numeric_limits<device_segment_id_t>::max() - 2;
+constexpr device_segment_id_t BLOCK_REL_SEG_ID =
+  std::numeric_limits<device_segment_id_t>::max() - 3;
+// for tests which generate fake paddrs
+constexpr device_segment_id_t FAKE_SEG_ID =
+  std::numeric_limits<device_segment_id_t>::max() - 4;
 /* Used to denote references to notional zero filled segment, mainly
  * in denoting reserved laddr ranges for unallocated object data.
  */
-constexpr segment_id_t ZERO_SEG_ID =
+constexpr device_segment_id_t ZERO_SEG_ID =
   std::numeric_limits<segment_id_t>::max() - 5;
 
-std::ostream &segment_to_stream(std::ostream &, const segment_id_t &t);
+struct device_segment_t {
+  device_segment_id_t segment;
+
+  device_segment_t() = default;
+  constexpr device_segment_t(device_segment_id_t segment)
+    : segment(segment) {}
+  device_segment_t(device_id_t id, segment_id_t segment);
+
+  [[gnu::always_inline]]
+  device_id_t device_id() const {
+    return get_device_id(segment);
+  }
+
+  [[gnu::always_inline]]
+  segment_id_t segment_id() const {
+    return strip_device_id(segment);
+  }
+
+  bool operator==(const device_segment_t& other) const {
+    return segment == other.segment;
+  }
+  bool operator!=(const device_segment_t& other) const {
+    return segment != other.segment;
+  }
+  bool operator<(const device_segment_t& other) const {
+    return segment < other.segment;
+  }
+  bool operator<=(const device_segment_t& other) const {
+    return segment <= other.segment;
+  }
+  bool operator>(const device_segment_t& other) const {
+    return segment > other.segment;
+  }
+  bool operator>=(const device_segment_t& other) const {
+    return segment >= other.segment;
+  }
+  device_segment_t& operator++() {
+    ++segment;
+    return *this;
+  }
+  device_segment_t operator++(int) {
+    device_segment_t old = *this;
+    ++segment;
+    return old;
+  }
+  device_segment_t& operator--() {
+    --segment;
+    return *this;
+  }
+  device_segment_t operator--(int) {
+    device_segment_t old = *this;
+    --segment;
+    return old;
+  }
+  device_segment_t operator+(device_segment_id_t t) {
+    return {segment + t};
+  }
+
+  DENC(device_segment_t, v, p) {
+    DENC_START(1, 1, p);
+    denc(v.segment, p);
+    DENC_FINISH(p);
+  }
+private:
+  inline device_id_t get_device_id(segment_id_t id) const {
+    return (device_id_t)((id & SM_ID_MASK) >>
+	(std::numeric_limits<segment_id_t>::digits - device_id_len));
+  }
+
+  inline device_segment_id_t add_device_id(
+    segment_id_t id,
+    device_id_t sm_id) const {
+    return id + (sm_id <<
+	(std::numeric_limits<segment_id_t>::digits - device_id_len));
+  }
+
+  inline segment_id_t strip_device_id(segment_id_t id) const {
+    return id & (~SM_ID_MASK);
+  }
+
+};
+
+std::ostream &operator<<(std::ostream &out, const device_segment_t&);
+
+constexpr device_segment_t NULL_DEVICE_SEGMENT = {NULL_SEG_ID};
+
+std::ostream &segment_to_stream(std::ostream &, const device_segment_id_t &t);
 
 // Offset within a segment on disk, see SegmentManager
 // may be negative for relative offsets
@@ -99,30 +192,37 @@ constexpr record_delta_idx_t NULL_DELTA_IDX =
  * record_relative paddrs.
  */
 struct paddr_t {
-  segment_id_t segment = NULL_SEG_ID;
+  device_segment_t segment = NULL_DEVICE_SEGMENT;
   segment_off_t offset = NULL_SEG_OFF;
 
+  paddr_t() = default;
+  paddr_t(device_id_t id, segment_id_t sgt, segment_off_t offset)
+    : segment(device_segment_t(id, sgt)), offset(offset) {}
+
+  constexpr paddr_t(device_segment_t segment, segment_off_t offset)
+    : segment(segment), offset(offset) {}
+
   bool is_relative() const {
-    return segment == RECORD_REL_SEG_ID ||
-      segment == BLOCK_REL_SEG_ID;
+    return segment.segment == RECORD_REL_SEG_ID ||
+      segment.segment == BLOCK_REL_SEG_ID;
   }
 
   bool is_record_relative() const {
-    return segment == RECORD_REL_SEG_ID;
+    return segment.segment == RECORD_REL_SEG_ID;
   }
 
   bool is_block_relative() const {
-    return segment == BLOCK_REL_SEG_ID;
+    return segment.segment == BLOCK_REL_SEG_ID;
   }
 
   /// Denotes special zero segment addr
   bool is_zero() const {
-    return segment == ZERO_SEG_ID;
+    return segment.segment == ZERO_SEG_ID;
   }
 
   /// Denotes special null segment addr
   bool is_null() const {
-    return segment == NULL_SEG_ID;
+    return segment.segment == NULL_SEG_ID;
   }
 
   /**
@@ -223,12 +323,12 @@ struct __attribute((packed)) paddr_le_t {
   paddr_le_t() = default;
   paddr_le_t(ceph_le32 segment, ceph_les32 offset)
     : segment(segment), offset(offset) {}
-  paddr_le_t(segment_id_t segment, segment_off_t offset)
-    : segment(ceph_le32(segment)), offset(ceph_les32(offset)) {}
+  paddr_le_t(device_segment_t segment, segment_off_t offset)
+    : segment(ceph_le32(segment.segment)), offset(ceph_les32(offset)) {}
   paddr_le_t(const paddr_t &addr) : paddr_le_t(addr.segment, addr.offset) {}
 
   operator paddr_t() const {
-    return paddr_t{segment, offset};
+    return paddr_t{(device_segment_id_t)segment, offset};
   }
 };
 
@@ -755,7 +855,7 @@ using segment_nonce_t = uint32_t;
  */
 struct segment_header_t {
   segment_seq_t journal_segment_seq;
-  segment_id_t physical_segment_id; // debugging
+  device_segment_t physical_segment_id; // debugging
 
   journal_seq_t journal_tail;
   segment_nonce_t segment_nonce;
@@ -832,6 +932,7 @@ ceph::bufferlist encode_record(
 }
 
 WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::seastore_meta_t)
+WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::device_segment_t)
 WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::paddr_t)
 WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::journal_seq_t)
 WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::delta_info_t)

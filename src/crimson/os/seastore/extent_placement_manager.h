@@ -65,7 +65,7 @@ public:
       block_size);
     return wouldbe_mdlength + extent_buf_len + extent->get_bptr().length();
   }
-  ceph::bufferlist encode(segment_id_t segment, segment_nonce_t nonce) {
+  ceph::bufferlist encode(device_segment_t segment, segment_nonce_t nonce) {
     assert(extents.size() == record.extents.size());
     auto rsize = get_encoded_record_length();
     segment_off_t extent_offset = base + rsize.mdlength;
