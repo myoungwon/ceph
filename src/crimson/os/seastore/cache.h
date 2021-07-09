@@ -12,7 +12,7 @@
 #include "crimson/os/seastore/logging.h"
 #include "crimson/os/seastore/seastore_types.h"
 #include "crimson/os/seastore/transaction.h"
-#include "crimson/os/seastore/segment_manager.h"
+#include "crimson/os/seastore/extent_allocator.h"
 #include "crimson/common/errorator.h"
 #include "crimson/os/seastore/cached_extent.h"
 #include "crimson/os/seastore/root_block.h"
@@ -89,7 +89,7 @@ public:
     crimson::ct_error::input_output_error,
     crimson::ct_error::eagain>;
 
-  Cache(SegmentManager &segment_manager);
+  Cache(ExtentAllocator &extent_allocator);
   ~Cache();
 
   retired_extent_gate_t retired_extent_gate;
@@ -197,7 +197,7 @@ public:
       ref->state = CachedExtent::extent_state_t::CLEAN;
       add_extent(ref);
 
-      return segment_manager.read(
+      return extent_allocator.read(
 	offset,
 	length,
 	ref->get_bptr()).safe_then(
@@ -544,7 +544,7 @@ public:
   void dump_contents();
 
 private:
-  SegmentManager &segment_manager; ///< ref to segment_manager
+  ExtentAllocator &extent_allocator; ///< ref to extent_allocator
   RootBlockRef root;               ///< ref to current root
   ExtentIndex extents;             ///< set of live extents
 

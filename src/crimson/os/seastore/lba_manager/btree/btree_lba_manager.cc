@@ -524,9 +524,9 @@ BtreeLBAManager::get_physical_extent_if_live(
 }
 
 BtreeLBAManager::BtreeLBAManager(
-  SegmentManager &segment_manager,
+  ExtentAllocator &extent_allocator,
   Cache &cache)
-  : segment_manager(segment_manager),
+  : extent_allocator(extent_allocator),
     cache(cache) {}
 
 BtreeLBAManager::insert_mapping_ret BtreeLBAManager::insert_mapping(

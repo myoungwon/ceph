@@ -134,15 +134,16 @@ void TMDriver::init()
   auto segment_cleaner = std::make_unique<SegmentCleaner>(
     SegmentCleaner::config_t::get_default(),
     false /* detailed */);
-  segment_cleaner->mount(*segment_manager);
-  auto journal = std::make_unique<Journal>(*segment_manager);
-  auto cache = std::make_unique<Cache>(*segment_manager);
-  auto lba_manager = lba_manager::create_lba_manager(*segment_manager, *cache);
+  auto extent_allocator = std::make_unique<ExtentAllocator>(segment_manager.get());
+  segment_cleaner->mount(*extent_allocator);
+  auto journal = std::make_unique<Journal>(*extent_allocator);
+  auto cache = std::make_unique<Cache>(*extent_allocator);
+  auto lba_manager = lba_manager::create_lba_manager(*extent_allocator, *cache);
 
   journal->set_segment_provider(&*segment_cleaner);
 
   tm = std::make_unique<TransactionManager>(
-    *segment_manager,
+    *extent_allocator,
     std::move(segment_cleaner),
     std::move(journal),
     std::move(cache),

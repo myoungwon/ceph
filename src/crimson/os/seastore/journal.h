@@ -14,7 +14,7 @@
 #include "include/denc.h"
 
 #include "crimson/common/log.h"
-#include "crimson/os/seastore/segment_manager.h"
+#include "crimson/os/seastore/extent_allocator.h"
 #include "crimson/os/seastore/ordering_handle.h"
 #include "crimson/os/seastore/seastore_types.h"
 #include "crimson/osd/exceptions.h"
@@ -122,11 +122,11 @@ public:
 };
 
 /**
- * Manages stream of atomically written records to a SegmentManager.
+ * Manages stream of atomically written records to a ExtentAllocator.
  */
 class Journal {
 public:
-  Journal(SegmentManager &segment_manager);
+  Journal(ExtentAllocator &extent_allocator);
 
   /**
    * Sets the JournalSegmentProvider.
@@ -226,7 +226,7 @@ public:
    * record_block_start (argument to delta_handler) is the start of the
    * of the first block in the record
    */
-  using replay_ertr = SegmentManager::read_ertr;
+  using replay_ertr = ExtentAllocator::read_ertr;
   using replay_ret = replay_ertr::future<>;
   using delta_handler_t = std::function<
     replay_ret(journal_seq_t seq,
@@ -245,7 +245,7 @@ public:
    */
   class scan_valid_records_cursor;
   using scan_extents_cursor = scan_valid_records_cursor;
-  using scan_extents_ertr = SegmentManager::read_ertr;
+  using scan_extents_ertr = ExtentAllocator::read_ertr;
   using scan_extents_ret_bare = std::list<std::pair<paddr_t, extent_info_t>>;
   using scan_extents_ret = scan_extents_ertr::future<scan_extents_ret_bare>;
   scan_extents_ret scan_extents(
@@ -259,7 +259,7 @@ public:
 
 private:
   JournalSegmentProvider *segment_provider = nullptr;
-  SegmentManager &segment_manager;
+  ExtentAllocator &extent_allocator;
 
   segment_seq_t next_journal_segment_seq = 0;
   segment_nonce_t current_segment_nonce = 0;
@@ -309,7 +309,7 @@ private:
   static bool validate_metadata(const bufferlist &bl);
 
   /// read and validate data
-  using read_validate_data_ertr = SegmentManager::read_ertr;
+  using read_validate_data_ertr = ExtentAllocator::read_ertr;
   using read_validate_data_ret = read_validate_data_ertr::future<bool>;
   read_validate_data_ret read_validate_data(
     paddr_t record_base,
@@ -408,7 +408,7 @@ public:
   };
 private:
 
-  using scan_valid_records_ertr = SegmentManager::read_ertr;
+  using scan_valid_records_ertr = ExtentAllocator::read_ertr;
   using scan_valid_records_ret = scan_valid_records_ertr::future<
     size_t>;
   using found_record_handler_t = std::function<
@@ -445,9 +445,9 @@ WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::extent_info_t)
 namespace crimson::os::seastore {
 
 inline extent_len_t Journal::max_record_length() const {
-  return segment_manager.get_segment_size() -
+  return extent_allocator.get_allocation_unit_size() -
     p2align(ceph::encoded_sizeof_bounded<segment_header_t>(),
-	    size_t(segment_manager.get_block_size()));
+	    size_t(extent_allocator.get_block_size()));
 }
 
 }

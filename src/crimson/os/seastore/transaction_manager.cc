@@ -6,18 +6,18 @@
 
 #include "crimson/os/seastore/logging.h"
 #include "crimson/os/seastore/transaction_manager.h"
-#include "crimson/os/seastore/segment_manager.h"
+#include "crimson/os/seastore/extent_allocator.h"
 #include "crimson/os/seastore/journal.h"
 
 namespace crimson::os::seastore {
 
 TransactionManager::TransactionManager(
-  SegmentManager &_segment_manager,
+  ExtentAllocator &_extent_allocator,
   SegmentCleanerRef _segment_cleaner,
   JournalRef _journal,
   CacheRef _cache,
   LBAManagerRef _lba_manager)
-  : segment_manager(_segment_manager),
+  : extent_allocator(_extent_allocator),
     segment_cleaner(std::move(_segment_cleaner)),
     cache(std::move(_cache)),
     lba_manager(std::move(_lba_manager)),
@@ -31,7 +31,7 @@ TransactionManager::TransactionManager(
 TransactionManager::mkfs_ertr::future<> TransactionManager::mkfs()
 {
   LOG_PREFIX(TransactionManager::mkfs);
-  segment_cleaner->mount(segment_manager);
+  segment_cleaner->mount(extent_allocator);
   return journal->open_for_write().safe_then([this, FNAME](auto addr) {
     DEBUG("about to do_with");
     segment_cleaner->init_mkfs(addr);
@@ -65,7 +65,7 @@ TransactionManager::mount_ertr::future<> TransactionManager::mount()
 {
   LOG_PREFIX(TransactionManager::mount);
   cache->init();
-  segment_cleaner->mount(segment_manager);
+  segment_cleaner->mount(extent_allocator);
   return journal->replay([this](auto seq, auto paddr, const auto &e) {
     return cache->replay_delta(seq, paddr, e);
   }).safe_then([this] {
@@ -253,12 +253,12 @@ TransactionManager::submit_transaction_direct(
 	  cache->get_oldest_dirty_from().value_or(journal_seq));
 	auto to_release = tref.get_segment_to_release();
 	if (to_release != NULL_SEG_ID) {
-	  return segment_manager.release(to_release
+	  return extent_allocator.release(to_release
 	  ).safe_then([this, to_release] {
 	    segment_cleaner->mark_segment_released(to_release);
 	  });
 	} else {
-	  return SegmentManager::release_ertr::now();
+	  return ExtentAllocator::release_ertr::now();
 	}
       });
     }).safe_then([&tref] {

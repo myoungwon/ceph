@@ -13,7 +13,7 @@
 #include "crimson/os/seastore/cached_extent.h"
 #include "crimson/os/seastore/journal.h"
 #include "crimson/os/seastore/seastore_types.h"
-#include "crimson/os/seastore/segment_manager.h"
+#include "crimson/os/seastore/extent_allocator.h"
 #include "crimson/os/seastore/transaction.h"
 
 namespace crimson::os::seastore {
@@ -315,7 +315,7 @@ public:
      *
      * Release segment.
      */
-    using release_segment_ertr = SegmentManager::release_ertr;
+    using release_segment_ertr = ExtentAllocator::release_ertr;
     using release_segment_ret = release_segment_ertr::future<>;
     virtual release_segment_ret release_segment(
       segment_id_t id) = 0;
@@ -372,16 +372,16 @@ private:
 public:
   SegmentCleaner(config_t config, bool detailed = false);
 
-  void mount(SegmentManager &sm) {
+  void mount(ExtentAllocator &ea) {
     init_complete = false;
     used_bytes = 0;
     journal_tail_target = journal_seq_t{};
     journal_tail_committed = journal_seq_t{};
     journal_head = journal_seq_t{};
 
-    num_segments = sm.get_num_segments();
-    segment_size = static_cast<size_t>(sm.get_segment_size());
-    block_size = static_cast<size_t>(sm.get_block_size());
+    num_segments = ea.get_num_allocation_units();
+    segment_size = static_cast<size_t>(ea.get_allocation_unit_size());
+    block_size = static_cast<size_t>(ea.get_block_size());
 
     space_tracker.reset(
       detailed ?

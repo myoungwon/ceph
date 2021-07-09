@@ -18,6 +18,7 @@
 
 #include "crimson/os/seastore/segment_cleaner.h"
 #include "crimson/os/seastore/segment_manager/block.h"
+#include "crimson/os/seastore/extent_allocator.h"
 #include "crimson/os/seastore/collection_manager/flat_collection_manager.h"
 #include "crimson/os/seastore/onode_manager/staged-fltree/fltree_onode_manager.h"
 #include "crimson/os/seastore/omap_manager/btree/btree_omap_manager.h"
@@ -30,11 +31,11 @@ using crimson::common::local_conf;
 namespace crimson::os::seastore {
 
 SeaStore::SeaStore(
-  SegmentManagerRef sm,
+  ExtentAllocatorRef sm,
   TransactionManagerRef tm,
   CollectionManagerRef cm,
   OnodeManagerRef om)
-  : segment_manager(std::move(sm)),
+  : extent_allocator(std::move(sm)),
     transaction_manager(std::move(tm)),
     collection_manager(std::move(cm)),
     onode_manager(std::move(om))
@@ -56,7 +57,7 @@ seastar::future<> SeaStore::stop()
 
 seastar::future<> SeaStore::mount()
 {
-  return segment_manager->mount(
+  return extent_allocator->mount(
   ).safe_then([this] {
     return transaction_manager->mount();
   }).handle_error(
@@ -78,10 +79,10 @@ seastar::future<> SeaStore::umount()
 
 seastar::future<> SeaStore::mkfs(uuid_d new_osd_fsid)
 {
-  return segment_manager->mkfs(
+  return extent_allocator->mkfs(
     seastore_meta_t{new_osd_fsid}
   ).safe_then([this] {
-    return segment_manager->mount();
+    return extent_allocator->mount();
   }).safe_then([this] {
     return transaction_manager->mkfs();
   }).safe_then([this] {
@@ -1105,7 +1106,7 @@ seastar::future<std::tuple<int, std::string>> SeaStore::read_meta(const std::str
 
 uuid_d SeaStore::get_fsid() const
 {
-  return segment_manager->get_meta().seastore_id;
+  return extent_allocator->get_meta().seastore_id;
 }
 
 std::unique_ptr<SeaStore> make_seastore(
@@ -1115,19 +1116,20 @@ std::unique_ptr<SeaStore> make_seastore(
   auto sm = std::make_unique<
     segment_manager::block::BlockSegmentManager
     >(device + "/block");
+  auto ea = std::make_unique<ExtentAllocator>(sm.get());
 
   auto segment_cleaner = std::make_unique<SegmentCleaner>(
     SegmentCleaner::config_t::get_default(),
     false /* detailed */);
 
-  auto journal = std::make_unique<Journal>(*sm);
-  auto cache = std::make_unique<Cache>(*sm);
-  auto lba_manager = lba_manager::create_lba_manager(*sm, *cache);
+  auto journal = std::make_unique<Journal>(*ea);
+  auto cache = std::make_unique<Cache>(*ea);
+  auto lba_manager = lba_manager::create_lba_manager(*ea, *cache);
 
   journal->set_segment_provider(&*segment_cleaner);
 
   auto tm = std::make_unique<TransactionManager>(
-    *sm,
+    *ea,
     std::move(segment_cleaner),
     std::move(journal),
     std::move(cache),
@@ -1135,7 +1137,7 @@ std::unique_ptr<SeaStore> make_seastore(
 
   auto cm = std::make_unique<collection_manager::FlatCollectionManager>(*tm);
   return std::make_unique<SeaStore>(
-    std::move(sm),
+    std::move(ea),
     std::move(tm),
     std::move(cm),
     std::make_unique<crimson::os::seastore::onode::FLTreeOnodeManager>(*tm));

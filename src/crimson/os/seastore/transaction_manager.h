@@ -24,7 +24,7 @@
 #include "crimson/os/seastore/segment_cleaner.h"
 #include "crimson/os/seastore/seastore_types.h"
 #include "crimson/os/seastore/cache.h"
-#include "crimson/os/seastore/segment_manager.h"
+#include "crimson/os/seastore/extent_allocator.h"
 #include "crimson/os/seastore/lba_manager.h"
 #include "crimson/os/seastore/journal.h"
 
@@ -87,7 +87,7 @@ public:
   using base_ertr = Cache::base_ertr;
 
   TransactionManager(
-    SegmentManager &segment_manager,
+    ExtentAllocator &extent_allocator,
     SegmentCleanerRef segment_cleaner,
     JournalRef journal,
     CacheRef cache,
@@ -155,7 +155,7 @@ public:
    * Get extent mapped at pin.
    */
   using pin_to_extent_ertr = get_pin_ertr::extend_ertr<
-    SegmentManager::read_ertr>;
+    ExtentAllocator::read_ertr>;
   template <typename T>
   using pin_to_extent_ret = pin_to_extent_ertr::future<
     TCachedExtentRef<T>>;
@@ -192,7 +192,7 @@ public:
    * Read extent of type T at offset~length
    */
   using read_extent_ertr = get_pin_ertr::extend_ertr<
-    SegmentManager::read_ertr>;
+    ExtentAllocator::read_ertr>;
   template <typename T>
   using read_extent_ret = read_extent_ertr::future<
     TCachedExtentRef<T>>;
@@ -427,7 +427,7 @@ public:
     SegmentCleaner::ExtentCallbackInterface::release_segment_ret;
   release_segment_ret release_segment(
     segment_id_t id) final {
-    return segment_manager.release(id);
+    return extent_allocator.release(id);
   }
 
   /**
@@ -530,7 +530,7 @@ public:
   }
 
   extent_len_t get_block_size() const {
-    return segment_manager.get_block_size();
+    return extent_allocator.get_block_size();
   }
 
   store_statfs_t store_stat() const {
@@ -542,7 +542,7 @@ public:
 private:
   friend class Transaction;
 
-  SegmentManager &segment_manager;
+  ExtentAllocator &extent_allocator;
   SegmentCleanerRef segment_cleaner;
   CacheRef cache;
   LBAManagerRef lba_manager;

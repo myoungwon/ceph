@@ -34,7 +34,7 @@ class SeaStore final : public FuturizedStore {
 public:
 
   SeaStore(
-    SegmentManagerRef sm,
+    ExtentAllocatorRef sm,
     TransactionManagerRef tm,
     CollectionManagerRef cm,
     OnodeManagerRef om);
@@ -226,7 +226,7 @@ private:
     const std::optional<string> &_start,
     OMapManager::omap_list_config_t config);
 
-  SegmentManagerRef segment_manager;
+  ExtentAllocatorRef extent_allocator;
   TransactionManagerRef transaction_manager;
   CollectionManagerRef collection_manager;
   OnodeManagerRef onode_manager;

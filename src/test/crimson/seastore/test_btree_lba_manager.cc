@@ -27,6 +27,8 @@ using namespace crimson::os::seastore::lba_manager::btree;
 struct btree_lba_manager_test :
   public seastar_test_suite_t, JournalSegmentProvider {
   segment_manager::EphemeralSegmentManagerRef segment_manager;
+  SegmentManagerRef sm_manager;
+  ExtentAllocator extent_allocator;
   Journal journal;
   Cache cache;
   BtreeLBAManagerRef lba_manager;
@@ -37,9 +39,11 @@ struct btree_lba_manager_test :
 
   btree_lba_manager_test()
     : segment_manager(segment_manager::create_test_ephemeral()),
-      journal(*segment_manager),
-      cache(*segment_manager),
-      lba_manager(new BtreeLBAManager(*segment_manager, cache)),
+      sm_manager(segment_manager.get()),
+      extent_allocator(sm_manager.get()),
+      journal(extent_allocator),
+      cache(extent_allocator),
+      lba_manager(new BtreeLBAManager(extent_allocator, cache)),
       block_size(segment_manager->get_block_size())
   {
     journal.set_segment_provider(this);

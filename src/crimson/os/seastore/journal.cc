@@ -8,7 +8,7 @@
 #include "crimson/os/seastore/journal.h"
 
 #include "include/intarith.h"
-#include "crimson/os/seastore/segment_manager.h"
+#include "crimson/os/seastore/extent_allocator.h"
 
 namespace {
   seastar::logger& logger() {
@@ -48,8 +48,8 @@ segment_nonce_t generate_nonce(
     sizeof(meta.seastore_id.uuid));
 }
 
-Journal::Journal(SegmentManager &segment_manager)
-  : segment_manager(segment_manager) {}
+Journal::Journal(ExtentAllocator &extent_allocator)
+  : extent_allocator(extent_allocator) {}
 
 
 Journal::initialize_segment_ertr::future<segment_seq_t>
@@ -66,7 +66,7 @@ Journal::initialize_segment(Segment &segment)
 
   segment_seq_t seq = next_journal_segment_seq++;
   current_segment_nonce = generate_nonce(
-    seq, segment_manager.get_meta());
+    seq, extent_allocator.get_meta());
   auto header = segment_header_t{
     seq,
     segment.get_segment_id(),
@@ -76,14 +76,14 @@ Journal::initialize_segment(Segment &segment)
 
   bufferptr bp(
     ceph::buffer::create_page_aligned(
-      segment_manager.get_block_size()));
+      extent_allocator.get_block_size()));
   bp.zero();
   auto iter = bl.cbegin();
   iter.copy(bl.length(), bp.c_str());
   bl.clear();
   bl.append(bp);
 
-  written_to = segment_manager.get_block_size();
+  written_to = extent_allocator.get_block_size();
   committed_to = 0;
   return segment.write(0, bl).safe_then(
     [=] {
@@ -125,7 +125,7 @@ ceph::bufferlist Journal::encode_record(
   for (const auto &i: record.deltas) {
     encode(i, bl);
   }
-  auto block_size = segment_manager.get_block_size();
+  auto block_size = extent_allocator.get_block_size();
   if (bl.length() % block_size != 0) {
     bl.append_zero(
       block_size - (bl.length() % block_size));
@@ -172,7 +172,7 @@ Journal::read_validate_data_ret Journal::read_validate_data(
   paddr_t record_base,
   const record_header_t &header)
 {
-  return segment_manager.read(
+  return extent_allocator.read(
     record_base.add_offset(header.mdlength),
     header.dlength
   ).safe_then([=, &header](auto bptr) {
@@ -190,7 +190,7 @@ Journal::write_record_ret Journal::write_record(
   ceph::bufferlist to_write = encode_record(
     rsize, std::move(record));
   auto target = written_to;
-  assert((to_write.length() % segment_manager.get_block_size()) == 0);
+  assert((to_write.length() % extent_allocator.get_block_size()) == 0);
   written_to += to_write.length();
   logger().debug(
     "write_record, mdlength {}, dlength {}, target {}",
@@ -245,7 +245,7 @@ Journal::record_size_t Journal::get_encoded_record_length(
   for (const auto &i: record.extents) {
     data += i.bl.length();
   }
-  metadata = p2roundup(metadata, (extent_len_t)segment_manager.get_block_size());
+  metadata = p2roundup(metadata, (extent_len_t)extent_allocator.get_block_size());
   return record_size_t{metadata, data};
 }
 
@@ -267,7 +267,7 @@ Journal::roll_journal_segment()
 	  Segment::close_ertr::now()).safe_then([this] {
       return segment_provider->get_segment();
     }).safe_then([this](auto segment) {
-      return segment_manager.open(segment);
+      return extent_allocator.allocate(segment);
     }).safe_then([this](auto sref) {
       current_journal_segment = sref;
       written_to = 0;
@@ -289,9 +289,9 @@ Journal::roll_journal_segment()
 Journal::read_segment_header_ret
 Journal::read_segment_header(segment_id_t segment)
 {
-  return segment_manager.read(
+  return extent_allocator.read(
     paddr_t{segment, 0},
-    segment_manager.get_block_size()
+    extent_allocator.get_block_size()
   ).handle_error(
     read_segment_header_ertr::pass_further{},
     crimson::ct_error::assert_all{
@@ -307,7 +307,7 @@ Journal::read_segment_header(segment_id_t segment)
     logger().debug(
       "Journal::read_segment_header: segment {} block crc {}",
       segment,
-      bl.begin().crc32c(segment_manager.get_block_size(), 0));
+      bl.begin().crc32c(extent_allocator.get_block_size(), 0));
 
     auto bp = bl.cbegin();
     try {
@@ -338,7 +338,7 @@ Journal::open_for_write_ret Journal::open_for_write()
 	seq,
 	paddr_t{
 	  current_journal_segment->get_segment_id(),
-	    static_cast<segment_off_t>(segment_manager.get_block_size())}
+	    static_cast<segment_off_t>(extent_allocator.get_block_size())}
       });
   });
 }
@@ -350,13 +350,13 @@ Journal::find_replay_segments_fut Journal::find_replay_segments()
     [this](auto &&segments) mutable {
       return crimson::do_for_each(
 	boost::make_counting_iterator(segment_id_t{0}),
-	boost::make_counting_iterator(segment_manager.get_num_segments()),
+	boost::make_counting_iterator(extent_allocator.get_num_allocation_units()),
 	[this, &segments](auto i) {
 	  return read_segment_header(i
 	  ).safe_then([this, &segments, i](auto header) mutable {
 	    if (generate_nonce(
 		  header.journal_segment_seq,
-		  segment_manager.get_meta()) != header.segment_nonce) {
+		  extent_allocator.get_meta()) != header.segment_nonce) {
 	      logger().debug(
 		"find_replay_segments: nonce mismatch segment {} header {}",
 		i,
@@ -435,7 +435,7 @@ Journal::find_replay_segments_fut Journal::find_replay_segments()
 	  } else {
 	    replay_from = paddr_t{
 	      from->first,
-	      (segment_off_t)segment_manager.get_block_size()};
+	      (segment_off_t)extent_allocator.get_block_size()};
 	  }
 	  auto ret = replay_segments_t(segments.end() - from);
 	  std::transform(
@@ -445,7 +445,7 @@ Journal::find_replay_segments_fut Journal::find_replay_segments()
 		p.second.journal_segment_seq,
 		paddr_t{
 		  p.first,
-		  (segment_off_t)segment_manager.get_block_size()}};
+		  (segment_off_t)extent_allocator.get_block_size()}};
 	      logger().debug(
 		"Journal::find_replay_segments: replaying from  {}",
 		ret);
@@ -463,18 +463,18 @@ Journal::read_validate_record_metadata_ret Journal::read_validate_record_metadat
   paddr_t start,
   segment_nonce_t nonce)
 {
-  auto block_size = segment_manager.get_block_size();
-  if (start.offset + block_size > (int64_t)segment_manager.get_segment_size()) {
+  auto block_size = extent_allocator.get_block_size();
+  if (start.offset + block_size > (int64_t)extent_allocator.get_allocation_unit_size()) {
     return read_validate_record_metadata_ret(
       read_validate_record_metadata_ertr::ready_future_marker{},
       std::nullopt);
   }
-  return segment_manager.read(start, block_size
+  return extent_allocator.read(start, block_size
   ).safe_then(
     [=](bufferptr bptr) mutable
     -> read_validate_record_metadata_ret {
       logger().debug("read_validate_record_metadata: reading {}", start);
-      auto block_size = segment_manager.get_block_size();
+      auto block_size = extent_allocator.get_block_size();
       bufferlist bl;
       bl.append(bptr);
       auto bp = bl.cbegin();
@@ -493,10 +493,10 @@ Journal::read_validate_record_metadata_ret Journal::read_validate_record_metadat
       }
       if (header.mdlength > (extent_len_t)block_size) {
 	if (start.offset + header.mdlength >
-	    (int64_t)segment_manager.get_segment_size()) {
+	    (int64_t)extent_allocator.get_allocation_unit_size()) {
 	  return crimson::ct_error::input_output_error::make();
 	}
-	return segment_manager.read(
+	return extent_allocator.read(
 	  {start.segment, start.offset + (segment_off_t)block_size},
 	  header.mdlength - block_size).safe_then(
 	    [header=std::move(header), bl=std::move(bl)](
@@ -701,7 +701,7 @@ Journal::scan_valid_records_ret Journal::scan_valid_records(
     found_record_handler_t &handler)
 {
   if (cursor.offset.offset == 0) {
-    cursor.offset.offset = segment_manager.get_block_size();
+    cursor.offset.offset = extent_allocator.get_block_size();
   }
   auto retref = std::make_unique<size_t>(0);
   auto budget_used = *retref;

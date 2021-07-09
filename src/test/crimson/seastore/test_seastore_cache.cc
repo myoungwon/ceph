@@ -21,13 +21,17 @@ namespace {
 
 struct cache_test_t : public seastar_test_suite_t {
   segment_manager::EphemeralSegmentManagerRef segment_manager;
+  SegmentManagerRef sm_manager;
+  ExtentAllocator extent_allocator;
   Cache cache;
   paddr_t current{0, 0};
   journal_seq_t seq;
 
   cache_test_t()
     : segment_manager(segment_manager::create_test_ephemeral()),
-      cache(*segment_manager) {}
+      sm_manager(segment_manager.get()),
+      extent_allocator(sm_manager.get()),
+      cache(extent_allocator) {}
 
   seastar::future<std::optional<paddr_t>> submit_transaction(
     TransactionRef t) {

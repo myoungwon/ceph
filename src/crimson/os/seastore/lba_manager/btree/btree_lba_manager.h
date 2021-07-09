@@ -18,7 +18,7 @@
 #include "crimson/os/seastore/seastore_types.h"
 #include "crimson/os/seastore/lba_manager.h"
 #include "crimson/os/seastore/cache.h"
-#include "crimson/os/seastore/segment_manager.h"
+#include "crimson/os/seastore/extent_allocator.h"
 
 #include "crimson/os/seastore/lba_manager/btree/lba_btree_node.h"
 
@@ -44,7 +44,7 @@ namespace crimson::os::seastore::lba_manager::btree {
 class BtreeLBAManager : public LBAManager {
 public:
   BtreeLBAManager(
-    SegmentManager &segment_manager,
+    ExtentAllocator &extent_allocator,
     Cache &cache);
 
   mkfs_ret mkfs(
@@ -125,7 +125,7 @@ public:
 
   ~BtreeLBAManager();
 private:
-  SegmentManager &segment_manager;
+  ExtentAllocator &extent_allocator;
   Cache &cache;
 
   btree_pin_set_t pin_set;

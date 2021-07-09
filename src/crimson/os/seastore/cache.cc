@@ -15,8 +15,8 @@
 
 namespace crimson::os::seastore {
 
-Cache::Cache(SegmentManager &segment_manager) :
-  segment_manager(segment_manager) {}
+Cache::Cache(ExtentAllocator &extent_allocator) :
+  extent_allocator(extent_allocator) {}
 
 Cache::~Cache()
 {

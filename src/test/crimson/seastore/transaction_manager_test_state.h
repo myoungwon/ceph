@@ -9,6 +9,7 @@
 #include "crimson/os/seastore/cache.h"
 #include "crimson/os/seastore/transaction_manager.h"
 #include "crimson/os/seastore/segment_manager/ephemeral.h"
+#include "crimson/os/seastore/extent_allocator.h"
 #include "crimson/os/seastore/seastore.h"
 #include "crimson/os/seastore/segment_manager.h"
 #include "crimson/os/seastore/collection_manager/flat_collection_manager.h"
@@ -73,14 +74,15 @@ auto get_transaction_manager(
   auto segment_cleaner = std::make_unique<SegmentCleaner>(
     SegmentCleaner::config_t::get_default(),
     true);
-  auto journal = std::make_unique<Journal>(segment_manager);
-  auto cache = std::make_unique<Cache>(segment_manager);
-  auto lba_manager = lba_manager::create_lba_manager(segment_manager, *cache);
+  auto extent_allocator = std::make_unique<ExtentAllocator>(&segment_manager);
+  auto journal = std::make_unique<Journal>(*extent_allocator);
+  auto cache = std::make_unique<Cache>(*extent_allocator);
+  auto lba_manager = lba_manager::create_lba_manager(*extent_allocator, *cache);
 
   journal->set_segment_provider(&*segment_cleaner);
 
   return std::make_unique<TransactionManager>(
-    segment_manager,
+    *extent_allocator,
     std::move(segment_cleaner),
     std::move(journal),
     std::move(cache),
@@ -90,8 +92,9 @@ auto get_transaction_manager(
 auto get_seastore(SegmentManagerRef sm) {
   auto tm = get_transaction_manager(*sm);
   auto cm = std::make_unique<collection_manager::FlatCollectionManager>(*tm);
+   auto ea = std::make_unique<ExtentAllocator>(sm.get());
   return std::make_unique<SeaStore>(
-    std::move(sm),
+    std::move(ea),
     std::move(tm),
     std::move(cm),
     std::make_unique<crimson::os::seastore::onode::FLTreeOnodeManager>(*tm));
