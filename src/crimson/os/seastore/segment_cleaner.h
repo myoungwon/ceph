@@ -438,18 +438,6 @@ public:
       segment_off_t len) = 0;
 
     /**
-     * scan_extents
-     *
-     * Interface shim for Journal::scan_extents
-     */
-    using scan_extents_cursor = Journal::scan_valid_records_cursor;
-    using scan_extents_ertr = Journal::scan_extents_ertr;
-    using scan_extents_ret = Journal::scan_extents_ret;
-    virtual scan_extents_ret scan_extents(
-      scan_extents_cursor &cursor,
-      extent_len_t bytes_to_read) = 0;
-
-    /**
      * release_segment
      *
      * Release segment.
@@ -481,6 +469,8 @@ private:
   size_t num_segments = 0;
   size_t segment_size = 0;
   size_t block_size = 0;
+
+  ScannerRef scanner;
   /// one segment provider for each segment manager
   device_id_t device_id = 0;
 
@@ -514,6 +504,7 @@ private:
 public:
   SegmentCleaner(
     config_t config,
+    ScannerRef&& scanner,
     bool detailed = false,
     device_id_t device_id = 0);
 
@@ -541,6 +532,13 @@ public:
     segments.resize({&sm});
     empty_segments = num_segments;
   }
+
+  using init_segments_ertr = crimson::errorator<
+    crimson::ct_error::input_output_error>;
+  using init_segments_ret_bare =
+    std::vector<std::pair<device_segment_t, segment_header_t>>;
+  using init_segments_ret = init_segments_ertr::future<init_segments_ret_bare>;
+  init_segments_ret init_segments();
 
   get_segment_ret get_segment() final;
 
@@ -761,7 +759,7 @@ private:
 
   // GC status helpers
   std::unique_ptr<
-    ExtentCallbackInterface::scan_extents_cursor
+    Scanner::scan_extents_cursor
     > scan_cursor;
 
   /**
@@ -839,7 +837,7 @@ private:
   } gc_process;
 
   using gc_ertr = work_ertr::extend_ertr<
-    ExtentCallbackInterface::scan_extents_ertr
+    Scanner::scan_extents_ertr
     >;
 
   gc_cycle_ret do_gc_cycle();

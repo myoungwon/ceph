@@ -74,10 +74,14 @@ struct journal_test_t : seastar_test_suite_t, SegmentProvider {
 
   const segment_off_t block_size;
 
+  ScannerRef scanner;
+
   journal_test_t()
     : segment_manager(segment_manager::create_test_ephemeral()),
-      block_size(segment_manager->get_block_size())
+      block_size(segment_manager->get_block_size()),
+      scanner(std::make_unique<Scanner>())
   {
+    scanner->add_segment_manager(segment_manager.get());
   }
 
   segment_id_t next = 0;
@@ -91,7 +95,7 @@ struct journal_test_t : seastar_test_suite_t, SegmentProvider {
   void update_journal_tail_committed(journal_seq_t paddr) final {}
 
   seastar::future<> set_up_fut() final {
-    journal.reset(new Journal(*segment_manager));
+    journal.reset(new Journal(*segment_manager, *scanner));
     journal->set_segment_provider(this);
     journal->set_write_pipeline(&pipeline);
     return segment_manager->init(
@@ -108,12 +112,43 @@ struct journal_test_t : seastar_test_suite_t, SegmentProvider {
   auto replay(T &&f) {
     return journal->close(
     ).safe_then([this, f=std::move(f)]() mutable {
-      journal.reset(new Journal(*segment_manager));
+      journal.reset(new Journal(*segment_manager, *scanner));
       journal->set_segment_provider(this);
       journal->set_write_pipeline(&pipeline);
-      return journal->replay(std::forward<T>(std::move(f)));
-    }).safe_then([this] {
-      return journal->open_for_write();
+      return seastar::do_with(
+	std::vector<std::pair<device_segment_t, segment_header_t>>(),
+	[this](auto& segments) {
+	return crimson::do_for_each(
+	  segment_manager->begin(),
+	  segment_manager->end(),
+	  [this, &segments](auto segment_id) {
+	  return scanner->read_segment_header(segment_id)
+	  .safe_then([&segments, segment_id](auto header) {
+	    if (!header.out_of_line) {
+	      segments.emplace_back(std::make_pair(segment_id, std::move(header)));
+	    }
+	    return seastar::now();
+	  }).handle_error(
+	    crimson::ct_error::enoent::handle([](auto) {
+	      return SegmentCleaner::init_segments_ertr::now();
+	    }),
+	    crimson::ct_error::enodata::handle([](auto) {
+	      return SegmentCleaner::init_segments_ertr::now();
+	    }),
+	    crimson::ct_error::input_output_error::pass_further{}
+	  );
+	}).safe_then([&segments] {
+	  return seastar::make_ready_future<
+	    std::vector<std::pair<device_segment_t, segment_header_t>>>(
+	      std::move(segments));
+	});
+      }).safe_then([this, f=std::move(f)](auto&& segments) mutable {
+	return journal->replay(
+	  std::move(segments),
+	  std::forward<T>(std::move(f)));
+      }).safe_then([this] {
+	return journal->open_for_write();
+      });
     });
   }
 
