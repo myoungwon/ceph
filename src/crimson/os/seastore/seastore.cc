@@ -1180,6 +1180,16 @@ std::unique_ptr<SeaStore> make_seastore(
   auto cache = std::make_unique<Cache>(*sm);
   auto lba_manager = lba_manager::create_lba_manager(*sm, *cache);
 
+  auto epm = std::make_unique<ExtentPlacementManager>(*cache, *lba_manager);
+
+  epm->add_allocator(
+    device_type_t::SEGMENTED,
+    std::make_unique<SegmentedAllocator>(
+      *segment_cleaner,
+      *sm,
+      *lba_manager,
+      *journal));
+
   journal->set_segment_provider(&*segment_cleaner);
 
   auto tm = std::make_unique<TransactionManager>(
@@ -1187,7 +1197,8 @@ std::unique_ptr<SeaStore> make_seastore(
     std::move(segment_cleaner),
     std::move(journal),
     std::move(cache),
-    std::move(lba_manager));
+    std::move(lba_manager),
+    std::move(epm));
 
   auto cm = std::make_unique<collection_manager::FlatCollectionManager>(*tm);
   return std::make_unique<SeaStore>(

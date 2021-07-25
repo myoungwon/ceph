@@ -765,6 +765,9 @@ record_t Cache::prepare_record(Transaction &t)
   record.extents.reserve(t.fresh_block_list.size());
   for (auto &i: t.fresh_block_list) {
     DEBUGT("fresh block {}", t, *i);
+    if (!i->is_relative()) {
+      continue;
+    }
     get_by_ext(efforts.fresh_by_ext,
                i->get_type()).increment(i->get_length());
     bufferlist bl;
@@ -797,7 +800,9 @@ void Cache::complete_commit(
   DEBUGT("enter", t);
 
   for (auto &i: t.fresh_block_list) {
-    i->set_paddr(final_block_start.add_relative(i->get_paddr()));
+    if (i->is_relative()) {
+      i->set_paddr(final_block_start.add_relative(i->get_paddr()));
+    }
     i->last_committed_crc = i->get_crc32c();
     i->on_initial_write();
 
