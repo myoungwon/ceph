@@ -26,8 +26,11 @@ struct segment_info_t {
 
   device_segment_t segment;
 
+  bool out_of_line;
+
   bool is_in_journal(journal_seq_t tail_committed) const {
-    return journal_segment_seq != NULL_SEG_SEQ &&
+    return !out_of_line &&
+      journal_segment_seq != NULL_SEG_SEQ &&
       tail_committed.segment_seq <= journal_segment_seq;
   }
 
@@ -154,7 +157,8 @@ public:
   virtual void init_mark_segment_closed(
     device_segment_t segment,
     segment_id_t num_segments_by_sm,
-    segment_seq_t seq) {}
+    segment_seq_t seq,
+    bool out_of_line) {}
 
   virtual segment_seq_t get_seq(device_segment_t id) { return 0; }
 
@@ -586,7 +590,8 @@ public:
     device_segment_t segment,
     // number of segments of the current segment manager
     segment_id_t num_segments_by_sm,
-    segment_seq_t seq) final
+    segment_seq_t seq,
+    bool out_of_line) final
   {
     crimson::get_logger(ceph_subsys_seastore).debug(
       "SegmentCleaner::init_mark_segment_closed: segment {}, seq {}",
@@ -608,6 +613,7 @@ public:
 	  0};
     }
     segments[segment].journal_segment_seq = seq;
+    segments[segment].out_of_line = out_of_line;
   }
 
   segment_seq_t get_seq(device_segment_t id) final {
@@ -965,6 +971,7 @@ private:
 	"gc_should_reclaim_space {}, "
 	"journal_head {}, "
 	"journal_tail_target {}, "
+	"journal_tail_commit {}, "
 	"dirty_tail {}, "
 	"dirty_tail_limit {}, "
 	"gc_should_trim_journal {}, ",
@@ -980,6 +987,7 @@ private:
 	gc_should_reclaim_space(),
 	journal_head,
 	journal_tail_target,
+	journal_tail_committed,
 	get_dirty_tail(),
 	get_dirty_tail_limit(),
 	gc_should_trim_journal()
