@@ -378,13 +378,14 @@ public:
   TCachedExtentRef<T> alloc_new_extent(
     Transaction &t,       ///< [in, out] current transaction
     segment_off_t length, ///< [in] length
-    bool delay = false    ///< [in] whether the address is determined now
+    std::optional<paddr_t> new_alloc_temp = std::nullopt ///< [in] temp addr for new extents
   ) {
     auto ret = CachedExtent::make_cached_extent_ref<T>(
       alloc_cache_buf(length));
-    if (delay) {
+    if (new_alloc_temp) {
       // only logical extents' poffset allocation can be delayed
       assert(ret->is_logical());
+      ret->set_paddr(*new_alloc_temp);
       t.add_delayed_alloc_extent(ret);
     } else {
       t.add_fresh_extent(ret);
@@ -399,11 +400,12 @@ public:
   TCachedExtentRef<T> alloc_new_extent(
     Transaction &t,       ///< [in, out] current transaction
     segment_off_t length, ///< [in] length
-    bool delay = false    ///< [in] whether the address is determined now
+    std::optional<paddr_t> new_alloc_temp = std::nullopt
   ) {
     auto ret = CachedExtent::make_cached_extent_ref<T>(
       alloc_cache_buf(length));
     assert(!ret->is_logical());
+    assert(!new_alloc_temp);
     t.add_fresh_extent(ret);
     ret->state = CachedExtent::extent_state_t::INITIAL_WRITE_PENDING;
     return ret;
@@ -418,7 +420,7 @@ public:
     Transaction &t,       ///< [in, out] current transaction
     extent_types_t type,  ///< [in] type tag
     segment_off_t length, ///< [in] length
-    bool delay = false	  ///< [in] whether the address is determined now
+    std::optional<paddr_t> new_alloc_temp = std::nullopt  ///< [in] whether delay addr allocation
     );
 
   /**

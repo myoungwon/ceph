@@ -614,7 +614,7 @@ CachedExtentRef Cache::alloc_new_extent_by_type(
   Transaction &t,       ///< [in, out] current transaction
   extent_types_t type,  ///< [in] type tag
   segment_off_t length, ///< [in] length
-  bool delay		///< [in] whether the address is determined now
+  std::optional<paddr_t> delay ///< [in] temp addr for new extents
 )
 {
   switch (type) {

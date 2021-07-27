@@ -17,6 +17,8 @@ std::ostream &segment_to_stream(std::ostream &out, const device_segment_t &t)
     return out << "ZERO_SEG";
   else if (t.segment == FAKE_SEG_ID)
     return out << "FAKE_SEG";
+  else if (t.segment == DELAYED_TEMP_SEG_ID)
+    return out << "DELAYED_TEMP_SEG";
   else
     return out << t;
 }

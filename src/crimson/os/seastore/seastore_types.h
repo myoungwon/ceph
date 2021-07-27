@@ -62,6 +62,8 @@ constexpr device_segment_id_t FAKE_SEG_ID =
  */
 constexpr device_segment_id_t ZERO_SEG_ID =
   std::numeric_limits<segment_id_t>::max() - 5;
+constexpr device_segment_id_t DELAYED_TEMP_SEG_ID =
+  std::numeric_limits<segment_id_t>::max() - 6;
 
 struct device_segment_t {
   device_segment_id_t segment;
@@ -314,6 +316,9 @@ constexpr paddr_t make_fake_paddr(segment_off_t off) {
 }
 constexpr paddr_t zero_paddr() {
   return paddr_t{ZERO_SEG_ID, 0};
+}
+constexpr paddr_t delayed_temp_paddr(segment_off_t off) {
+  return paddr_t{DELAYED_TEMP_SEG_ID, off};
 }
 
 struct __attribute((packed)) paddr_le_t {

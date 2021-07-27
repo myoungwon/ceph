@@ -313,9 +313,37 @@ public:
     // for extents that would be stored in NVDIMM/PMEM, no delayed
     // allocation is needed
     if (need_delayed_allocation(dtype)) {
-      extent = cache.alloc_new_extent_by_type(t, type, length, true);
+      // set a unique temperary paddr, this is necessary because
+      // transaction's write_set is indexed by paddr
+      extent = cache.alloc_new_extent_by_type(
+        t, type, length, delayed_temp_paddr(fake_segment_off));
+      fake_segment_off += length;
     } else {
       extent = cache.alloc_new_extent_by_type(t, type, length);
+    }
+    extent->backend_type = dtype;
+    extent->hint = hint;
+    return extent;
+  }
+
+  template<
+    typename T,
+    std::enable_if_t<is_base_of_v<LogicalCachedExtent, T>, int> = 0>
+  TCachedExtentRef<T> alloc_new_extent(
+    Transaction& t,
+    segment_off_t length,
+    ool_placement_hint_t hint = ool_placement_hint_t::NONE)
+  {
+    auto dtype = get_allocator_type(hint);
+    TCachedExtentRef<T> extent;
+    if (need_delayed_allocation(dtype)) {
+      // set a unique temperary paddr, this is necessary because
+      // transaction's write_set is indexed by paddr
+      extent = cache.alloc_new_extent<T>(
+        t, length, delayed_temp_paddr(fake_segment_off));
+      fake_segment_off += length;
+    } else {
+      extent = cache.alloc_new_extent<T>(t, length);
     }
     extent->backend_type = dtype;
     extent->hint = hint;
@@ -337,7 +365,7 @@ public:
         }
         if (should_be_inline(extent)) {
           auto old_addr = extent->get_paddr();
-          t.add_fresh_extent(extent);
+          t.add_fresh_extent(extent, true, true);
           inline_list.emplace_back(old_addr, extent);
           continue;
         }
@@ -375,6 +403,7 @@ private:
     return (std::rand() % 2) == 0;
   }
 
+  segment_off_t fake_segment_off = 0;
   ExtentAllocatorRef& get_allocator(
     device_type_t type,
     ool_placement_hint_t hint) {
