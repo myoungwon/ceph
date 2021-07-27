@@ -57,7 +57,7 @@ SegmentedAllocator::Writer::finish_write(
       ool_extent->persist_paddr();
       lextent->backend_type = device_type_t::NONE;
       lextent->hint = {};
-      t.add_fresh_extent(lextent, false);
+      t.add_fresh_extent(lextent, delay_inline_ool_t::DELAYED_OOL);
       return finish_record_iertr::now();
     });
   }).si_then([&record] {

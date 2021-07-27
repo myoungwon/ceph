@@ -387,7 +387,8 @@ BtreeLBAManager::rewrite_extent_ret BtreeLBAManager::rewrite_extent(
     auto nlba_extent = cache.alloc_new_extent_by_type(
       t,
       lba_extent->get_type(),
-      lba_extent->get_length())->cast<LBANode>();
+      lba_extent->get_length(),
+      delay_inline_ool_t::NO_DELAY)->cast<LBANode>();
     lba_extent->get_bptr().copy_out(
       0,
       lba_extent->get_length(),

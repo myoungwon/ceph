@@ -55,6 +55,8 @@ constexpr segment_id_t FAKE_SEG_ID =
  */
 constexpr segment_id_t ZERO_SEG_ID =
   std::numeric_limits<segment_id_t>::max() - 5;
+constexpr segment_id_t DELAYED_TEMP_SEG_ID =
+  std::numeric_limits<segment_id_t>::max() - 6;
 
 std::ostream &segment_to_stream(std::ostream &, const segment_id_t &t);
 
@@ -215,6 +217,16 @@ constexpr paddr_t make_fake_paddr(segment_off_t off) {
 constexpr paddr_t zero_paddr() {
   return paddr_t{ZERO_SEG_ID, 0};
 }
+constexpr paddr_t delayed_temp_paddr(segment_off_t off) {
+  return paddr_t{DELAYED_TEMP_SEG_ID, off};
+}
+
+enum class delay_inline_ool_t {
+  NO_DELAY,
+  DELAYED,
+  DELAYED_INLINE,
+  DELAYED_OOL
+};
 
 struct __attribute((packed)) paddr_le_t {
   ceph_le32 segment = ceph_le32(NULL_SEG_ID);

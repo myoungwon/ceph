@@ -7,6 +7,7 @@
 
 #include <boost/intrusive/list.hpp>
 
+#include "crimson/common/log.h"
 #include "crimson/os/seastore/ordering_handle.h"
 #include "crimson/os/seastore/seastore_types.h"
 #include "crimson/os/seastore/cached_extent.h"
@@ -39,6 +40,11 @@ public:
       if (out)
 	*out = CachedExtentRef(&*iter);
       return get_extent_ret::PRESENT;
+    } else if (auto iter = delayed_set.find_offset(addr);
+	iter != delayed_set.end()) {
+      if (out)
+	*out = CachedExtentRef(&*iter);
+      return get_extent_ret::PRESENT;
     } else if (
       auto iter = read_set.find(addr);
       iter != read_set.end()) {
@@ -60,7 +66,12 @@ public:
       // will affect relative paddrs, and it should be rare to retire a fresh
       // extent.
       ref->state = CachedExtent::extent_state_t::INVALID;
-      write_set.erase(*ref);
+      if (ref->is_inline()) {
+	write_set.erase(*ref);
+      } else {
+	// if ref is not relative, it must be in the delayed set
+	delayed_set.erase(*ref);
+      }
     } else if (ref->is_mutation_pending()) {
       ref->state = CachedExtent::extent_state_t::INVALID;
       write_set.erase(*ref);
@@ -83,18 +94,37 @@ public:
     ceph_assert(inserted);
   }
 
-  void add_fresh_extent(CachedExtentRef ref, bool set_addr = true) {
+  void add_fresh_extent(
+    CachedExtentRef ref,
+    delay_inline_ool_t delay_state)
+  {
     ceph_assert(!is_weak());
-    fresh_block_list.push_back(ref);
-    if (set_addr) {
+    switch (delay_state) {
+    case delay_inline_ool_t::NO_DELAY:
+      //XXX: this is actually left for persistent memory-like
+      //     devices, and should set absolute addresses here
+    case delay_inline_ool_t::DELAYED_INLINE:
       ref->set_paddr(make_record_relative_paddr(offset));
       offset += ref->get_length();
+    case delay_inline_ool_t::DELAYED_OOL:
+      // for delayed ool extents, absolute should have been set
+      assert(!ref->get_paddr().is_null());
+      if (delay_state >= delay_inline_ool_t::DELAYED_INLINE) {
+	delayed_set.erase(*ref);
+      }
+      fresh_block_list.push_back(ref);
+      write_set.insert(*ref);
+      break;
+    case delay_inline_ool_t::DELAYED:
+      assert(ref->is_logical());
+      ref->set_paddr(delayed_temp_paddr(delayed_temp_offset));
+      delayed_temp_offset += ref->get_length();
+      delayed_alloc_list.emplace_back(ref->cast<LogicalCachedExtent>());
+      delayed_set.insert(*ref);
+      break;
+    default:
+      ceph_assert(0 == "no way");
     }
-    write_set.insert(*ref);
-  }
-
-  void add_delayed_alloc_extent(LogicalCachedExtentRef ref) {
-    delayed_alloc_list.emplace_back(ref);
   }
 
   void add_mutated_extent(CachedExtentRef ref) {
@@ -201,6 +231,10 @@ public:
       i->state = CachedExtent::extent_state_t::INVALID;
       write_set.erase(*i++);
     }
+    for (auto i = delayed_set.begin();
+	 i != delayed_set.end();) {
+      delayed_set.erase(*i++);
+    }
   }
 
   friend class crimson::os::seastore::SeaStore;
@@ -209,8 +243,10 @@ public:
   void reset_preserve_handle(journal_seq_t initiated_after) {
     root.reset();
     offset = 0;
+    delayed_temp_offset = 0;
     read_set.clear();
     write_set.clear();
+    delayed_set.clear();
     fresh_block_list.clear();
     mutated_block_list.clear();
     retired_set.clear();
@@ -238,9 +274,12 @@ private:
   RootBlockRef root;        ///< ref to root if read or written by transaction
 
   segment_off_t offset = 0; ///< relative offset of next block
+  segment_off_t delayed_temp_offset = 0;
 
   read_set_t<Transaction> read_set; ///< set of extents read by paddr
   ExtentIndex write_set;            ///< set of extents written by paddr
+  ExtentIndex delayed_set;	    ///< set of extents whose paddr
+				    ///	 allocation are delayed
 
   std::list<CachedExtentRef> fresh_block_list;   ///< list of fresh blocks
   std::list<CachedExtentRef> mutated_block_list; ///< list of mutated blocks
