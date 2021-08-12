@@ -24,6 +24,8 @@ using CachedExtentRef = boost::intrusive_ptr<CachedExtent>;
 class SegmentedAllocator;
 class TransactionManager;
 class ExtentPlacementManager;
+class RBAllocator;
+class ExtentOolWriter;
 
 // #define DEBUG_CACHED_EXTENT_REF
 #ifdef DEBUG_CACHED_EXTENT_REF
@@ -329,7 +331,7 @@ public:
 
   /// hint for allocators
   ool_placement_hint_t hint;
-
+  
   bool ool = false; /// true if extent is located at ool
 
   bool is_inline() const {
@@ -475,6 +477,8 @@ protected:
   friend class crimson::os::seastore::SegmentedAllocator;
   friend class crimson::os::seastore::TransactionManager;
   friend class crimson::os::seastore::ExtentPlacementManager;
+  friend class crimson::os::seastore::RBAllocator;
+  friend class crimson::os::seastore::ExtentOolWriter;
 };
 
 std::ostream &operator<<(std::ostream &, CachedExtent::extent_state_t);

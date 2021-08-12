@@ -516,6 +516,8 @@ private:
 
   WritePipeline write_pipeline;
 
+  RandomBlockManager *rbm;
+
   struct {
     uint64_t extents_retired_total = 0;
     uint64_t extents_retired_bytes = 0;
