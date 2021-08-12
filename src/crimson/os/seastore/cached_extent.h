@@ -329,6 +329,8 @@ public:
 
   /// hint for allocators
   ool_placement_hint_t hint;
+  
+  bool ool = false;
 
   bool is_relative() const {
     return poffset.is_relative();

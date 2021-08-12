@@ -76,6 +76,17 @@ public:
     }
     return encode_record(rsize, std::move(record), block_size, nonce);
   }
+  ceph::bufferlist encode_rbm(device_segment_t block) {
+    assert(extents.size() == record.extents.size());
+    auto rsize = get_encoded_record_length();
+    block_off_t extent_offset = base + rsize.mdlength;
+    for (auto& extent : extents) {
+      extent->set_ool_paddr(
+        {block, extent_offset});
+      extent_offset += extent->get_bptr().length();
+    }
+    return encode_record(rsize, std::move(record), block_size, nonce);
+  }
   void add_extent(LogicalCachedExtentRef& extent) {
     extents.emplace_back(new OolExtent(extent));
     ceph::bufferlist bl;
@@ -288,6 +299,100 @@ private:
   Journal& journal;
 };
 
+/*
+ * RandomBlock allocator 
+ *
+ */
+class RBAllocator : public ExtentAllocator {
+  class Writer : public ExtentOolWriter {
+  public:
+    Writer(
+      RandomBlockManager& rbm,
+      LBAManager& lba_manager,
+      Journal& journal)
+      : rbm(rbm),
+        lba_manager(lba_manager),
+    {}
+    Writer(Writer &&) = default;
+
+    write_iertr::future<> write(
+      Transaction& t,
+      std::list<LogicalCachedExtentRef>& extent) final;
+    stop_ertr::future<> stop() final {
+      return writer_guard.close().then([this] {
+	  return stop_ertr::now();
+      });
+    }
+  private:
+    using update_lba_mapping_iertr = LBAManager::update_le_mapping_iertr;
+    using finish_record_iertr = update_lba_mapping_iertr;
+    using finish_record_ret = finish_record_iertr::future<>;
+    finish_record_ret finish_write(
+      Transaction& t,
+      ool_record_t& record);
+
+    write_iertr::future<> _write(
+      Transaction& t,
+      ool_record_t& record);
+
+    using extents_to_write_t = std::vector<LogicalCachedExtentRef>;
+    void add_extent_to_write(
+      ool_record_t&,
+      LogicalCachedExtentRef& extent);
+
+    RandomBlockManager& rb_manager;
+    LBAManager& lba_manager;
+    seastar::gate writer_guard;
+  };
+public:
+  RBAllocator(
+    RandomBlockManager& rbm,
+    LBAManager& lba_manager);
+
+  Writer &get_writer(ool_placement_hint_t hint) {
+    return writers[std::rand() % writers.size()];
+  }
+
+  alloc_paddr_iertr::future<> alloc_ool_extents_paddr(
+    Transaction& t,
+    std::list<LogicalCachedExtentRef>& extents) final {
+    return seastar::do_with(
+      std::map<Writer*, std::list<LogicalCachedExtentRef>>(),
+      [this, extents=std::move(extents), &t](auto& alloc_map) {
+      for (auto& extent : extents) {
+        auto writer = &(get_writer(extent->hint));
+        alloc_map[writer].emplace_back(extent);
+      }
+      return trans_intr::do_for_each(alloc_map, [this, &t](auto& p) {
+        auto writer = p.first;
+        auto& extents_to_persist = p.second;
+	return writer->write(t, extents_to_persist);
+      });
+    });
+  }
+
+  alloc_ertr::future<blk_paddr_t> alloc_extent(
+    Transaction& t,
+    size_t size)
+  {
+    return rbm.alloc_extent(t.size);
+  }
+
+  size_t get_block_size() {
+    return rbm.get_block_size();
+  }
+
+  stop_ertr::future<> stop() {
+    return crimson::do_for_each(writers, [](auto& writer) {
+      return writer.stop();
+    });
+  }
+private:
+  RandomBlockManager& rbm;
+  std::vector<Writer> writers;
+  LBAManager& lba_manager;
+};
+
 class ExtentPlacementManager {
 public:
   ExtentPlacementManager(
@@ -318,6 +423,23 @@ public:
       extent = cache.alloc_new_extent_by_type(
         t, type, length, delayed_temp_paddr(fake_segment_off));
       fake_segment_off += length;
+    } else if (dtype == RANDOM_BD) {
+      auto addr = fake_segment_off;
+      if (is_large_write(length)) {
+	// In large write, data will be written to rbm directly
+	addr = allocator[RANDOM_BD].alloc_extent(t.length);
+	paddr_t paddr{
+	  addr / allocator[RANDOM_BD].get_block_size(),
+	  addr % allocator[RANDOM_BD].get_block_size()
+	};
+	extent = cache.alloc_new_extent<T>(
+	  t, type, length, paddr);
+	extent->ool = true;
+      } else {
+	extent = cache.alloc_new_extent<T>(
+	  t, type, length, delayed_temp_paddr(addr));
+      }
+      fake_segment_off += length;
     } else {
       extent = cache.alloc_new_extent_by_type(t, type, length);
     }
@@ -341,6 +463,22 @@ public:
       // transaction's write_set is indexed by paddr
       extent = cache.alloc_new_extent<T>(
         t, length, delayed_temp_paddr(fake_segment_off));
+      fake_segment_off += length;
+    } else if (dtype == RANDOM_BD) {
+      auto addr = fake_segment_off;
+      if (is_large_write(length)) {
+	// In large write, data will be written to rbm directly
+	addr = allocator[RANDOM_BD].alloc_extent(t.length);
+	paddr_t paddr{
+	  addr / allocator[RANDOM_BD].get_block_size(),
+	  addr % allocator[RANDOM_BD].get_block_size()
+	};
+	extent = cache.alloc_new_extent<T>(
+	  t, length, paddr);
+      } else {
+	extent = cache.alloc_new_extent<T>(
+	  t, length, delayed_temp_paddr(addr));
+      }
       fake_segment_off += length;
     } else {
       extent = cache.alloc_new_extent<T>(t, length);
@@ -400,7 +538,14 @@ private:
   }
 
   bool should_be_inline(LogicalCachedExtentRef& extent) {
+    if (extent->dtype == RANDOM_BD) {
+      return extent->ool == false;
+    }
     return (std::rand() % 2) == 0;
+  }
+
+  bool is_large_write(size_t length) {
+    return (length > 8192);
   }
 
   segment_off_t fake_segment_off = 0;

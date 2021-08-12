@@ -260,4 +260,97 @@ SegmentedAllocator::Writer::roll_segment(bool set_rolling) {
   );
 }
 
+RBAllocator::RBAllocator(
+  RandomBlockManager& rbm,
+  LBAManager& lba_manager)
+  : rbm(rbm),
+    lba_manager(lba_manager)
+{
+  std::generate_n(
+    std::back_inserter(writers),
+    crimson::common::get_conf<uint64_t>(
+      "seastore_init_rewrite_segments_num_per_device"),
+    [&] {
+      return Writer{
+	rbm,
+	lba_manager};
+      });
+}
+
+RBAllocator::Writer::finish_record_ret
+RBAllocator::Writer::finish_write(
+  Transaction& t,
+  ool_record_t& record) {
+  return trans_intr::do_for_each(record.get_extents(),
+    [this, &t](auto& ool_extent) {
+    auto& lextent = ool_extent->get_lextent();
+    logger().debug("RBAllocator::Writer::finish_write: extent: {}", *lextent);
+    return lba_manager.update_mapping(
+      t,
+      lextent->get_laddr(),
+      lextent->get_paddr(),
+      ool_extent->get_ool_paddr()
+    ).si_then([&ool_extent, &t, &lextent] {
+      ool_extent->persist_paddr();
+      // no need to add the extent to freshlist
+      return finish_record_iertr::now();
+    });
+  }).si_then([&record] {
+    record.clear();
+  });
+}
+
+RBAllocator::Writer::write_iertr::future<>
+RBAllocator::Writer::_write(
+  Transaction& t,
+  ool_record_t& record)
+{
+  bufferlist bl = record.encode_rbm(0);
+
+  logger().debug(
+    "RBAllocator::Writer::write: written {} extents,"
+    " {} bytes at {}",
+    record.get_num_extents(),
+    bl.length(),
+    record.get_base());
+
+  return rbm.write(record.get_base, bl).safe_then([this]() {
+    return finish_write(t, record);
+  });
+}
+
+RBAllocator::Writer::write_iertr::future<>
+RBAllocator::Writer::write(
+  Transaction& t,
+  std::list<LogicalCachedExtentRef>& extents)
+{
+  // rbm allocates non-aligned paddr to each extent
+  // so, call write() on each extent
+  return seastar::do_for_each(extents,
+    [this, &extents, &t](auto ex) {
+    auto record = ool_record_t(rbm.get_block_size());
+    record.set_base(extent->get_paddr());
+    auto& extent = *it;
+#if 0
+    auto wouldbe_length =
+      record.get_wouldbe_encoded_record_length(extent);
+#endif
+    add_extent_to_write(record, extent);
+    it = extents.erase(it);
+    return _write(t, record).safe_then([this]() {
+      return write_iert::now();
+    });
+  }).then([this]() {
+    return write_iert::now();
+  });;
+
+}
+
+void RBAllocator::Writer::add_extent_to_write(
+  ool_record_t& record,
+  LogicalCachedExtentRef& extent) {
+  extent->prepare_write();
+  record.add_extent(extent);
+}
+
 }
