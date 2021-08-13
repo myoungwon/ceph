@@ -511,11 +511,15 @@ void Cache::replace_extent(CachedExtentRef next, CachedExtentRef prev)
   extents.replace(*next, *prev);
 
   if (prev->get_type() == extent_types_t::ROOT) {
-    assert(prev->primary_ref_list_hook.is_linked());
-    assert(prev->is_dirty());
-    stats.dirty_bytes -= prev->get_length();
-    dirty.erase(dirty.s_iterator_to(*prev));
-    intrusive_ptr_release(&*prev);
+    assert(prev->is_clean()
+      || prev->primary_ref_list_hook.is_linked());
+    assert(prev->is_clean()
+      || prev->is_dirty());
+    if (prev->is_dirty()) {
+      stats.dirty_bytes -= prev->get_length();
+      dirty.erase(dirty.s_iterator_to(*prev));
+      intrusive_ptr_release(&*prev);
+    }
     add_to_dirty(next);
   } else if (prev->is_dirty()) {
     assert(prev->get_dirty_from() == next->get_dirty_from());
@@ -865,7 +869,7 @@ void Cache::init() {
     root = nullptr;
   }
   root = new RootBlock();
-  root->state = CachedExtent::extent_state_t::DIRTY;
+  root->state = CachedExtent::extent_state_t::CLEAN;
   add_extent(root);
 }
 
@@ -907,6 +911,7 @@ Cache::replay_delta(
     remove_extent(root);
     root->apply_delta_and_adjust_crc(record_base, delta.bl);
     root->dirty_from_or_retired_at = journal_seq;
+    root->state = CachedExtent::extent_state_t::DIRTY;
     add_extent(root);
     return replay_delta_ertr::now();
   } else {
