@@ -134,7 +134,7 @@ void TMDriver::init()
     std::move(scanner),
     false /* detailed */);
   segment_cleaner->mount(*segment_manager);
-  auto journal = std::make_unique<Journal>(*segment_manager, scanner_ref);
+  auto journal = std::make_unique<SegmentJournal>(*segment_manager, scanner_ref);
   auto cache = std::make_unique<Cache>(*segment_manager);
   auto lba_manager = lba_manager::create_lba_manager(*segment_manager, *cache);
 
@@ -150,13 +150,19 @@ void TMDriver::init()
 
   journal->set_segment_provider(&*segment_cleaner);
 
+  auto jm = std::make_unique<JournalManager>();
+  jm->add_journal(
+      device_type_t::SEGMENTED,
+      journal.get());
+
   tm = std::make_unique<TransactionManager>(
     *segment_manager,
     std::move(segment_cleaner),
     std::move(journal),
     std::move(cache),
     std::move(lba_manager),
-    std::move(epm));
+    std::move(epm),
+    std::move(jm));
 }
 
 void TMDriver::clear()

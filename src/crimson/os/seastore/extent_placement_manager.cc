@@ -21,7 +21,7 @@ SegmentedAllocator::SegmentedAllocator(
   SegmentProvider& sp,
   SegmentManager& sm,
   LBAManager& lba_manager,
-  Journal& journal)
+  SegmentJournal& journal)
   : segment_provider(sp),
     segment_manager(sm),
     lba_manager(lba_manager),

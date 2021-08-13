@@ -50,12 +50,12 @@ segment_nonce_t generate_nonce(
     sizeof(meta.seastore_id.uuid));
 }
 
-Journal::Journal(SegmentManager &segment_manager, Scanner& scanner)
+SegmentJournal::SegmentJournal(SegmentManager &segment_manager, Scanner& scanner)
   : segment_manager(segment_manager), scanner(scanner) {}
 
 
-Journal::initialize_segment_ertr::future<segment_seq_t>
-Journal::initialize_segment(Segment &segment)
+SegmentJournal::initialize_segment_ertr::future<segment_seq_t>
+SegmentJournal::initialize_segment(Segment &segment)
 {
   auto new_tail = segment_provider->get_journal_tail_target();
   // write out header
@@ -96,11 +96,11 @@ Journal::initialize_segment(Segment &segment)
     },
     initialize_segment_ertr::pass_further{},
     crimson::ct_error::assert_all{
-      "Invalid error in Journal::initialize_segment"
+      "Invalid error in SegmentJournal::initialize_segment"
     });
 }
 
-Journal::write_record_ret Journal::write_record(
+SegmentJournal::write_record_ret SegmentJournal::write_record(
   record_size_t rsize,
   record_t &&record,
   OrderingHandle &handle)
@@ -129,7 +129,7 @@ Journal::write_record_ret Journal::write_record(
     ).handle_error(
       write_record_ertr::pass_further{},
       crimson::ct_error::assert_all{
-	"Invalid error in Journal::write_record"
+	"Invalid error in SegmentJournal::write_record"
       }
     );
   }).safe_then([this, &handle] {
@@ -150,14 +150,14 @@ Journal::write_record_ret Journal::write_record(
   });
 }
 
-bool Journal::needs_roll(segment_off_t length) const
+bool SegmentJournal::needs_roll(segment_off_t length) const
 {
   return length + written_to >
     current_journal_segment->get_write_capacity();
 }
 
-Journal::roll_journal_segment_ertr::future<segment_seq_t>
-Journal::roll_journal_segment()
+SegmentJournal::roll_journal_segment_ertr::future<segment_seq_t>
+SegmentJournal::roll_journal_segment()
 {
   auto old_segment_id = current_journal_segment ?
     current_journal_segment->get_segment_id() :
@@ -187,7 +187,7 @@ Journal::roll_journal_segment()
     );
 }
 
-Journal::open_for_write_ret Journal::open_for_write()
+SegmentJournal::open_for_write_ret SegmentJournal::open_for_write()
 {
   return roll_journal_segment().safe_then([this](auto seq) {
     return open_for_write_ret(
@@ -201,8 +201,8 @@ Journal::open_for_write_ret Journal::open_for_write()
   });
 }
 
-Journal::prep_replay_segments_fut
-Journal::prep_replay_segments(
+SegmentJournal::prep_replay_segments_fut
+SegmentJournal::prep_replay_segments(
   std::vector<std::pair<segment_id_t, segment_header_t>> segments)
 {
   logger().debug(
@@ -235,7 +235,7 @@ Journal::prep_replay_segments(
   segment_provider->update_journal_tail_committed(journal_tail);
   auto replay_from = journal_tail.offset;
   logger().debug(
-    "Journal::prep_replay_segments: journal_tail={}",
+    "SegmentJournal::prep_replay_segments: journal_tail={}",
     journal_tail);
   auto from = segments.begin();
   if (replay_from != P_ADDR_NULL) {
@@ -267,7 +267,7 @@ Journal::prep_replay_segments(
 	  p.first,
 	  (segment_off_t)segment_manager.get_block_size()}};
       logger().debug(
-	"Journal::prep_replay_segments: replaying from  {}",
+	"SegmentJournal::prep_replay_segments: replaying from  {}",
 	ret);
       return std::make_pair(ret, p.second);
     });
@@ -277,7 +277,7 @@ Journal::prep_replay_segments(
     std::move(ret));
 }
 
-std::optional<std::vector<delta_info_t>> Journal::try_decode_deltas(
+std::optional<std::vector<delta_info_t>> SegmentJournal::try_decode_deltas(
   record_header_t header,
   const bufferlist &bl)
 {
@@ -297,8 +297,8 @@ std::optional<std::vector<delta_info_t>> Journal::try_decode_deltas(
   return deltas;
 }
 
-Journal::replay_ertr::future<>
-Journal::replay_segment(
+SegmentJournal::replay_ertr::future<>
+SegmentJournal::replay_segment(
   journal_seq_t seq,
   segment_header_t header,
   delta_handler_t &handler)
@@ -316,7 +316,7 @@ Journal::replay_segment(
 	if (!deltas) {
 	  // This should be impossible, we did check the crc on the mdbuf
 	  logger().error(
-	    "Journal::replay_segment unable to decode deltas for record {}",
+	    "SegmentJournal::replay_segment unable to decode deltas for record {}",
 	    base);
 	  assert(deltas);
 	}
@@ -365,7 +365,7 @@ Journal::replay_segment(
     });
 }
 
-Journal::replay_ret Journal::replay(
+SegmentJournal::replay_ret SegmentJournal::replay(
   std::vector<std::pair<segment_id_t, segment_header_t>>&& segment_headers,
   delta_handler_t &&delta_handler)
 {

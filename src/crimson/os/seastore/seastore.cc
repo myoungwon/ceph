@@ -1177,7 +1177,7 @@ std::unique_ptr<SeaStore> make_seastore(
     std::move(scanner),
     false /* detailed */);
 
-  auto journal = std::make_unique<Journal>(*sm, scanner_ref);
+  auto journal = std::make_unique<SegmentJournal>(*sm, scanner_ref);
   auto cache = std::make_unique<Cache>(*sm);
   auto lba_manager = lba_manager::create_lba_manager(*sm, *cache);
 
@@ -1193,13 +1193,19 @@ std::unique_ptr<SeaStore> make_seastore(
 
   journal->set_segment_provider(&*segment_cleaner);
 
+  auto jm = std::make_unique<JournalManager>();
+  jm->add_journal(
+      device_type_t::SEGMENTED,
+      journal.get());
+
   auto tm = std::make_unique<TransactionManager>(
     *sm,
     std::move(segment_cleaner),
     std::move(journal),
     std::move(cache),
     std::move(lba_manager),
-    std::move(epm));
+    std::move(epm),
+    std::move(jm));
 
   auto cm = std::make_unique<collection_manager::FlatCollectionManager>(*tm);
   return std::make_unique<SeaStore>(
