@@ -250,6 +250,18 @@ public:
     return has_reset;
   }
 
+  void add_rbm_allocated_blocks(rbm_alloc_delta_t &d) {
+    allocated_blocks.push_back(d);
+  }
+  void clear_rbm_allocated_blocks() {
+    if (!allocated_blocks.empty()) {
+      allocated_blocks.clear();
+    }
+  }
+  const auto &get_rbm_allocated_blocks() {
+    return allocated_blocks;
+  }
+
 private:
   friend class Cache;
   friend Ref make_test_transaction();
@@ -289,6 +301,8 @@ private:
   on_destruct_func_t on_destruct;
 
   const src_t src;
+
+  std::vector<rbm_alloc_delta_t> allocated_blocks;
 };
 using TransactionRef = Transaction::Ref;
 

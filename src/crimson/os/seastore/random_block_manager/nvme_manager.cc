@@ -279,7 +279,8 @@ NVMeManager::allocate_ertr::future<> NVMeManager::alloc_extent(
 NVMeManager::free_block_ertr::future<> NVMeManager::free_extent(
     Transaction &t, blk_paddr_t from, size_t len)
 {
-  return free_block_ertr::now();
+  auto& alloc_info = t.get_rbm_allocated_blocks();
+  return add_free_extent(alloc_info, from, len);
 }
 
 NVMeManager::free_block_ertr::future<> NVMeManager::add_free_extent(

@@ -156,6 +156,11 @@ public:
   /// Declare ref retired in t
   void retire_extent(Transaction &t, CachedExtentRef ref) {
     t.add_to_retired_set(ref);
+    if (i->backend_type == device_type_t::RANDOM_BD) {
+      if (ref->ool) {
+	rbm.free_extent(t, ref->get_paddr());
+      }
+    }
   }
 
   /// Declare paddr retired in t
