@@ -72,7 +72,9 @@ public:
     crimson::ct_error::invarg,
     crimson::ct_error::enospc
     >;
-  virtual allocate_ertr::future<> alloc_extent(Transaction &t, size_t size) = 0; // allocator, return blocks
+  using allocate_ret = allocate_ertr::future<blk_paddr_t>;
+  // allocator, return start addr of allocated blocks
+  virtual allocate_ret alloc_extent(Transaction &t, size_t size) = 0;
 
   using free_block_ertr = crimson::errorator<
     crimson::ct_error::input_output_error,
