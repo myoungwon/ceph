@@ -330,6 +330,8 @@ public:
   /// hint for allocators
   ool_placement_hint_t hint;
 
+  bool ool = false; /// true if extent is located at ool
+
   bool is_inline() const {
     return poffset.is_relative();
   }

@@ -211,8 +211,7 @@ public:
    *
    */
   // TODO: will include trim if necessary
-  free_block_ertr::future<> free_extent(
-      Transaction &t, blk_paddr_t from, size_t len) final;
+  void free_extent(Transaction &t, blk_paddr_t from, size_t len) final;
   abort_allocation_ertr::future<> abort_allocation(Transaction &t) final;
   write_ertr::future<> complete_allocation(Transaction &t) final;
 
@@ -357,7 +356,7 @@ public:
   write_ertr::future<> write(blk_paddr_t addr, bufferlist &bl);
   write_ertr::future<> sync_allocation(
       std::vector<rbm_alloc_delta_t>& alloc_blocks);
-  free_block_ertr::future<> add_free_extent(
+  void add_free_extent(
       std::vector<rbm_alloc_delta_t>& v, blk_paddr_t from, size_t len);
 
 private:

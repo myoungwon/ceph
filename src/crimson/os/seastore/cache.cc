@@ -764,6 +764,15 @@ record_t Cache::prepare_record(Transaction &t)
     get_by_ext(efforts.retire_by_ext,
                i->get_type()).increment(i->get_length());
     retire_extent(i);
+    if (i->backend_type == device_type_t::RANDOM_BLOCK &&
+	i->ool) {
+      paddr_t paddr = i->get_paddr();
+      ceph_assert(rbm);
+      rbm->free_extent(t,
+	  paddr.segment * rbm->get_block_size()+
+	  paddr.offset,
+	  i->get_length());
+    }
   }
 
   record.extents.reserve(t.fresh_block_list.size());
@@ -789,6 +798,15 @@ record_t Cache::prepare_record(Transaction &t)
 	: L_ADDR_NULL,
 	std::move(bl)
       });
+  }
+
+  for (auto b : t.allocated_blocks) {
+    bufferlist bl;
+    encode(b.alloc_blk_ids, bl);
+    delta_info_t delta;
+    delta.type = extent_types_t::RBM_ALLOC_INFO;
+    delta.bl = bl;
+    record.deltas.push_back(delta);
   }
 
   return record;
