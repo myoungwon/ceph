@@ -25,12 +25,104 @@ namespace crimson::os::seastore {
 class SegmentProvider;
 class SegmentedAllocator;
 
+class JournalManager {
+public:
+  JournalManager(
+    ExtentPlacementManager& epm
+  ) : epm(epm) {}
+
+  void add_journal(device_type_t type, JournalRef&& j) {
+    allocators[type].emplace_back(std::move(allocator));
+  }
+
+  open_for_write_ret open_for_write(
+      ool_placement_hint_t hint = ool_placement_hint_t::NONE
+  ) {
+    auto type = epm.get_allocator_type(hint);
+    return journals[type].open_for_write();
+  }
+  close_ertr::future<> close(
+      ool_placement_hint_t hint = ool_placement_hint_t::NONE
+  ) {
+    auto type = epm.get_allocator_type(hint);
+    return journals[type].close();
+  }
+  replay_ret replay(
+      delta_handler_t &&delta_handler,
+      ool_placement_hint_t hint = ool_placement_hint_t::NONE
+  ) {
+    auto type = epm.get_allocator_type(hint);
+    return journals[type].reply(delta_handler);
+  }
+  void set_write_pipeline(
+      WritePipeline *_write_pipeline,
+      ool_placement_hint_t hint = ool_placement_hint_t::NONE
+  ) {
+    auto type = epm.get_allocator_type(hint);
+    return journals[type].set_write_pipeline(write_pipeline);
+  }
+
+  submit_record_ret submit_record(
+    record_t &&record,
+    OrderingHandle &handle,
+    ool_placement_hint_t hint = ool_placement_hint_t::NONE
+  ) {
+    auto type = epm.get_allocator_type(hint);
+    return journals[type].submit_record(record, hanele);
+  }
+
+private:
+  std::map<device_type_t, std::vector<JournalRef>> journals;
+  ExtentPlacementManager& epm;
+};
+using JournalManagerRef = std::unique_ptr<JournalManager>;
+
+class Journal {
+public:
+  using open_for_write_ertr = crimson::errorator<
+    crimson::ct_error::input_output_error
+    >;
+  using open_for_write_ret = open_for_write_ertr::future<journal_seq_t>;
+  virtual open_for_write_ret open_for_write() = 0;
+
+  using close_ertr = crimson::errorator<
+    crimson::ct_error::input_output_error>;
+  virtual close_ertr::future<> close() = 0;
+
+  using submit_record_ertr = crimson::errorator<
+    crimson::ct_error::erange,
+    crimson::ct_error::input_output_error
+    >;
+  using submit_record_ret = submit_record_ertr::future<
+    std::pair<paddr_t, journal_seq_t>
+    >;
+  virtual submit_record_ret submit_record(
+    record_t &&record,
+    OrderingHandle &handle
+  ) = 0;
+
+  using replay_ertr = crimson::errorator<
+    crimson::ct_error::input_output_error,
+    crimson::ct_error::invarg,
+    crimson::ct_error::enoent,
+    crimson::ct_error::erange>;
+  using replay_ret = replay_ertr::future<>;
+  using delta_handler_t = std::function<
+    replay_ret(journal_seq_t seq,
+	       paddr_t record_block_base,
+	       const delta_info_t&)>;
+  virtual replay_ret replay(delta_handler_t &&delta_handler) = 0;
+
+  virtual void set_write_pipeline(WritePipeline *_write_pipeline) = 0;
+};
+using JournalRef = std::unique_ptr<Journal>;
+
 /**
  * Manages stream of atomically written records to a SegmentManager.
  */
-class Journal {
+class SegmentJournal : public Journal {
 public:
-  Journal(SegmentManager &segment_manager, Scanner& scanner);
+  SegmentJournal(SegmentManager &segment_manager, Scanner& scanner);
 
   /**
    * Sets the SegmentProvider.
@@ -71,7 +163,7 @@ public:
     ).handle_error(
       close_ertr::pass_further{},
       crimson::ct_error::assert_all{
-	"Error during Journal::close()"
+	"Error during SegmentJournal::close()"
       }
     ).finally([this] {
       current_journal_segment.reset();
@@ -102,7 +194,7 @@ public:
     if (total > max_record_length()) {
       auto &logger = crimson::get_logger(ceph_subsys_seastore);
       logger.error(
-	"Journal::submit_record: record size {} exceeds max {}",
+	"SegmentJournal::submit_record: record size {} exceeds max {}",
 	total,
 	max_record_length()
       );
@@ -219,13 +311,13 @@ private:
   extent_len_t max_record_length() const;
   friend class crimson::os::seastore::SegmentedAllocator;
 };
-using JournalRef = std::unique_ptr<Journal>;
+using SegmentJournalRef = std::unique_ptr<SegmentJournal>;
 
 }
 
 namespace crimson::os::seastore {
 
-inline extent_len_t Journal::max_record_length() const {
+inline extent_len_t SegmentJournal::max_record_length() const {
   return segment_manager.get_segment_size() -
     p2align(ceph::encoded_sizeof_bounded<segment_header_t>(),
 	    size_t(segment_manager.get_block_size()));

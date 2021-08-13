@@ -26,7 +26,7 @@ TransactionManager::TransactionManager(
     epm(std::move(epm))
 {
   segment_cleaner->set_extent_callback(this);
-  journal->set_write_pipeline(&write_pipeline);
+  jm->set_write_pipeline(&write_pipeline);
   register_metrics();
 }
 
@@ -34,7 +34,7 @@ TransactionManager::mkfs_ertr::future<> TransactionManager::mkfs()
 {
   LOG_PREFIX(TransactionManager::mkfs);
   segment_cleaner->mount(segment_manager);
-  return journal->open_for_write().safe_then([this, FNAME](auto addr) {
+  return jm->open_for_write().safe_then([this, FNAME](auto addr) {
     DEBUG("about to do_with");
     segment_cleaner->init_mkfs(addr);
     return with_transaction_intr(
@@ -67,7 +67,7 @@ TransactionManager::mount_ertr::future<> TransactionManager::mount()
   segment_cleaner->mount(segment_manager);
   return segment_cleaner->init_segments().safe_then(
     [this](auto&& segments) {
-    return journal->replay(
+    return jm->replay(
       std::move(segments),
       [this](auto seq, auto paddr, const auto &e) {
       auto fut = cache->replay_delta(seq, paddr, e);
@@ -76,7 +76,7 @@ TransactionManager::mount_ertr::future<> TransactionManager::mount()
       return fut;
     });
   }).safe_then([this] {
-    return journal->open_for_write();
+    return jm->open_for_write();
   }).safe_then([this, FNAME](auto addr) {
     segment_cleaner->set_journal_head(addr);
     return seastar::do_with(
@@ -126,7 +126,7 @@ TransactionManager::close_ertr::future<> TransactionManager::close() {
     return cache->close();
   }).safe_then([this] {
     cache->dump_contents();
-    return journal->close();
+    return jm->close();
   }).safe_then([FNAME] {
     DEBUG("completed");
     return seastar::now();
@@ -252,7 +252,7 @@ TransactionManager::submit_transaction_direct(
 
     DEBUGT("about to submit to journal", tref);
 
-    return journal->submit_record(std::move(record), tref.get_handle()
+    return jm->submit_record(std::move(record), tref.get_handle()
     ).safe_then([this, FNAME, &tref](auto p) mutable {
       auto [addr, journal_seq] = p;
       DEBUGT("journal commit to {} seq {}", tref, addr, journal_seq);
