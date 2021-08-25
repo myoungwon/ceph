@@ -403,7 +403,7 @@ public:
       extent = cache.alloc_new_extent_by_type(
         t, type, length, delay_inline_ool_t::DELAYED);
       fake_segment_off += length;
-    } else if (dtype == RANDOM_BLOCK) {
+    } else if (dtype == device_type_t::RANDOM_BLOCK) {
       if (is_large_write(length)) {
 	extent = cache.alloc_new_extent_by_type(
 	  t, type, length, delay_inline_ool_t::NO_DELAY);
@@ -440,7 +440,7 @@ public:
       extent = cache.alloc_new_extent<T>(
         t, length, delay_inline_ool_t::DELAYED);
       fake_segment_off += length;
-    } else if (dtype == RANDOM_BLOCK) {
+    } else if (dtype == device_type_t::RANDOM_BLOCK) {
       if (is_large_write(length)) {
 	extent = cache.alloc_new_extent<T>(
 	  t, length, delay_inline_ool_t::NO_DELAY);
@@ -516,7 +516,7 @@ private:
   }
 
   bool should_be_inline(LogicalCachedExtentRef& extent) {
-    if (extent->backend_type == RANDOM_BLOCK) {
+    if (extent->backend_type == device_type_t::RANDOM_BLOCK) {
       return extent->ool == false;
     }
     return (std::rand() % 2) == 0;

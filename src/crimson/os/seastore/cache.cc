@@ -733,7 +733,9 @@ record_t Cache::prepare_record(Transaction &t)
 	  0,
 	  0,
 	  t.root->get_version() - 1,
-	  t.root->get_delta()
+	  t.root->get_delta(),
+	  i->backend_type,
+	  i->get_ool_paddr()
 	});
     } else {
       record.deltas.push_back(
@@ -747,7 +749,9 @@ record_t Cache::prepare_record(Transaction &t)
 	  final_crc,
 	  (segment_off_t)i->get_length(),
 	  i->get_version() - 1,
-	  i->get_delta()
+	  i->get_delta(),
+	  i->backend_type,
+	  i->get_ool_paddr()
 	});
       i->last_committed_crc = final_crc;
     }
@@ -791,12 +795,16 @@ record_t Cache::prepare_record(Transaction &t)
     }
 
     assert(bl.length() == i->get_length());
+    paddr_t ool_paddr = 
+      (i->backend_type == device_type_t::RANDOM_BLOCK) ?
+	i->get_ool_paddr() : paddr_t{};
     record.extents.push_back(extent_t{
 	i->get_type(),
 	i->is_logical()
 	? i->cast<LogicalCachedExtent>()->get_laddr()
 	: L_ADDR_NULL,
-	std::move(bl)
+	std::move(bl),
+	ool_paddr
       });
   }
 

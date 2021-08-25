@@ -255,7 +255,7 @@ enum class ool_placement_hint_t {
   NUM_HINTS /// Constant for number of hints
 };
 
-enum device_type_t {
+enum class device_type_t : uint8_t {
   NONE = 0,
   SEGMENTED, // i.e. Hard_Disk, SATA_SSD, NAND_NVME
   RANDOM_BLOCK, // i.e. RANDOM_BD
@@ -391,6 +391,7 @@ struct extent_t {
   extent_types_t type;  ///< type of extent
   laddr_t addr;         ///< laddr of extent (L_ADDR_NULL for non-logical)
   ceph::bufferlist bl;  ///< payload, bl.length() == length, aligned
+  paddr_t paddr;        ///< location of rbm
 };
 
 using extent_version_t = uint32_t;
@@ -406,6 +407,8 @@ struct delta_info_t {
   segment_off_t length = NULL_SEG_OFF;         ///< extent length
   extent_version_t pversion;                   ///< prior version
   ceph::bufferlist bl;                         ///< payload
+  device_type_t backend_type = device_type_t::SEGMENTED;
+  paddr_t ool_paddr;
 
   DENC(delta_info_t, v, p) {
     DENC_START(1, 1, p);
@@ -417,6 +420,10 @@ struct delta_info_t {
     denc(v.length, p);
     denc(v.pversion, p);
     denc(v.bl, p);
+    denc(v.backend_type, p);
+    if (v.backend_type == device_type_t::RANDOM_BLOCK) {
+      denc(v.ool_paddr, p);
+    }
     DENC_FINISH(p);
   }
 
@@ -741,6 +748,8 @@ struct extent_info_t {
   extent_types_t type = extent_types_t::NONE;
   laddr_t addr = L_ADDR_NULL;
   extent_len_t len = 0;
+  device_type_t backend_type = device_type_t::SEGMENTED;
+  blk_paddr_t paddr = 0;
 
   extent_info_t() = default;
   extent_info_t(const extent_t &et)
@@ -751,6 +760,10 @@ struct extent_info_t {
     denc(v.type, p);
     denc(v.addr, p);
     denc(v.len, p);
+    denc(v.backend_type, p);
+    if (v.backend_type == device_type_t::RANDOM_BLOCK) {
+      denc(v.paddr, p);
+    }
     DENC_FINISH(p);
   }
 };

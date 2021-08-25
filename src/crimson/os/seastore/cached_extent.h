@@ -333,6 +333,11 @@ public:
   ool_placement_hint_t hint;
   
   bool ool = false; /// true if extent is located at ool
+  paddr_t ool_paddr; /// rbm location in case the extent exists in CBJournal
+
+  paddr_t get_ool_paddr() {
+    return ool_paddr;
+  }
 
   bool is_inline() const {
     return poffset.is_relative();
@@ -445,6 +450,8 @@ protected:
   }
 
   void set_paddr(paddr_t offset) { poffset = offset; }
+
+  void set_ool_paddr(paddr_t addr) { ool_paddr = addr; }
 
   /**
    * maybe_generate_relative
