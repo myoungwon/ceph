@@ -74,14 +74,16 @@ Segment::write_ertr::future<> EphemeralSegmentManager::segment_write(
   ceph::bufferlist bl,
   bool ignore_check)
 {
+  auto seg_addr = addr.as_seg_paddr();
   logger().debug(
     "segment_write to segment {} at offset {}, physical offset {}, len {}, crc {}",
-    addr.segment,
-    addr.offset,
+    seg_addr->get_segment_id(),
+    seg_addr->get_segment_off(),
     get_offset(addr),
     bl.length(),
     bl.crc32c(1));
-  if (!ignore_check && segment_state[addr.segment.device_segment_id()] != segment_state_t::OPEN)
+  if (!ignore_check && segment_state[seg_addr->get_segment_id().device_segment_id()] 
+      != segment_state_t::OPEN)
     return crimson::ct_error::invarg::make();
 
   bl.begin().copy(bl.length(), buffer + get_offset(addr));
@@ -193,14 +195,15 @@ SegmentManager::read_ertr::future<> EphemeralSegmentManager::read(
   size_t len,
   ceph::bufferptr &out)
 {
-  if (addr.segment.device_segment_id() >= get_num_segments()) {
+  auto seg_addr = addr.as_seg_paddr();
+  if (seg_addr->get_segment_id().device_segment_id() >= get_num_segments()) {
     logger().error(
       "EphemeralSegmentManager::read: invalid segment {}",
       addr);
     return crimson::ct_error::invarg::make();
   }
 
-  if (addr.offset + len > config.segment_size) {
+  if (seg_addr->get_segment_off() + len > config.segment_size) {
     logger().error(
       "EphemeralSegmentManager::read: invalid offset {}~{}!",
       addr,
@@ -214,8 +217,8 @@ SegmentManager::read_ertr::future<> EphemeralSegmentManager::read(
   bl.push_back(out);
   logger().debug(
     "segment_read to segment {} at offset {}, physical offset {}, length {}, crc {}",
-    addr.segment.device_segment_id(),
-    addr.offset,
+    seg_addr->get_segment_id().device_segment_id(),
+    seg_addr->get_segment_off(),
     get_offset(addr),
     len,
     bl.begin().crc32c(len, 1));
