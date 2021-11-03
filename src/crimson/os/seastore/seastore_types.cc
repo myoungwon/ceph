@@ -40,9 +40,12 @@ std::ostream &operator<<(std::ostream &out, const segment_id_t& segment)
 std::ostream &operator<<(std::ostream &out, const paddr_t &rhs)
 {
   out << "paddr_t<";
-  segment_to_stream(out, rhs.segment);
-  out << ", ";
-  offset_to_stream(out, rhs.offset);
+  if (rhs.get_addr_type() == addr_types_t::SEGMENT) {
+    const seg_paddr_t* s = rhs.as_seg_paddr();
+    segment_to_stream(out, s->get_segment_id());
+    out << ", ";
+    offset_to_stream(out, s->get_segment_off());
+  }
   return out << ">";
 }
 
@@ -239,20 +242,161 @@ std::string device_type_to_string(device_type_t dtype) {
 paddr_t convert_blk_paddr_to_paddr(blk_paddr_t addr, size_t block_size,
     uint32_t blocks_per_segment, device_id_t d_id)
 {
-  paddr_t paddr;
-  paddr.segment = segment_id_t {
+  segment_id_t id = segment_id_t {
     d_id,
-    (uint32_t)(addr / (block_size * blocks_per_segment))
+    (device_segment_id_t)(addr / (block_size * blocks_per_segment))
   };
-  paddr.offset = addr % (block_size * blocks_per_segment);
-  return paddr;
+  segment_off_t off = addr % (block_size * blocks_per_segment);
+  return paddr_t{id, off};
 }
 
 blk_paddr_t convert_paddr_to_blk_paddr(paddr_t addr, size_t block_size,
     uint32_t blocks_per_segment)
 {
-  return (blk_paddr_t)(addr.segment.device_segment_id() *
-	  (block_size * blocks_per_segment) + addr.offset);
+  seg_paddr_t* s = addr.as_seg_paddr();
+  return (blk_paddr_t)(s->get_segment_id().device_segment_id() *
+	  (block_size * blocks_per_segment) + s->get_segment_off());
+}
+
+paddr_t::paddr_t(device_id_t id, device_segment_id_t sgt, segment_off_t offset) {
+  static_cast<seg_paddr_t*>(this)->set_segment_id(segment_id_t{id, sgt});
+  static_cast<seg_paddr_t*>(this)->set_segment_off(offset);
+}
+
+const seg_paddr_t* paddr_t::as_seg_paddr() const {
+  assert(get_addr_type() == addr_types_t::SEGMENT);
+  return static_cast<const seg_paddr_t*>(this);
+}
+
+seg_paddr_t* paddr_t::as_seg_paddr() {
+  assert(get_addr_type() == addr_types_t::SEGMENT);
+  return static_cast<seg_paddr_t*>(this);
+}
+
+void paddr_t::set_device_id(device_id_t id, addr_types_t type) {
+  dev_addr &= static_cast<common_addr_t>(
+    std::numeric_limits<device_segment_id_t>::max());
+  dev_addr |= static_cast<common_addr_t>(id & 0x8) << DEV_ADDR_LEN_BITS;
+  dev_addr |= static_cast<common_addr_t>(type)
+    << (std::numeric_limits<common_addr_t>::digits - 1);
+}
+
+#define PADDR_OPERATION(a_type, base, func)        \
+  if (get_addr_type() == a_type) {                 \
+    return static_cast<const base*>(this)->func;   \
+  }
+
+paddr_t paddr_t::operator-(paddr_t rhs) const {
+  if (get_addr_type() == addr_types_t::SEGMENT) {
+    auto seg_addr = as_seg_paddr();
+    return *seg_addr - rhs;
+  }
+  ceph_assert(0 == "not supported type");
+  return paddr_t{};
+}
+
+bool paddr_t::is_relative() const {
+  PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, is_relative())
+  ceph_assert(0 == "not supported type");
+  return false;
+}
+
+bool paddr_t::is_record_relative() const {
+  PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, is_record_relative())
+  ceph_assert(0 == "not supported type");
+  return false;
+}
+
+paddr_t paddr_t::add_offset(int32_t o) const {
+  PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, add_offset(o))
+  ceph_assert(0 == "not supported type");
+  return paddr_t{};
+}
+
+bool paddr_t::is_null() const {
+  PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, is_null())
+  ceph_assert(0 == "not supported type");
+  return true;
+}
+
+bool paddr_t::is_block_relative() const {
+  PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, is_block_relative())
+  ceph_assert(0 == "not supported type");
+  return false;
+}
+
+bool paddr_t::is_zero() const {
+  PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, is_zero())
+  ceph_assert(0 == "not supported type");
+  return true;
+}
+
+bool paddr_t::is_real() const {
+  PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, is_real())
+  ceph_assert(0 == "not supported type");
+  return false;
+}
+
+paddr_t paddr_t::add_relative(paddr_t o) const {
+  PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, add_relative(o))
+  ceph_assert(0 == "not supported type");
+  return paddr_t{};
+}
+
+paddr_t paddr_t::add_block_relative(paddr_t o) const {
+  PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, add_block_relative(o))
+  ceph_assert(0 == "not supported type");
+  return paddr_t{};
+}
+
+paddr_t paddr_t::add_record_relative(paddr_t o) const {
+  PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, add_record_relative(o))
+  ceph_assert(0 == "not supported type");
+  return paddr_t{};
+}
+
+paddr_t paddr_t::maybe_relative_to(paddr_t o) const {
+  PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, maybe_relative_to(o))
+  ceph_assert(0 == "not supported type");
+  return paddr_t{};
+}
+
+#define PADDR_OPERATOR(a_type, base, oper, other)     \
+  if (get_addr_type() == a_type) {                    \
+    const base* l = static_cast<const base*>(this);   \
+    const base* r = static_cast<const base*>(&other); \
+    return *l oper *r;                                  \
+  }
+
+bool paddr_t::operator==(const paddr_t& other) const {
+  PADDR_OPERATOR(addr_types_t::SEGMENT, seg_paddr_t, ==, other)
+  ceph_assert(0 == "not supported type");
+  return false;
+}
+bool paddr_t::operator!=(const paddr_t& other) const {
+  PADDR_OPERATOR(addr_types_t::SEGMENT, seg_paddr_t, !=, other)
+  ceph_assert(0 == "not supported type");
+  return false;
+}
+bool paddr_t::operator<(const paddr_t& other) const {
+  PADDR_OPERATOR(addr_types_t::SEGMENT, seg_paddr_t, <, other)
+  ceph_assert(0 == "not supported type");
+  return false;
+}
+bool paddr_t::operator<=(const paddr_t& other) const {
+  PADDR_OPERATOR(addr_types_t::SEGMENT, seg_paddr_t, <=, other)
+  ceph_assert(0 == "not supported type");
+  return false;
+}
+bool paddr_t::operator>(const paddr_t& other) const {
+  PADDR_OPERATOR(addr_types_t::SEGMENT, seg_paddr_t, >, other)
+  ceph_assert(0 == "not supported type");
+  return false;
+}
+bool paddr_t::operator>=(const paddr_t& other) const {
+  PADDR_OPERATOR(addr_types_t::SEGMENT, seg_paddr_t, >=, other)
+  ceph_assert(0 == "not supported type");
+  return false;
 }
 
 }
