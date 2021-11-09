@@ -392,8 +392,8 @@ struct transaction_manager_test_t :
 	  t,
 	  [&tracker](auto offset, auto len) {
 	    tracker->allocate(
-	      offset.as_seg_paddr()->get_segment_id(),
-	      offset.as_seg_paddr()->get_segment_off(),
+	      offset.as_seg_paddr().get_segment_id(),
+	      offset.as_seg_paddr().get_segment_off(),
 	      len);
 	  });
       }).unsafe_get0();

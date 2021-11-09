@@ -108,8 +108,8 @@ Journal::prep_replay_segments(
       segments.begin(),
       segments.end(),
       [&replay_from](const auto &seg) -> bool {
-	auto seg_addr = replay_from.as_seg_paddr();
-	return seg.first == seg_addr->get_segment_id();
+	auto& seg_addr = replay_from.as_seg_paddr();
+	return seg.first == seg_addr.get_segment_id();
       });
     if (from->second.journal_segment_seq != journal_tail.segment_seq) {
       logger().error(
@@ -203,9 +203,9 @@ Journal::replay_segment(
 		 * Note, this comparison exploits the fact that
 		 * SEGMENT_SEQ_NULL is a large number.
 		 */
-		auto seg_addr = delta.paddr.as_seg_paddr();
+		auto& seg_addr = delta.paddr.as_seg_paddr();
 		if (delta.paddr != P_ADDR_NULL &&
-		    (segment_provider->get_seq(seg_addr->get_segment_id()) >
+		    (segment_provider->get_seq(seg_addr.get_segment_id()) >
 		     seq.segment_seq)) {
 		  return replay_ertr::now();
 		} else {
@@ -361,7 +361,7 @@ Journal::JournalSegmentManager::write(ceph::bufferlist to_write)
   logger().debug(
     "JournalSegmentManager::write: write_start {} => {}, length={}",
     write_start_seq,
-    write_start_seq.offset.as_seg_paddr()->get_segment_off() + write_length,
+    write_start_seq.offset.as_seg_paddr().get_segment_off() + write_length,
     write_length);
   assert(write_length > 0);
   assert((write_length % segment_manager.get_block_size()) == 0);

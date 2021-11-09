@@ -41,10 +41,10 @@ std::ostream &operator<<(std::ostream &out, const paddr_t &rhs)
 {
   out << "paddr_t<";
   if (rhs.get_addr_type() == addr_types_t::SEGMENT) {
-    const seg_paddr_t* s = rhs.as_seg_paddr();
-    segment_to_stream(out, s->get_segment_id());
+    const seg_paddr_t& s = rhs.as_seg_paddr();
+    segment_to_stream(out, s.get_segment_id());
     out << ", ";
-    offset_to_stream(out, s->get_segment_off());
+    offset_to_stream(out, s.get_segment_off());
   }
   return out << ">";
 }
@@ -253,9 +253,9 @@ paddr_t convert_blk_paddr_to_paddr(blk_paddr_t addr, size_t block_size,
 blk_paddr_t convert_paddr_to_blk_paddr(paddr_t addr, size_t block_size,
     uint32_t blocks_per_segment)
 {
-  seg_paddr_t* s = addr.as_seg_paddr();
-  return (blk_paddr_t)(s->get_segment_id().device_segment_id() *
-	  (block_size * blocks_per_segment) + s->get_segment_off());
+  seg_paddr_t& s = addr.as_seg_paddr();
+  return (blk_paddr_t)(s.get_segment_id().device_segment_id() *
+	  (block_size * blocks_per_segment) + s.get_segment_off());
 }
 
 paddr_t::paddr_t(device_id_t id, device_segment_id_t sgt, segment_off_t offset) {
@@ -263,14 +263,14 @@ paddr_t::paddr_t(device_id_t id, device_segment_id_t sgt, segment_off_t offset) 
   static_cast<seg_paddr_t*>(this)->set_segment_off(offset);
 }
 
-const seg_paddr_t* paddr_t::as_seg_paddr() const {
+const seg_paddr_t& paddr_t::as_seg_paddr() const {
   assert(get_addr_type() == addr_types_t::SEGMENT);
-  return static_cast<const seg_paddr_t*>(this);
+  return *static_cast<const seg_paddr_t*>(this);
 }
 
-seg_paddr_t* paddr_t::as_seg_paddr() {
+seg_paddr_t& paddr_t::as_seg_paddr() {
   assert(get_addr_type() == addr_types_t::SEGMENT);
-  return static_cast<seg_paddr_t*>(this);
+  return *static_cast<seg_paddr_t*>(this);
 }
 
 void paddr_t::set_device_id(device_id_t id, addr_types_t type) {
@@ -288,8 +288,8 @@ void paddr_t::set_device_id(device_id_t id, addr_types_t type) {
 
 paddr_t paddr_t::operator-(paddr_t rhs) const {
   if (get_addr_type() == addr_types_t::SEGMENT) {
-    auto seg_addr = as_seg_paddr();
-    return *seg_addr - rhs;
+    auto& seg_addr = as_seg_paddr();
+    return seg_addr - rhs;
   }
   ceph_assert(0 == "not supported type");
   return paddr_t{};

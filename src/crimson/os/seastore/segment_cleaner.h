@@ -730,19 +730,19 @@ public:
     paddr_t addr,
     extent_len_t len,
     bool init_scan = false) {
-    auto seg_addr = addr.as_seg_paddr();
-    assert(seg_addr->get_segment_id().device_id() ==
-      segments[seg_addr->get_segment_id().device_id()]->device_id);
-    assert(seg_addr->get_segment_id().device_segment_id() <
-      segments[seg_addr->get_segment_id().device_id()]->num_segments);
+    auto& seg_addr = addr.as_seg_paddr();
+    assert(seg_addr.get_segment_id().device_id() ==
+      segments[seg_addr.get_segment_id().device_id()]->device_id);
+    assert(seg_addr.get_segment_id().device_segment_id() <
+      segments[seg_addr.get_segment_id().device_id()]->num_segments);
 
     if (!init_scan && !init_complete)
       return;
 
     used_bytes += len;
     [[maybe_unused]] auto ret = space_tracker->allocate(
-      seg_addr->get_segment_id(),
-      seg_addr->get_segment_off(),
+      seg_addr.get_segment_id(),
+      seg_addr.get_segment_off(),
       len);
     segments.space_used(addr, len);
     gc_process.maybe_wake_on_space_used();
@@ -757,15 +757,15 @@ public:
 
     ceph_assert(used_bytes >= len);
     used_bytes -= len;
-    auto seg_addr = addr.as_seg_paddr();
+    auto& seg_addr = addr.as_seg_paddr();
     assert(addr.get_device_id() ==
-      segments[seg_addr->get_segment_id().device_id()]->device_id);
-    assert(seg_addr->get_segment_id().device_segment_id() <
-      segments[seg_addr->get_segment_id().device_id()]->num_segments);
+      segments[seg_addr.get_segment_id().device_id()]->device_id);
+    assert(seg_addr.get_segment_id().device_segment_id() <
+      segments[seg_addr.get_segment_id().device_id()]->num_segments);
 
     [[maybe_unused]] auto ret = space_tracker->release(
-      seg_addr->get_segment_id(),
-      seg_addr->get_segment_off(),
+      seg_addr.get_segment_id(),
+      seg_addr.get_segment_off(),
       len);
     maybe_wake_gc_blocked_io();
     assert(ret >= 0);
@@ -968,14 +968,14 @@ private:
   gc_reclaim_space_ret gc_reclaim_space();
 
   size_t get_bytes_used_current_segment() const {
-    auto seg_addr = journal_head.offset.as_seg_paddr();
-    return seg_addr->get_segment_off();
+    auto& seg_addr = journal_head.offset.as_seg_paddr();
+    return seg_addr.get_segment_off();
   }
 
   size_t get_bytes_available_current_segment() const {
-    auto seg_addr = journal_head.offset.as_seg_paddr();
+    auto& seg_addr = journal_head.offset.as_seg_paddr();
     auto segment_size =
-      segments[seg_addr->get_segment_id().device_id()]->segment_size;
+      segments[seg_addr.get_segment_id().device_id()]->segment_size;
     return segment_size - get_bytes_used_current_segment();
   }
 
@@ -1032,9 +1032,9 @@ private:
       return segments.get_journal_segments() * segments[journal_device_id]->segment_size;
     } else {
       assert(journal_head >= journal_tail_committed);
-      auto seg_addr = journal_head.offset.as_seg_paddr();
+      auto& seg_addr = journal_head.offset.as_seg_paddr();
       auto segment_size =
-	segments[seg_addr->get_segment_id().device_id()]->segment_size;
+	segments[seg_addr.get_segment_id().device_id()]->segment_size;
       return (journal_head.segment_seq - journal_tail_committed.segment_seq + 1) *
 	segment_size;
     }

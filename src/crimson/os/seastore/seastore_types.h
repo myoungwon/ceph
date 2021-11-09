@@ -464,8 +464,8 @@ public:
   paddr_t add_record_relative(paddr_t o) const;
   paddr_t maybe_relative_to(paddr_t base) const;
 
-  seg_paddr_t* as_seg_paddr();
-  const seg_paddr_t* as_seg_paddr() const;
+  seg_paddr_t& as_seg_paddr();
+  const seg_paddr_t& as_seg_paddr() const;
 
   paddr_t operator-(paddr_t rhs) const;
   bool operator==(const paddr_t& other) const;
@@ -489,6 +489,10 @@ struct seg_paddr_t : public paddr_t {
   static constexpr uint64_t SEG_ID_MASK =
     static_cast<common_addr_t>(0xFFFFFFFF) << SEG_OFF_LEN_BITS;
 
+  seg_paddr_t(const seg_paddr_t&) = delete;
+  seg_paddr_t(seg_paddr_t&) = delete;
+  seg_paddr_t& operator=(const seg_paddr_t&) = delete;
+  seg_paddr_t& operator=(seg_paddr_t&) = delete;
   segment_id_t get_segment_id() const {
     return segment_id_t((dev_addr & SEG_ID_MASK) >> SEG_OFF_LEN_BITS);
   }
@@ -545,9 +549,9 @@ struct seg_paddr_t : public paddr_t {
 
   paddr_t add_relative(paddr_t o) const {
     assert(o.is_relative());
-    seg_paddr_t* s = o.as_seg_paddr();
+    seg_paddr_t& s = o.as_seg_paddr();
     return paddr_t{get_segment_id(),
-	    get_segment_off() + s->get_segment_off()};
+	    get_segment_off() + s.get_segment_off()};
   }
 
   paddr_t add_block_relative(paddr_t o) const {
@@ -569,12 +573,12 @@ struct seg_paddr_t : public paddr_t {
    * block_relative address.
    */
   paddr_t operator-(paddr_t rhs) const {
-    seg_paddr_t* r = rhs.as_seg_paddr();
-    assert(r->is_relative() && is_relative());
-    assert(r->get_segment_id() == get_segment_id());
+    seg_paddr_t& r = rhs.as_seg_paddr();
+    assert(r.is_relative() && is_relative());
+    assert(r.get_segment_id() == get_segment_id());
     return paddr_t{
       BLOCK_REL_SEG_ID,
-      get_segment_off() - r->get_segment_off()
+      get_segment_off() - r.get_segment_off()
     };
   }
 
@@ -588,9 +592,9 @@ struct seg_paddr_t : public paddr_t {
    */
   paddr_t maybe_relative_to(paddr_t base) const {
     assert(!base.is_block_relative());
-    seg_paddr_t* s = base.as_seg_paddr();
+    seg_paddr_t& s = base.as_seg_paddr();
     if (is_block_relative())
-      return s->add_block_relative(*this);
+      return s.add_block_relative(*this);
     else
       return *this;
   }
@@ -1301,17 +1305,17 @@ struct scan_valid_records_cursor {
   }
 
   segment_id_t get_segment_id() const {
-    return seq.offset.as_seg_paddr()->get_segment_id();
+    return seq.offset.as_seg_paddr().get_segment_id();
   }
 
   segment_off_t get_segment_offset() const {
-    return seq.offset.as_seg_paddr()->get_segment_off();
+    return seq.offset.as_seg_paddr().get_segment_off();
   }
 
   void increment(segment_off_t off) {
-    auto seg_addr = seq.offset.as_seg_paddr();
-    seg_addr->set_segment_off(
-      seg_addr->get_segment_off() + off);
+    auto& seg_addr = seq.offset.as_seg_paddr();
+    seg_addr.set_segment_off(
+      seg_addr.get_segment_off() + off);
   }
 
   scan_valid_records_cursor(

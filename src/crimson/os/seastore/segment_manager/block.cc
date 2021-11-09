@@ -391,12 +391,12 @@ Segment::write_ertr::future<> BlockSegmentManager::segment_write(
 {
   assert(addr.get_device_id() == get_device_id());
   assert((bl.length() % superblock.block_size) == 0);
-  auto seg_addr = addr.as_seg_paddr();
+  auto& seg_addr = addr.as_seg_paddr();
   logger().debug(
     "BlockSegmentManager::segment_write: "
     "segment_write to segment {} at offset {}, physical offset {}, len {}",
-    seg_addr->get_segment_id(),
-    seg_addr->get_segment_off(),
+    seg_addr.get_segment_id(),
+    seg_addr.get_segment_off(),
     get_offset(addr),
     bl.length());
   stats.data_write.increment(bl.length());
@@ -553,15 +553,15 @@ SegmentManager::read_ertr::future<> BlockSegmentManager::read(
   ceph::bufferptr &out)
 {
   assert(addr.get_device_id() == get_device_id());
-  auto seg_addr = addr.as_seg_paddr();
-  if (seg_addr->get_segment_id().device_segment_id() >= get_num_segments()) {
+  auto& seg_addr = addr.as_seg_paddr();
+  if (seg_addr.get_segment_id().device_segment_id() >= get_num_segments()) {
     logger().error(
       "BlockSegmentManager::read: invalid segment {}",
       addr);
     return crimson::ct_error::invarg::make();
   }
 
-  if (seg_addr->get_segment_off() + len > superblock.segment_size) {
+  if (seg_addr.get_segment_off() + len > superblock.segment_size) {
     logger().error(
       "BlockSegmentManager::read: invalid offset {}~{}!",
       addr,
@@ -569,12 +569,12 @@ SegmentManager::read_ertr::future<> BlockSegmentManager::read(
     return crimson::ct_error::invarg::make();
   }
 
-  if (tracker->get(seg_addr->get_segment_id().device_segment_id()) == 
+  if (tracker->get(seg_addr.get_segment_id().device_segment_id()) == 
       segment_state_t::EMPTY) {
     logger().error(
       "BlockSegmentManager::read: read on invalid segment {} state {}",
-      seg_addr->get_segment_id(),
-      tracker->get(seg_addr->get_segment_id().device_segment_id()));
+      seg_addr.get_segment_id(),
+      tracker->get(seg_addr.get_segment_id().device_segment_id()));
     return crimson::ct_error::enoent::make();
   }
 
