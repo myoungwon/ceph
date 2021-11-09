@@ -295,67 +295,67 @@ paddr_t paddr_t::operator-(paddr_t rhs) const {
   return paddr_t{};
 }
 
-bool paddr_t::is_relative() const {
+[[gnu::noinline]] bool paddr_t::is_relative() const {
   PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, is_relative())
   ceph_assert(0 == "not supported type");
   return false;
 }
 
-bool paddr_t::is_record_relative() const {
+[[gnu::noinline]] bool paddr_t::is_record_relative() const {
   PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, is_record_relative())
   ceph_assert(0 == "not supported type");
   return false;
 }
 
-paddr_t paddr_t::add_offset(int32_t o) const {
+[[gnu::noinline]] paddr_t paddr_t::add_offset(int32_t o) const {
   PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, add_offset(o))
   ceph_assert(0 == "not supported type");
   return paddr_t{};
 }
 
-bool paddr_t::is_null() const {
+[[gnu::noinline]] bool paddr_t::is_null() const {
   PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, is_null())
   ceph_assert(0 == "not supported type");
   return true;
 }
 
-bool paddr_t::is_block_relative() const {
+[[gnu::noinline]] bool paddr_t::is_block_relative() const {
   PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, is_block_relative())
   ceph_assert(0 == "not supported type");
   return false;
 }
 
-bool paddr_t::is_zero() const {
+[[gnu::noinline]] bool paddr_t::is_zero() const {
   PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, is_zero())
   ceph_assert(0 == "not supported type");
   return true;
 }
 
-bool paddr_t::is_real() const {
+[[gnu::noinline]] bool paddr_t::is_real() const {
   PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, is_real())
   ceph_assert(0 == "not supported type");
   return false;
 }
 
-paddr_t paddr_t::add_relative(paddr_t o) const {
+[[gnu::noinline]] paddr_t paddr_t::add_relative(paddr_t o) const {
   PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, add_relative(o))
   ceph_assert(0 == "not supported type");
   return paddr_t{};
 }
 
-paddr_t paddr_t::add_block_relative(paddr_t o) const {
+[[gnu::noinline]] paddr_t paddr_t::add_block_relative(paddr_t o) const {
   PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, add_block_relative(o))
   ceph_assert(0 == "not supported type");
   return paddr_t{};
 }
 
-paddr_t paddr_t::add_record_relative(paddr_t o) const {
+[[gnu::noinline]] paddr_t paddr_t::add_record_relative(paddr_t o) const {
   PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, add_record_relative(o))
   ceph_assert(0 == "not supported type");
   return paddr_t{};
 }
 
-paddr_t paddr_t::maybe_relative_to(paddr_t o) const {
+[[gnu::noinline]] paddr_t paddr_t::maybe_relative_to(paddr_t o) const {
   PADDR_OPERATION(addr_types_t::SEGMENT, seg_paddr_t, maybe_relative_to(o))
   ceph_assert(0 == "not supported type");
   return paddr_t{};
