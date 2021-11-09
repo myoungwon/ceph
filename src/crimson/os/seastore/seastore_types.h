@@ -72,31 +72,31 @@ private:
   constexpr segment_id_t(uint32_t encoded) : segment(encoded) {}
 public:
   constexpr static segment_id_t make_max() {
-    return (std::numeric_limits<internal_segment_id_t>::max() >> 1);
+    return std::numeric_limits<internal_segment_id_t>::max() >> 1;
   }
   constexpr static segment_id_t make_null() {
-    return (std::numeric_limits<internal_segment_id_t>::max() >> 1) - 1;
+    return make_max().segment - 1;
   }
   /* Used to denote relative paddr_t */
   constexpr static segment_id_t make_record_relative() {
-    return (std::numeric_limits<internal_segment_id_t>::max() >> 1) - 2;
+    return make_max().segment - 2;
   }
   constexpr static segment_id_t make_block_relative() {
-    return (std::numeric_limits<internal_segment_id_t>::max() >> 1) - 3;
+    return make_max().segment - 3;
   }
   // for tests which generate fake paddrs
   constexpr static segment_id_t make_fake() {
-    return (std::numeric_limits<internal_segment_id_t>::max() >> 1) - 4;
+    return make_max().segment - 4;
   }
 
   /* Used to denote references to notional zero filled segment, mainly
    * in denoting reserved laddr ranges for unallocated object data.
    */
   constexpr static segment_id_t make_zero() {
-    return (std::numeric_limits<internal_segment_id_t>::max() >> 1) - 5;
+    return make_max().segment - 5;
   }
   constexpr static segment_id_t make_delayed() {
-    return (std::numeric_limits<internal_segment_id_t>::max() >> 1) - 6;
+    return make_max().segment - 6;
   }
 
   segment_id_t() = default;
