@@ -606,9 +606,7 @@ struct __attribute((packed)) paddr_le_t {
       static_cast<paddr_t::common_addr_t>(NULL_SEG_OFF));
 
   paddr_le_t() = default;
-  paddr_le_t(paddr_t::common_addr_t addr)
-    : dev_addr(ceph_le64(addr)) {}
-  paddr_le_t(const paddr_t &addr) : paddr_le_t(addr.dev_addr) {}
+  paddr_le_t(const paddr_t &addr) : dev_addr(ceph_le64(addr.dev_addr)) {}
 
   operator paddr_t() const {
     return paddr_t{dev_addr};
