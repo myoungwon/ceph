@@ -122,7 +122,7 @@ public:
     TRACET("removing {} from write_set", *this, *ref);
     write_set.erase(*ref);
     ref->set_paddr(final_addr);
-    assert(!ref->get_paddr().is_null());
+    assert(!is_null(ref->get_paddr()));
     assert(!ref->is_inline());
     ool_block_list.push_back(ref);
     TRACET("adding {} to write_set", *this, *ref);

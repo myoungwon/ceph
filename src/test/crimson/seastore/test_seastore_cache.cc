@@ -160,7 +160,7 @@ TEST_F(cache_test_t, test_dirty_extent)
       extent->set_contents('c');
       csum = extent->get_crc32c();
       auto reladdr = extent->get_paddr();
-      ASSERT_TRUE(reladdr.is_relative());
+      ASSERT_TRUE(is_relative(reladdr));
       {
 	// test that read with same transaction sees new block though
 	// uncommitted
@@ -170,7 +170,7 @@ TEST_F(cache_test_t, test_dirty_extent)
 	  TestBlockPhysical::SIZE).unsafe_get0();
 	ASSERT_TRUE(extent->is_clean());
 	ASSERT_TRUE(extent->is_pending());
-	ASSERT_TRUE(extent->get_paddr().is_relative());
+	ASSERT_TRUE(is_relative(extent->get_paddr()));
 	ASSERT_EQ(extent->get_version(), 0);
 	ASSERT_EQ(csum, extent->get_crc32c());
       }

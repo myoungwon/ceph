@@ -29,7 +29,7 @@ std::ostream &LBAInternalNode::print_detail(std::ostream &out) const
 void LBAInternalNode::resolve_relative_addrs(paddr_t base)
 {
   for (auto i: *this) {
-    if (i->get_val().is_relative()) {
+    if (is_relative(i->get_val())) {
       auto updated = base.add_relative(i->get_val());
       logger().debug(
 	"LBAInternalNode::resolve_relative_addrs {} -> {}",
@@ -49,7 +49,7 @@ std::ostream &LBALeafNode::print_detail(std::ostream &out) const
 void LBALeafNode::resolve_relative_addrs(paddr_t base)
 {
   for (auto i: *this) {
-    if (i->get_val().paddr.is_relative()) {
+    if (is_relative(i->get_val().paddr)) {
       auto val = i->get_val();
       val.paddr = base.add_relative(val.paddr);
       logger().debug(

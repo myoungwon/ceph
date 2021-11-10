@@ -172,7 +172,7 @@ split_ret split_pin_left(context_t ctx, LBAPinRef &pin, laddr_t offset)
     return get_iertr::make_ready_future<split_ret_bare>(
       std::nullopt,
       std::nullopt);
-  } else if (pin->get_paddr().is_zero()) {
+  } else if (is_zero(pin->get_paddr())) {
     /* Zero extent unaligned, return largest aligned zero extent to
      * the left and the gap between aligned_offset and offset to prepend. */
     auto aligned_offset = p2align(offset, (uint64_t)ctx.tm.get_block_size());
@@ -210,7 +210,7 @@ split_ret split_pin_right(context_t ctx, LBAPinRef &pin, laddr_t end)
     return get_iertr::make_ready_future<split_ret_bare>(
       std::nullopt,
       std::nullopt);
-  } else if (pin->get_paddr().is_zero()) {
+  } else if (is_zero(pin->get_paddr())) {
     auto aligned_end = p2roundup(end, (uint64_t)ctx.tm.get_block_size());
     assert_aligned(aligned_end);
     ceph_assert(aligned_end >= end);
@@ -316,7 +316,7 @@ ObjectDataHandler::clear_ret ObjectDataHandler::trim_data_reservation(
 	  pin.get_laddr() <= object_data.get_reserved_data_base() + size);
 	auto pin_offset = pin.get_laddr() -
 	  object_data.get_reserved_data_base();
-	if (pin.get_paddr().is_zero()) {
+	if (is_zero(pin.get_paddr())) {
 	  to_write.emplace_back(
 	    pin.get_laddr(),
 	    object_data.get_reserved_data_len() - pin_offset);
@@ -516,7 +516,7 @@ ObjectDataHandler::read_ret ObjectDataHandler::read(
 		    laddr_t end = std::min(
 		      pin->get_laddr() + pin->get_length(),
 		      loffset + len);
-		    if (pin->get_paddr().is_zero()) {
+		    if (is_zero(pin->get_paddr())) {
 		      ceph_assert(end > current); // See LBAManager::get_mappings
 		      ret.append_zero(end - current);
 		      current = end;

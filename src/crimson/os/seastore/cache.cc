@@ -39,7 +39,7 @@ Cache::~Cache()
 Cache::retire_extent_ret Cache::retire_extent_addr(
   Transaction &t, paddr_t addr, extent_len_t length)
 {
-  assert(addr.is_real() && !addr.is_block_relative());
+  assert(is_real(addr) && !is_block_relative(addr));
 
   LOG_PREFIX(Cache::retire_extent);
   CachedExtentRef ext;
@@ -54,7 +54,7 @@ Cache::retire_extent_ret Cache::retire_extent_addr(
   }
 
   // any relative addr must have been on the transaction
-  assert(!addr.is_relative());
+  assert(!is_relative(addr));
 
   // absent from transaction
   // retiring is not included by the cache hit metrics

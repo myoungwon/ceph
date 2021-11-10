@@ -385,7 +385,7 @@ BtreeLBAManager::update_mapping(
     laddr,
     [prev_addr, addr](
       const lba_map_val_t &in) {
-      assert(!addr.is_null());
+      assert(!is_null(addr));
       lba_map_val_t ret = in;
       ceph_assert(in.paddr == prev_addr);
       ret.paddr = addr;

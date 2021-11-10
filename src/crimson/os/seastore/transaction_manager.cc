@@ -107,7 +107,7 @@ TransactionManager::mount_ertr::future<> TransactionManager::mount()
 		    t,
 		    addr,
 		    len);
-		  if (addr.is_real()) {
+		  if (is_real(addr)) {
 		    segment_cleaner->mark_space_used(
 		      addr,
 		      len ,
@@ -191,7 +191,7 @@ TransactionManager::ref_ret TransactionManager::dec_ref(
   LOG_PREFIX(TransactionManager::dec_ref);
   return lba_manager->decref_extent(t, offset
   ).si_then([this, FNAME, offset, &t](auto result) -> ref_ret {
-    if (result.refcount == 0 && !result.addr.is_zero()) {
+    if (result.refcount == 0 && !is_zero(result.addr)) {
       DEBUGT("offset {} refcount 0", t, offset);
       return cache->retire_extent_addr(
 	t, result.addr, result.length

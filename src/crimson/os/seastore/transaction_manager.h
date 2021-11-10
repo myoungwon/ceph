@@ -184,7 +184,7 @@ public:
     return get_pin(
       t, offset
     ).si_then([this, FNAME, &t, offset, length] (auto pin) {
-      if (length != pin->get_length() || !pin->get_paddr().is_real()) {
+      if (length != pin->get_length() || !is_real(pin->get_paddr())) {
         ERRORT("offset {} len {} got wrong pin {}",
                t, offset, length, *pin);
         ceph_assert(0 == "Should be impossible");
@@ -206,7 +206,7 @@ public:
     return get_pin(
       t, offset
     ).si_then([this, FNAME, &t, offset] (auto pin) {
-      if (!pin->get_paddr().is_real()) {
+      if (!is_real(pin->get_paddr())) {
         ERRORT("offset {} got wrong pin {}",
                t, offset, *pin);
         ceph_assert(0 == "Should be impossible");

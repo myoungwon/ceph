@@ -269,8 +269,8 @@ struct LBAInternalNode
   void node_resolve_vals(iterator from, iterator to) const final {
     if (is_initial_pending()) {
       for (auto i = from; i != to; ++i) {
-	if (i->get_val().is_relative()) {
-	  assert(i->get_val().is_block_relative());
+	if (is_relative(i->get_val())) {
+	  assert(is_block_relative(i->get_val()));
 	  i->set_val(get_paddr().add_relative(i->get_val()));
 	}
       }
@@ -279,8 +279,8 @@ struct LBAInternalNode
   void node_unresolve_vals(iterator from, iterator to) const final {
     if (is_initial_pending()) {
       for (auto i = from; i != to; ++i) {
-	if (i->get_val().is_relative()) {
-	  assert(i->get_val().is_record_relative());
+	if (is_relative(i->get_val())) {
+	  assert(is_record_relative(i->get_val()));
 	  i->set_val(i->get_val() - get_paddr());
 	}
       }
@@ -488,8 +488,8 @@ struct LBALeafNode
     if (is_initial_pending()) {
       for (auto i = from; i != to; ++i) {
 	auto val = i->get_val();
-	if (val.paddr.is_relative()) {
-	  assert(val.paddr.is_block_relative());
+	if (is_relative(val.paddr)) {
+	  assert(is_block_relative(val.paddr));
 	  val.paddr = get_paddr().add_relative(val.paddr);
 	  i->set_val(val);
 	}
@@ -500,9 +500,9 @@ struct LBALeafNode
     if (is_initial_pending()) {
       for (auto i = from; i != to; ++i) {
 	auto val = i->get_val();
-	if (val.paddr.is_relative()) {
+	if (is_relative(val.paddr)) {
 	  auto val = i->get_val();
-	  assert(val.paddr.is_record_relative());
+	  assert(is_record_relative(val.paddr));
 	  val.paddr = val.paddr - get_paddr();
 	  i->set_val(val);
 	}
