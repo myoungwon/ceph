@@ -374,42 +374,23 @@ paddr_t paddr_t::operator-(paddr_t rhs) const {
   return paddr_t{};
 }
 
-#define PADDR_OPERATOR(a_type, base, oper, other)     \
-  if (get_addr_type() == a_type) {                    \
-    const base* l = static_cast<const base*>(this);   \
-    const base* r = static_cast<const base*>(&other); \
-    return *l oper *r;                                  \
-  }
-
 bool paddr_t::operator==(const paddr_t& other) const {
-  PADDR_OPERATOR(addr_types_t::SEGMENT, seg_paddr_t, ==, other)
-  ceph_assert(0 == "not supported type");
-  return false;
+  return dev_addr == other.dev_addr;
 }
 bool paddr_t::operator!=(const paddr_t& other) const {
-  PADDR_OPERATOR(addr_types_t::SEGMENT, seg_paddr_t, !=, other)
-  ceph_assert(0 == "not supported type");
-  return false;
+  return dev_addr != other.dev_addr;
 }
 bool paddr_t::operator<(const paddr_t& other) const {
-  PADDR_OPERATOR(addr_types_t::SEGMENT, seg_paddr_t, <, other)
-  ceph_assert(0 == "not supported type");
-  return false;
+  return dev_addr < other.dev_addr;
 }
 bool paddr_t::operator<=(const paddr_t& other) const {
-  PADDR_OPERATOR(addr_types_t::SEGMENT, seg_paddr_t, <=, other)
-  ceph_assert(0 == "not supported type");
-  return false;
+  return dev_addr <= other.dev_addr;
 }
 bool paddr_t::operator>(const paddr_t& other) const {
-  PADDR_OPERATOR(addr_types_t::SEGMENT, seg_paddr_t, >, other)
-  ceph_assert(0 == "not supported type");
-  return false;
+  return dev_addr > other.dev_addr;
 }
 bool paddr_t::operator>=(const paddr_t& other) const {
-  PADDR_OPERATOR(addr_types_t::SEGMENT, seg_paddr_t, >=, other)
-  ceph_assert(0 == "not supported type");
-  return false;
+  return dev_addr >= other.dev_addr;
 }
 
 }
