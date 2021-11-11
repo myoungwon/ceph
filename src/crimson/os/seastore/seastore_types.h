@@ -51,6 +51,19 @@ constexpr uint16_t DEVICE_ID_MAX = (1 << (DEVICE_ID_LEN_BITS - 1));
 // segment ids without a device id encapsulated
 using device_segment_id_t = uint32_t;
 
+constexpr device_id_t make_record_relative() {
+  return (std::numeric_limits<device_id_t>::max() >>
+    (std::numeric_limits<device_id_t>::digits - DEVICE_ID_LEN_BITS + 1)) - 1;
+}
+constexpr device_id_t make_block_relative() {
+  return (std::numeric_limits<device_id_t>::max() >>
+    (std::numeric_limits<device_id_t>::digits - DEVICE_ID_LEN_BITS + 1)) - 2;
+}
+constexpr device_id_t make_delayed() {
+  return (std::numeric_limits<device_id_t>::max() >>
+    (std::numeric_limits<device_id_t>::digits - DEVICE_ID_LEN_BITS + 1)) - 3;
+}
+
 // Identifies segment location on disk, see SegmentManager,
 struct segment_id_t {
 private:
@@ -77,26 +90,29 @@ public:
   constexpr static segment_id_t make_null() {
     return make_max().segment - 1;
   }
-  /* Used to denote relative paddr_t */
-  constexpr static segment_id_t make_record_relative() {
-    return make_max().segment - 2;
-  }
-  constexpr static segment_id_t make_block_relative() {
-    return make_max().segment - 3;
-  }
   // for tests which generate fake paddrs
   constexpr static segment_id_t make_fake() {
-    return make_max().segment - 4;
+    return make_max().segment - 2;
   }
 
   /* Used to denote references to notional zero filled segment, mainly
    * in denoting reserved laddr ranges for unallocated object data.
    */
   constexpr static segment_id_t make_zero() {
-    return make_max().segment - 5;
+    return make_max().segment - 3;
+  }
+  /* Used to denote relative paddr_t */
+  constexpr static segment_id_t make_record_relative() {
+    return static_cast<internal_segment_id_t>(seastore::make_record_relative())
+	    << SEGMENT_ID_LEN_BITS;
+  }
+  constexpr static segment_id_t make_block_relative() {
+    return static_cast<internal_segment_id_t>(seastore::make_block_relative())
+	    << SEGMENT_ID_LEN_BITS;
   }
   constexpr static segment_id_t make_delayed() {
-    return make_max().segment - 6;
+    return static_cast<internal_segment_id_t>(seastore::make_delayed())
+	    << SEGMENT_ID_LEN_BITS;
   }
 
   segment_id_t() = default;
@@ -427,9 +443,7 @@ struct seg_paddr_t;
 struct paddr_t {
 protected:
   using common_addr_t = uint64_t;
-  common_addr_t dev_addr = 
-    static_cast<common_addr_t>(NULL_SEG_ID.segment) << SEG_OFF_LEN_BITS |
-    static_cast<common_addr_t>(NULL_SEG_OFF);
+  common_addr_t dev_addr = make_null().dev_addr;
 
 public:
   paddr_t() = default;
@@ -449,6 +463,19 @@ public:
   addr_types_t get_addr_type() const {
     return (addr_types_t)((dev_addr
 	    >> (std::numeric_limits<common_addr_t>::digits - 1)) & 1);
+  }
+
+  constexpr static paddr_t make_max() {
+    return std::numeric_limits<common_addr_t>::max() >> 1;
+  }
+  constexpr static paddr_t make_null() {
+    return make_max().dev_addr - 1;
+  }
+  constexpr static paddr_t make_fake() {
+    return make_max().dev_addr - 2;
+  }
+  constexpr static paddr_t make_zero() {
+    return make_max().dev_addr - 3;
   }
 
   paddr_t add_offset(int32_t o) const;
@@ -578,11 +605,8 @@ struct seg_paddr_t : public paddr_t {
 WRITE_CMP_OPERATORS_2(seg_paddr_t, get_segment_id(), get_segment_off())
 WRITE_EQ_OPERATORS_2(seg_paddr_t, get_segment_id(), get_segment_off())
 constexpr paddr_t P_ADDR_NULL = paddr_t{};
-constexpr paddr_t P_ADDR_MIN = paddr_t{ZERO_SEG_ID, 0};
-constexpr paddr_t P_ADDR_MAX = paddr_t{
-  MAX_SEG_ID,
-  MAX_SEG_OFF
-};
+constexpr paddr_t P_ADDR_MIN = paddr_t::make_zero();
+constexpr paddr_t P_ADDR_MAX = paddr_t::make_max();
 constexpr paddr_t make_record_relative_paddr(segment_off_t off) {
   return paddr_t{RECORD_REL_SEG_ID, off};
 }
@@ -593,7 +617,7 @@ constexpr paddr_t make_fake_paddr(segment_off_t off) {
   return paddr_t{FAKE_SEG_ID, off};
 }
 constexpr paddr_t zero_paddr() {
-  return paddr_t{ZERO_SEG_ID, 0};
+  return paddr_t::make_zero();
 }
 constexpr paddr_t delayed_temp_paddr(segment_off_t off) {
   return paddr_t{DELAYED_TEMP_SEG_ID, off};
@@ -601,9 +625,7 @@ constexpr paddr_t delayed_temp_paddr(segment_off_t off) {
 
 struct __attribute((packed)) paddr_le_t {
   ceph_le64 dev_addr =
-    ceph_le64(
-      (static_cast<paddr_t::common_addr_t>(NULL_SEG_ID.segment) << SEG_OFF_LEN_BITS) |
-      static_cast<paddr_t::common_addr_t>(NULL_SEG_OFF));
+    ceph_le64(paddr_t::make_null().dev_addr);
 
   paddr_le_t() = default;
   paddr_le_t(const paddr_t &addr) : dev_addr(ceph_le64(addr.dev_addr)) {}

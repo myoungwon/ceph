@@ -40,7 +40,11 @@ std::ostream &operator<<(std::ostream &out, const segment_id_t& segment)
 std::ostream &operator<<(std::ostream &out, const paddr_t &rhs)
 {
   out << "paddr_t<";
-  if (rhs.get_addr_type() == addr_types_t::SEGMENT) {
+  if (rhs == P_ADDR_NULL) {
+    out << "NULL_PADDR";
+  } else if (rhs == P_ADDR_MIN) {
+    out << "MIN_PADDR";
+  } else if (rhs.get_addr_type() == addr_types_t::SEGMENT) {
     const seg_paddr_t& s = rhs.as_seg_paddr();
     segment_to_stream(out, s.get_segment_id());
     out << ", ";
@@ -278,7 +282,7 @@ blk_paddr_t convert_paddr_to_blk_paddr(paddr_t addr, size_t block_size,
 [[gnu::noinline]] bool is_null(const paddr_t& paddr) {
   if (paddr.get_addr_type() == addr_types_t::SEGMENT) {
     auto& seg_addr = paddr.as_seg_paddr();
-    return seg_addr.get_segment_id() == NULL_SEG_ID;
+    return seg_addr.get_segment_id() == NULL_SEG_ID || paddr == P_ADDR_NULL;
   }
   ceph_assert(0 == "not supported type");
 }
@@ -294,7 +298,7 @@ blk_paddr_t convert_paddr_to_blk_paddr(paddr_t addr, size_t block_size,
 [[gnu::noinline]] bool is_zero(const paddr_t& paddr) {
   if (paddr.get_addr_type() == addr_types_t::SEGMENT) {
     auto& seg_addr = paddr.as_seg_paddr();
-    return seg_addr.get_segment_id() == ZERO_SEG_ID;
+    return seg_addr.get_segment_id() == ZERO_SEG_ID || paddr == P_ADDR_MIN;
   }
   ceph_assert(0 == "not supported type");
 }
