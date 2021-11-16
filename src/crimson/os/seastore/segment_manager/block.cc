@@ -366,7 +366,7 @@ Segment::write_ertr::future<> BlockSegment::write(
     return crimson::ct_error::enospc::make();
 
   write_pointer = offset + bl.length();
-  return manager.segment_write({id, offset}, bl);
+  return manager.segment_write(paddr_t::make_seg_paddr(id, offset), bl);
 }
 
 Segment::close_ertr::future<> BlockSegmentManager::segment_close(

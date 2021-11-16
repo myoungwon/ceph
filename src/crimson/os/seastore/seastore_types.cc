@@ -251,7 +251,7 @@ paddr_t convert_blk_paddr_to_paddr(blk_paddr_t addr, size_t block_size,
     (device_segment_id_t)(addr / (block_size * blocks_per_segment))
   };
   segment_off_t off = addr % (block_size * blocks_per_segment);
-  return paddr_t{id, off};
+  return paddr_t::make_seg_paddr(id, off);
 }
 
 blk_paddr_t convert_paddr_to_blk_paddr(paddr_t addr, size_t block_size,

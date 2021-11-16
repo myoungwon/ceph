@@ -119,9 +119,9 @@ Journal::prep_replay_segments(
       assert(0 == "invalid");
     }
   } else {
-    replay_from = paddr_t{
+    replay_from = paddr_t::make_seg_paddr(
       from->first,
-      (segment_off_t)journal_segment_manager.get_block_size()};
+      (segment_off_t)journal_segment_manager.get_block_size());
   }
   auto ret = replay_segments_t(segments.end() - from);
   std::transform(
@@ -129,9 +129,9 @@ Journal::prep_replay_segments(
     [this](const auto &p) {
       auto ret = journal_seq_t{
 	p.second.journal_segment_seq,
-	paddr_t{
+	paddr_t::make_seg_paddr(
 	  p.first,
-	  (segment_off_t)journal_segment_manager.get_block_size()}};
+	  (segment_off_t)journal_segment_manager.get_block_size())};
       logger().debug(
 	"Journal::prep_replay_segments: replaying from  {}",
 	ret);

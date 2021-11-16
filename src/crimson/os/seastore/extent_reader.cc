@@ -18,7 +18,7 @@ ExtentReader::read_segment_header(segment_id_t segment)
 {
   auto& segment_manager = *segment_managers[segment.device_id()];
   return segment_manager.read(
-    paddr_t{segment, 0},
+    paddr_t::make_seg_paddr(segment, 0),
     segment_manager.get_block_size()
   ).handle_error(
     read_segment_header_ertr::pass_further{},
@@ -268,8 +268,8 @@ ExtentReader::read_validate_record_metadata(
 	  return crimson::ct_error::input_output_error::make();
 	}
 	return segment_manager.read(
-	  {seg_addr.get_segment_id(), 
-	   seg_addr.get_segment_off() + (segment_off_t)block_size},
+	  paddr_t::make_seg_paddr(seg_addr.get_segment_id(),
+	   seg_addr.get_segment_off() + (segment_off_t)block_size),
 	  header.mdlength - block_size).safe_then(
 	    [header=std::move(header), bl=std::move(bl)](
 	      auto &&bptail) mutable {

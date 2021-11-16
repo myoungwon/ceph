@@ -54,7 +54,7 @@ Segment::write_ertr::future<> EphemeralSegment::write(
   if (offset + bl.length() > (size_t)manager.get_segment_size())
     return crimson::ct_error::enospc::make();
 
-  return manager.segment_write({id, offset}, bl);
+  return manager.segment_write(paddr_t::make_seg_paddr(id, offset), bl);
 }
 
 Segment::close_ertr::future<> EphemeralSegmentManager::segment_close(segment_id_t id)
@@ -183,7 +183,7 @@ SegmentManager::release_ertr::future<> EphemeralSegmentManager::release(
     return crimson::ct_error::invarg::make();
   }
 
-  ::memset(buffer + get_offset({id, 0}), 0, config.segment_size);
+  ::memset(buffer + get_offset(paddr_t::make_seg_paddr(id, 0)), 0, config.segment_size);
   segment_state[s_id] = segment_state_t::EMPTY;
   return release_ertr::now().safe_then([] {
     return seastar::sleep(std::chrono::milliseconds(1));

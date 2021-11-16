@@ -793,7 +793,7 @@ public:
 	"SegmentCleaner::get_next_gc_target: segment {} seq {}",
 	id,
 	seq);
-      return journal_seq_t{seq, {id, 0}};
+      return journal_seq_t{seq, paddr_t::make_seg_paddr(id, 0)};
     } else {
       return journal_seq_t();
     }
