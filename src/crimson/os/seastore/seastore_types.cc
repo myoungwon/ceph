@@ -9,16 +9,10 @@ std::ostream &segment_to_stream(std::ostream &out, const segment_id_t &t)
 {
   if (t == NULL_SEG_ID)
     return out << "NULL_SEG";
-  else if (t == BLOCK_REL_SEG_ID)
-    return out << "BLOCK_REL_SEG";
-  else if (t == RECORD_REL_SEG_ID)
-    return out << "RECORD_REL_SEG";
   else if (t == ZERO_SEG_ID)
     return out << "ZERO_SEG";
   else if (t == FAKE_SEG_ID)
     return out << "FAKE_SEG";
-  else if (t == DELAYED_TEMP_SEG_ID)
-    return out << "DELAYED_TEMP_SEG";
   else
     return out << t;
 }
@@ -44,6 +38,12 @@ std::ostream &operator<<(std::ostream &out, const paddr_t &rhs)
     out << "NULL_PADDR";
   } else if (rhs == P_ADDR_MIN) {
     out << "MIN_PADDR";
+  } else if (rhs.get_device_id() == BLOCK_REL_ID) {
+    out << "BLOCK_REG";
+  } else if (rhs.get_device_id() == RECORD_REL_ID) {
+    out << "RECORD_REG";
+  } else if (rhs.get_device_id() == DELAYED_TEMP_ID) {
+    out << "DELAYED_TEMP";
   } else if (rhs.get_addr_type() == addr_types_t::SEGMENT) {
     const seg_paddr_t& s = rhs.as_seg_paddr();
     segment_to_stream(out, s.get_segment_id());
@@ -263,20 +263,12 @@ blk_paddr_t convert_paddr_to_blk_paddr(paddr_t addr, size_t block_size,
 }
 
 [[gnu::noinline]] bool is_relative(const paddr_t& paddr) {
-  if (paddr.get_addr_type() == addr_types_t::SEGMENT) {
-    auto& seg_addr = paddr.as_seg_paddr();
-    return seg_addr.get_segment_id() == RECORD_REL_SEG_ID ||
-      seg_addr.get_segment_id() == BLOCK_REL_SEG_ID;
-  }
-  ceph_assert(0 == "not supported type");
+  return paddr.get_device_id() == RECORD_REL_ID ||
+	 paddr.get_device_id() == BLOCK_REL_ID;
 }
 
 [[gnu::noinline]] bool is_record_relative(const paddr_t& paddr) {
-  if (paddr.get_addr_type() == addr_types_t::SEGMENT) {
-    auto& seg_addr = paddr.as_seg_paddr();
-    return seg_addr.get_segment_id() == RECORD_REL_SEG_ID;
-  }
-  ceph_assert(0 == "not supported type");
+  return paddr.get_device_id() == RECORD_REL_ID;
 }
 
 [[gnu::noinline]] bool is_null(const paddr_t& paddr) {
@@ -288,11 +280,7 @@ blk_paddr_t convert_paddr_to_blk_paddr(paddr_t addr, size_t block_size,
 }
 
 [[gnu::noinline]] bool is_block_relative(const paddr_t& paddr) {
-  if (paddr.get_addr_type() == addr_types_t::SEGMENT) {
-    auto& seg_addr = paddr.as_seg_paddr();
-    return seg_addr.get_segment_id() == BLOCK_REL_SEG_ID;
-  }
-  ceph_assert(0 == "not supported type");
+  return paddr.get_device_id() == BLOCK_REL_ID;
 }
 
 [[gnu::noinline]] bool is_zero(const paddr_t& paddr) {

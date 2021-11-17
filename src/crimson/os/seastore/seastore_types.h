@@ -64,6 +64,10 @@ constexpr device_id_t make_delayed() {
     (std::numeric_limits<device_id_t>::digits - DEVICE_ID_LEN_BITS + 1)) - 3;
 }
 
+constexpr device_id_t RECORD_REL_ID = make_record_relative();
+constexpr device_id_t BLOCK_REL_ID = make_block_relative();
+constexpr device_id_t DELAYED_TEMP_ID = make_delayed();
+
 // Identifies segment location on disk, see SegmentManager,
 struct segment_id_t {
 private:
@@ -101,22 +105,8 @@ public:
   constexpr static segment_id_t make_zero() {
     return make_max().segment - 3;
   }
-  /* Used to denote relative paddr_t */
-  constexpr static segment_id_t make_record_relative() {
-    return static_cast<internal_segment_id_t>(seastore::make_record_relative())
-	    << SEGMENT_ID_LEN_BITS;
-  }
-  constexpr static segment_id_t make_block_relative() {
-    return static_cast<internal_segment_id_t>(seastore::make_block_relative())
-	    << SEGMENT_ID_LEN_BITS;
-  }
-  constexpr static segment_id_t make_delayed() {
-    return static_cast<internal_segment_id_t>(seastore::make_delayed())
-	    << SEGMENT_ID_LEN_BITS;
-  }
-
   segment_id_t() = default;
-  segment_id_t(device_id_t id, device_segment_id_t segment)
+  constexpr segment_id_t(device_id_t id, device_segment_id_t segment)
     : segment(make_internal(segment, id)) {
     // only lower 3 bits are effective, and we have to reserve 0x0F for
     // special XXX_SEG_IDs
@@ -169,7 +159,7 @@ private:
     return id & (~SM_ID_MASK);
   }
 
-  static inline internal_segment_id_t make_internal(
+  constexpr static inline internal_segment_id_t make_internal(
     device_segment_id_t id,
     device_id_t sm_id) {
     return static_cast<internal_segment_id_t>(id) |
@@ -196,15 +186,12 @@ struct __attribute((packed)) segment_id_le_t {
 
 constexpr segment_id_t MAX_SEG_ID = segment_id_t::make_max();
 constexpr segment_id_t NULL_SEG_ID = segment_id_t::make_null();
-constexpr segment_id_t RECORD_REL_SEG_ID = segment_id_t::make_record_relative();
-constexpr segment_id_t BLOCK_REL_SEG_ID = segment_id_t::make_block_relative();
 // for tests which generate fake paddrs
 constexpr segment_id_t FAKE_SEG_ID = segment_id_t::make_fake();
 /* Used to denote references to notional zero filled segment, mainly
  * in denoting reserved laddr ranges for unallocated object data.
  */
 constexpr segment_id_t ZERO_SEG_ID = segment_id_t::make_zero();
-constexpr segment_id_t DELAYED_TEMP_SEG_ID = segment_id_t::make_delayed();
 
 std::ostream &operator<<(std::ostream &out, const segment_id_t&);
 
@@ -583,7 +570,7 @@ struct seg_paddr_t : public paddr_t {
     assert(is_relative(rhs) && is_relative(*this));
     assert(r.get_segment_id() == get_segment_id());
     return paddr_t::make_seg_paddr(
-      BLOCK_REL_SEG_ID,
+      segment_id_t{BLOCK_REL_ID, 0},
       get_segment_off() - r.get_segment_off()
       );
   }
@@ -611,10 +598,14 @@ constexpr paddr_t P_ADDR_NULL = paddr_t{};
 constexpr paddr_t P_ADDR_MIN = paddr_t::make_zero();
 constexpr paddr_t P_ADDR_MAX = paddr_t::make_max();
 constexpr paddr_t make_record_relative_paddr(segment_off_t off) {
-  return paddr_t::make_seg_paddr(RECORD_REL_SEG_ID, off);
+  return paddr_t::make_seg_paddr(
+    segment_id_t{make_record_relative(), 0},
+    off);
 }
 constexpr paddr_t make_block_relative_paddr(segment_off_t off) {
-  return paddr_t::make_seg_paddr(BLOCK_REL_SEG_ID, off);
+  return paddr_t::make_seg_paddr(
+    segment_id_t{make_block_relative(), 0},
+    off);
 }
 constexpr paddr_t make_fake_paddr(segment_off_t off) {
   return paddr_t::make_seg_paddr(FAKE_SEG_ID, off);
@@ -623,7 +614,9 @@ constexpr paddr_t zero_paddr() {
   return paddr_t::make_zero();
 }
 constexpr paddr_t delayed_temp_paddr(segment_off_t off) {
-  return paddr_t::make_seg_paddr(DELAYED_TEMP_SEG_ID, off);
+  return paddr_t::make_seg_paddr(
+    segment_id_t{make_delayed(), 0},
+    off);
 }
 
 struct __attribute((packed)) paddr_le_t {
