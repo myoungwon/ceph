@@ -671,6 +671,13 @@ void librados::ObjectReadOperation::set_chunk(uint64_t src_offset,
 	       tgt_ioctx.io_ctx_impl->oloc, object_t(tgt_oid), tgt_offset, flag);
 }
 
+void librados::ObjectReadOperation::set_manifest(const IoCtx& tgt_ioctx, int flag)
+{
+  ceph_assert(impl);
+  ::ObjectOperation *o = &impl->o;
+  o->set_manifest(tgt_ioctx.io_ctx_impl->oloc, flag);
+}
+
 void librados::ObjectWriteOperation::tier_promote()
 {
   ceph_assert(impl);

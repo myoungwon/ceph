@@ -760,6 +760,7 @@ inline namespace v14_2_0 {
      * updates.
      */
     void tier_evict();
+    void set_manifest(const IoCtx& tgt_ioctx, int flag = 0);
   };
 
   /* IoCtx : This is a context in which we can perform I/O.

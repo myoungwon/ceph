@@ -2541,6 +2541,7 @@ PrimaryLogPG::cache_result_t PrimaryLogPG::maybe_handle_manifest_detail(
 	op.op == CEPH_OSD_OP_TIER_PROMOTE ||
 	op.op == CEPH_OSD_OP_TIER_FLUSH ||
 	op.op == CEPH_OSD_OP_TIER_EVICT ||
+	op.op == CEPH_OSD_OP_SET_MANIFEST ||
 	op.op == CEPH_OSD_OP_ISDIRTY) {
       return cache_result_t::NOOP;
     }
@@ -5987,6 +5988,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
     case CEPH_OSD_OP_CACHE_UNPIN:
     case CEPH_OSD_OP_SET_REDIRECT:
     case CEPH_OSD_OP_SET_CHUNK:
+    case CEPH_OSD_OP_SET_MANIFEST:
     case CEPH_OSD_OP_TIER_PROMOTE:
     case CEPH_OSD_OP_TIER_FLUSH:
     case CEPH_OSD_OP_TIER_EVICT:
@@ -7289,6 +7291,81 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	if (op_finisher) {
 	  ctx->op_finishers.erase(ctx->current_osd_subop_num);
 	}
+      }
+
+      break;
+
+    case CEPH_OSD_OP_SET_MANIFEST:
+      ++ctx->num_write;
+      result = 0;
+      {
+	if (pool.info.is_tier()) {
+	  result = -EINVAL;
+	  break;
+	}
+	if (!obs.exists) {
+	  result = -ENOENT;
+	  break;
+	}
+	if (get_osdmap()->require_osd_release < ceph_release_t::luminous) {
+	  result = -EOPNOTSUPP;
+	  break;
+	}
+	if (oi.manifest.is_redirect()) {
+	  result = -EINVAL;
+	  goto fail;
+	}
+
+	object_locator_t tgt_oloc;
+	try {
+	  decode(tgt_oloc, bp);
+	}
+	catch (ceph::buffer::error& e) {
+	  result = -EINVAL;
+	  goto fail;
+	}
+
+	if (pool.info.is_erasure()) {
+	  result = -EOPNOTSUPP;
+	  break;
+	}
+
+	for (auto &p : oi.manifest.chunk_map) {
+	  interval_set<uint64_t> chunk;
+	  chunk.insert(p.first, p.second.length);
+	  if (chunk.intersects(src_offset, src_length)) {
+	    dout(20) << __func__ << " overlapped !! offset: " << src_offset << " length: " << src_length
+		    << " chunk_info: " << p << dendl;
+	    result = -EOPNOTSUPP;
+	    goto fail;
+	  }
+	}
+
+	pg_t raw_pg;
+	chunk_info_t chunk_info;
+	object_t tgt_name(oi.soid.oid.name);
+	get_osdmap()->object_locator_to_pg(tgt_name, tgt_oloc, raw_pg);
+	hobject_t target(tgt_name, tgt_oloc.key, snapid_t(),
+			 raw_pg.ps(), raw_pg.pool(),
+			 tgt_oloc.nspace);
+
+	chunk_info.oid = target;
+	chunk_info.offset = 0;
+	chunk_info.length = oi.size;
+
+	oi.manifest.chunk_map[0] = chunk_info;
+	if (!oi.has_manifest() && !oi.manifest.is_chunked())
+	  ctx->delta_stats.num_objects_manifest++;
+	oi.set_flag(object_info_t::FLAG_MANIFEST);
+	oi.manifest.type = object_manifest_t::TYPE_CHUNKED;
+	oi.manifest.chunk_map[0].set_flag(chunk_info_t::FLAG_HAS_REFERENCE);
+
+	ctx->modify = true;
+	ctx->cache_operation = true;
+
+	dout(10) << "set-manifest oid:" << oi.soid << " user_version: " << oi.user_version
+		 << " chunk_info: " << chunk_info << dendl;
+
       }
 
       break;

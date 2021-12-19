@@ -5709,6 +5709,7 @@ struct object_manifest_t {
     TYPE_NONE = 0,
     TYPE_REDIRECT = 1, 
     TYPE_CHUNKED = 2, 
+    TYPE_MANIFEST = 3, 
   };
   uint8_t type;  // redirect, chunked, ...
   hobject_t redirect_target;

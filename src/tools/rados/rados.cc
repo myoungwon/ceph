@@ -150,6 +150,7 @@ void usage(ostream& out)
 "   unset-manifest <obj-name>	     unset redirect or chunked object\n"
 "   tier-flush <obj-name>	     flush the chunked object\n"
 "   tier-evict <obj-name>	     evict the chunked object\n"
+"   set-manifest <object A> --target-pool <caspool> \n"
 "\n"
 "IMPORT AND EXPORT\n"
 "   export [filename]\n"
@@ -3953,6 +3954,27 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     if (ret < 0) {
       cerr << "error tier-evict " << pool_name << "/" << prettify(*obj_name) << " : "
 	   << cpp_strerror(ret) << std::endl;
+      return 1;
+    }
+  } else if (strcmp(nargs[0], "set-manifest") == 0) {
+    if (!pool_name) {
+      usage(cerr);
+      return 1;
+    }
+
+    const char *target = target_pool_name;
+    if (!target)
+      target = pool_name;
+
+    IoCtx target_ctx;
+    ret = rados.ioctx_create(target, target_ctx);
+    ObjectReadOperation op;
+    op.set_manifest(target_ctx);
+    ret = io_ctx.operate(nargs[1], &op, NULL);
+    if (ret < 0) {
+      cerr << "error set-chunk " << pool_name << "/" 
+	    << " target_pool " << target 
+	    << " : " << cpp_strerror(ret) << std::endl;
       return 1;
     }
   } else if (strcmp(nargs[0], "export") == 0) {

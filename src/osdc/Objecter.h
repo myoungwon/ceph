@@ -1546,6 +1546,13 @@ struct ObjectOperation {
     set_last_op_flags(flag);
   }
 
+  void set_manifest(object_locator_t tgt_oloc, int flag) {
+    using ceph::encode;
+    OSDOp& osd_op = add_op(CEPH_OSD_OP_SET_MANIFEST);
+    encode(tgt_oloc, osd_op.indata);
+    set_last_op_flags(flag);
+  }
+
   void tier_promote() {
     add_op(CEPH_OSD_OP_TIER_PROMOTE);
   }
