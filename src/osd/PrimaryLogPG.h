@@ -974,6 +974,10 @@ protected:
   bool agent_maybe_flush(ObjectContextRef& obc);  ///< maybe flush
   bool agent_maybe_evict(ObjectContextRef& obc, bool after_flush);  ///< maybe evict
 
+  bool agent_maybe_evict_tidedup(ObjectContextRef& obc, bool after_flush);
+  void flush_manifest(OpRequestRef op, ObjectContextRef obc);
+  void finish_manifest_flush(hobject_t oid, ceph_tid_t tid, int r);
+
   void agent_load_hit_sets();  ///< load HitSets, if needed
 
   /// estimate object atime and temperature
@@ -1365,6 +1369,7 @@ protected:
   bool is_present_clone(hobject_t coid);
 
   friend struct C_Flush;
+  friend struct C_Manifest_Flush;
 
   // -- cls_gather --
   std::map<hobject_t, CLSGatherOp> cls_gather_ops;

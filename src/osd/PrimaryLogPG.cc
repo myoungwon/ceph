@@ -2534,15 +2534,23 @@ PrimaryLogPG::cache_result_t PrimaryLogPG::maybe_handle_manifest_detail(
   vector<OSDOp> ops = op->get_req<MOSDOp>()->ops;
   for (vector<OSDOp>::iterator p = ops.begin(); p != ops.end(); ++p) {
     OSDOp& osd_op = *p;
-    ceph_osd_op& op = osd_op.op;
-    if (op.op == CEPH_OSD_OP_SET_REDIRECT ||
-	op.op == CEPH_OSD_OP_SET_CHUNK ||
-	op.op == CEPH_OSD_OP_UNSET_MANIFEST ||
-	op.op == CEPH_OSD_OP_TIER_PROMOTE ||
-	op.op == CEPH_OSD_OP_TIER_FLUSH ||
-	op.op == CEPH_OSD_OP_TIER_EVICT ||
-	op.op == CEPH_OSD_OP_SET_MANIFEST ||
-	op.op == CEPH_OSD_OP_ISDIRTY) {
+    ceph_osd_op& c_osd_op = osd_op.op;
+    if (c_osd_op.op == CEPH_OSD_OP_SET_REDIRECT ||
+	c_osd_op.op == CEPH_OSD_OP_SET_CHUNK ||
+	c_osd_op.op == CEPH_OSD_OP_UNSET_MANIFEST ||
+	c_osd_op.op == CEPH_OSD_OP_TIER_PROMOTE ||
+	c_osd_op.op == CEPH_OSD_OP_TIER_FLUSH ||
+	c_osd_op.op == CEPH_OSD_OP_TIER_EVICT ||
+	c_osd_op.op == CEPH_OSD_OP_SET_MANIFEST ||
+	c_osd_op.op == CEPH_OSD_OP_ISDIRTY) {
+      if (c_osd_op.op == CEPH_OSD_OP_SET_MANIFEST) {
+	if (agent_state) {
+	  if (agent_choose_mode(false, op))
+	    return cache_result_t::NOOP;
+	} else {
+	  agent_setup();
+	}
+      }
       return cache_result_t::NOOP;
     }
   }
@@ -7333,8 +7341,8 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	for (auto &p : oi.manifest.chunk_map) {
 	  interval_set<uint64_t> chunk;
 	  chunk.insert(p.first, p.second.length);
-	  if (chunk.intersects(src_offset, src_length)) {
-	    dout(20) << __func__ << " overlapped !! offset: " << src_offset << " length: " << src_length
+	  if (chunk.intersects(0, oi.size)) {
+	    dout(20) << __func__ << " overlapped !! offset: " << 0 << " length: " << oi.size
 		    << " chunk_info: " << p << dendl;
 	    result = -EOPNOTSUPP;
 	    goto fail;
@@ -10521,6 +10529,27 @@ struct C_Flush : public Context {
   }
 };
 
+struct C_Manifest_Flush : public Context {
+  PrimaryLogPGRef pg;
+  hobject_t oid;
+  epoch_t last_peering_reset;
+  ceph_tid_t tid;
+  utime_t start;
+  C_Manifest_Flush(PrimaryLogPG *p, hobject_t o, epoch_t lpr)
+    : pg(p), oid(o), last_peering_reset(lpr),
+      tid(0), start(ceph_clock_now())
+  {}
+  void finish(int r) override {
+    if (r == -ECANCELED)
+      return;
+    std::scoped_lock locker{*pg};
+    if (last_peering_reset == pg->get_last_peering_reset()) {
+      pg->finish_flush(oid, tid, r);
+      //pg->osd->logger->tinc(l_osd_tier_flush_lat, ceph_clock_now() - start);
+    }
+  }
+};
+
 int PrimaryLogPG::start_dedup(OpRequestRef op, ObjectContextRef obc)
 {
   const object_info_t& oi = obc->obs.oi;
@@ -10912,6 +10941,12 @@ int PrimaryLogPG::start_flush(
   }
 
   if (obc->obs.oi.has_manifest() && obc->obs.oi.manifest.is_chunked()) {
+    if (obc->obs.oi.manifest.chunk_map[0].oid.oid.name == 
+	obc->obs.oi.soid.oid.name) {
+      // flush
+      flush_manifest(op, obc);
+      return -EINPROGRESS;
+    }
     int r = start_dedup(op, obc);
     if (r != -EINPROGRESS) {
       if (blocking)
@@ -11027,6 +11062,88 @@ int PrimaryLogPG::start_flush(
       return false;
     });
   return -EINPROGRESS;
+}
+
+void PrimaryLogPG::flush_manifest(
+     OpRequestRef op, ObjectContextRef obc)
+{
+  const object_info_t& oi = obc->obs.oi;
+  const hobject_t& soid = oi.soid;
+  FlushOpRef fop(std::make_shared<FlushOp>());
+  fop->obc = obc;
+  fop->flushed_version = oi.user_version;
+  fop->blocking = true;
+  //fop->blocking = blocking;
+  //fop->on_flush = std::move(on_flush);
+  fop->op = op;
+
+  ObjectOperation o;
+  object_locator_t oloc(soid);
+  o.copy_from(soid.oid.name, soid.snap, oloc, oi.user_version,
+	      CEPH_OSD_COPY_FROM_FLAG_FLUSH |
+	      CEPH_OSD_COPY_FROM_FLAG_IGNORE_OVERLAY |
+	      CEPH_OSD_COPY_FROM_FLAG_IGNORE_CACHE |
+	      CEPH_OSD_COPY_FROM_FLAG_MAP_SNAP_CLONE,
+	      LIBRADOS_OP_FLAG_FADVISE_SEQUENTIAL|LIBRADOS_OP_FLAG_FADVISE_NOCACHE);
+  C_Manifest_Flush *fin = new C_Manifest_Flush(this, soid, get_last_peering_reset());
+
+  object_locator_t base_oloc(soid);
+  SnapContext snapc;
+  ceph_tid_t tid = osd->objecter->mutate(
+    soid.oid, base_oloc, o, snapc,
+    ceph::real_clock::from_ceph_timespec(oi.mtime),
+    CEPH_OSD_FLAG_IGNORE_OVERLAY | CEPH_OSD_FLAG_ENFORCE_SNAPC,
+    new C_OnFinisher(fin,
+		     osd->get_objecter_finisher(get_pg_shard())));
+  /* we're under the pg lock and fin->finish() is grabbing that */
+  fin->tid = tid;
+  fop->objecter_tid = tid;
+
+  flush_ops[soid] = fop;
+}
+
+void PrimaryLogPG::finish_manifest_flush(hobject_t oid, ceph_tid_t tid, int r)
+{
+  dout(10) << __func__ << " " << oid << " tid " << tid
+	   << " " << cpp_strerror(r) << dendl;
+  map<hobject_t,FlushOpRef>::iterator p = flush_ops.find(oid);
+  if (p == flush_ops.end()) {
+    dout(10) << __func__ << " no flush_op found" << dendl;
+    return;
+  }
+  FlushOpRef fop = p->second;
+  if (tid != fop->objecter_tid && !fop->obc->obs.oi.has_manifest()) {
+    dout(10) << __func__ << " tid " << tid << " != fop " << fop
+	     << " tid " << fop->objecter_tid << dendl;
+    return;
+  }
+  ObjectContextRef obc = fop->obc;
+  fop->objecter_tid = 0;
+
+  if (r < 0 && !(r == -ENOENT && fop->removal)) {
+    if (fop->op)
+      osd->reply_op_error(fop->op, -EBUSY);
+    if (fop->blocking) {
+      obc->stop_block();
+      kick_object_context_blocked(obc);
+    }
+
+    if (!fop->dup_ops.empty()) {
+      dout(20) << __func__ << " requeueing dups" << dendl;
+      requeue_ops(fop->dup_ops);
+    }
+    if (fop->on_flush) {
+      (*(fop->on_flush))();
+      fop->on_flush = std::nullopt;
+    }
+    flush_ops.erase(oid);
+    return;
+  }
+
+  r = try_flush_mark_clean(fop);
+  if (r == -EBUSY && fop->op) {
+    osd->reply_op_error(fop->op, r);
+  }
 }
 
 void PrimaryLogPG::finish_flush(hobject_t oid, ceph_tid_t tid, int r)
@@ -14740,10 +14857,13 @@ void PrimaryLogPG::agent_setup()
   ceph_assert(is_locked());
   if (!is_active() ||
       !is_primary() ||
-      state_test(PG_STATE_PREMERGE) ||
+      state_test(PG_STATE_PREMERGE) //||
+#if 0
       pool.info.cache_mode == pg_pool_t::CACHEMODE_NONE ||
       pool.info.tier_of < 0 ||
-      !get_osdmap()->have_pg_pool(pool.info.tier_of)) {
+      !get_osdmap()->have_pg_pool(pool.info.tier_of)
+#endif
+      ) {
     agent_clear();
     return;
   }
@@ -14879,14 +14999,20 @@ bool PrimaryLogPG::agent_work(int start_max, int agent_flush_quota)
       continue;
     }
 
-    if (agent_state->evict_mode != TierAgentState::EVICT_MODE_IDLE &&
-	agent_maybe_evict(obc, false))
+    if (obc->obs.oi.has_manifest() && obc->obs.oi.manifest.is_chunked()) {
+      agent_maybe_evict_tidedup(obc, false);
+    } 
+    // disable
+#if 0
+    else if (agent_state->evict_mode != TierAgentState::EVICT_MODE_IDLE &&
+	agent_maybe_evict(obc, false)) {
       ++started;
-    else if (agent_state->flush_mode != TierAgentState::FLUSH_MODE_IDLE &&
+    } else if (agent_state->flush_mode != TierAgentState::FLUSH_MODE_IDLE &&
              agent_flush_quota > 0 && agent_maybe_flush(obc)) {
       ++started;
       --agent_flush_quota;
     }
+#endif
     if (started >= start_max) {
       // If finishing early, set "next" to the next object
       if (++p != ls.end())
@@ -15047,6 +15173,92 @@ bool PrimaryLogPG::agent_maybe_flush(ObjectContextRef& obc)
 
   osd->logger->inc(l_osd_agent_flush);
   return true;
+}
+
+bool PrimaryLogPG::agent_maybe_evict_tidedup(ObjectContextRef& obc, bool after_flush)
+{
+  const hobject_t& soid = obc->obs.oi.soid;
+  if (!obc->obs.oi.watchers.empty()) {
+    dout(20) << __func__ << " skip (watchers) " << obc->obs.oi << dendl;
+    return false;
+  }
+  if (obc->is_blocked()) {
+    dout(20) << __func__ << " skip (blocked) " << obc->obs.oi << dendl;
+    return false;
+  }
+  if (obc->obs.oi.is_cache_pinned()) {
+    dout(20) << __func__ << " skip (cache_pinned) " << obc->obs.oi << dendl;
+    return false;
+  }
+
+  if (soid.snap == CEPH_NOSNAP) {
+    int result = _verify_no_head_clones(soid, obc->ssc->snapset);
+    if (result < 0) {
+      dout(20) << __func__ << " skip (clones) " << obc->obs.oi << dendl;
+      return false;
+    }
+  }
+
+  if (agent_state->evict_mode != TierAgentState::EVICT_MODE_FULL) {
+    // is this object old than cache_min_evict_age?
+    utime_t now = ceph_clock_now();
+    utime_t ob_local_mtime;
+    if (obc->obs.oi.local_mtime != utime_t()) {
+      ob_local_mtime = obc->obs.oi.local_mtime;
+    } else {
+      ob_local_mtime = obc->obs.oi.mtime;
+    }
+    if (ob_local_mtime + utime_t(pool.info.cache_min_evict_age, 0) > now) {
+      dout(20) << __func__ << " skip (too young) " << obc->obs.oi << dendl;
+      osd->logger->inc(l_osd_agent_skip);
+      return false;
+    }
+    // is this object old and/or cold enough?
+    int temp = 0;
+    uint64_t temp_upper = 0, temp_lower = 0;
+    if (hit_set)
+      agent_estimate_temp(soid, &temp);
+    agent_state->temp_hist.add(temp);
+    agent_state->temp_hist.get_position_micro(temp, &temp_lower, &temp_upper);
+
+    dout(20) << __func__
+	     << " temp " << temp
+	     << " pos " << temp_lower << "-" << temp_upper
+	     << ", evict_effort " << agent_state->evict_effort
+	     << dendl;
+    dout(30) << "agent_state:\n";
+    Formatter *f = Formatter::create("");
+    f->open_object_section("agent_state");
+    agent_state->dump(f);
+    f->close_section();
+    f->flush(*_dout);
+    delete f;
+    *_dout << dendl;
+
+    if (1000000 - temp_upper >= agent_state->evict_effort)
+      return false;
+  }
+
+  dout(10) << __func__ << " flushing " << obc->obs.oi << dendl;
+  hobject_t oid = obc->obs.oi.soid;
+  osd->agent_start_op(oid);
+  // no need to capture a pg ref, can't outlive fop or ctx
+  std::function<void()> on_flush = [this, oid]() {
+    osd->agent_finish_op(oid);
+  };
+  int result = start_flush(
+    OpRequestRef(), obc, false, NULL,
+    on_flush);
+  if (result != -EINPROGRESS) {
+    on_flush();
+    dout(10) << __func__ << " start_flush() failed " << obc->obs.oi
+      << " with " << result << dendl;
+    osd->logger->inc(l_osd_agent_skip);
+    return false;
+  }
+
+  return true;
+
 }
 
 bool PrimaryLogPG::agent_maybe_evict(ObjectContextRef& obc, bool after_flush)
@@ -15419,6 +15631,7 @@ bool PrimaryLogPG::agent_choose_mode(bool restart, OpRequestRef op)
     }
   } else {
     if (restart || old_idle) {
+      dout(0) << " enable cache agent : " << info.pgid << dendl;
       osd->agent_enable_pg(this, agent_state->evict_effort);
     } else if (old_effort != agent_state->evict_effort) {
       osd->agent_adjust_pg(this, old_effort, agent_state->evict_effort);
