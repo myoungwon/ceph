@@ -975,7 +975,7 @@ protected:
   bool agent_maybe_evict(ObjectContextRef& obc, bool after_flush);  ///< maybe evict
 
   bool agent_maybe_evict_tidedup(ObjectContextRef& obc, bool after_flush);
-  void flush_manifest(OpRequestRef op, ObjectContextRef obc);
+  void flush_manifest(OpRequestRef op, ObjectContextRef obc, hobject_t& t_oid);
   void finish_manifest_flush(hobject_t oid, ceph_tid_t tid, int r);
 
   void agent_load_hit_sets();  ///< load HitSets, if needed

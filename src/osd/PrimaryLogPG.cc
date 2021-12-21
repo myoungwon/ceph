@@ -2269,9 +2269,13 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     m->get_snapid() == CEPH_SNAPDIR ? head : m->get_hobj();
 
   // make sure LIST_SNAPS is on CEPH_SNAPDIR and nothing else
+  bool op_is_hot = false;
   for (vector<OSDOp>::iterator p = m->ops.begin(); p != m->ops.end(); ++p) {
     OSDOp& osd_op = *p;
 
+    if (osd_op.op.op == CEPH_OSD_OP_ISHOT) {
+      op_is_hot = true;
+    }
     if (osd_op.op.op == CEPH_OSD_OP_LIST_SNAPS) {
       if (m->get_snapid() != CEPH_SNAPDIR) {
 	dout(10) << "LIST_SNAPS with incorrect context" << dendl;
@@ -2355,7 +2359,13 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
         in_hit_set = true;
     }
     if (!op->hitset_inserted) {
-      hit_set->insert(oid);
+      if (!op_is_hot) {
+	hit_set->insert(oid);
+      }
+      dout(20) << __func__ << " hit_set true " << oid 
+	      << " hit_set_start_stamp " << hit_set_start_stamp << " period " 
+	      << pool.info.hit_set_period << " stamp "
+	      << m->get_recv_stamp() << dendl;
       op->hitset_inserted = true;
       if (hit_set->is_full() ||
           hit_set_start_stamp + pool.info.hit_set_period <= m->get_recv_stamp()) {
@@ -2542,12 +2552,20 @@ PrimaryLogPG::cache_result_t PrimaryLogPG::maybe_handle_manifest_detail(
 	c_osd_op.op == CEPH_OSD_OP_TIER_FLUSH ||
 	c_osd_op.op == CEPH_OSD_OP_TIER_EVICT ||
 	c_osd_op.op == CEPH_OSD_OP_SET_MANIFEST ||
-	c_osd_op.op == CEPH_OSD_OP_ISDIRTY) {
-      if (c_osd_op.op == CEPH_OSD_OP_SET_MANIFEST) {
+	c_osd_op.op == CEPH_OSD_OP_ISDIRTY ||
+	c_osd_op.op == CEPH_OSD_OP_ISHOT) {
+      if (c_osd_op.op == CEPH_OSD_OP_SET_MANIFEST ||
+	  c_osd_op.op == CEPH_OSD_OP_SET_CHUNK) {
 	if (agent_state) {
+	  if (!hit_set) {
+	    hit_set_setup();
+	  }
 	  if (agent_choose_mode(false, op))
 	    return cache_result_t::NOOP;
 	} else {
+	  if (!hit_set) {
+	    hit_set_setup();
+	  }
 	  agent_setup();
 	}
       }
@@ -6207,6 +6225,30 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	tracepoint(osd, do_osd_op_pre_isdirty, soid.oid.name.c_str(), soid.snap.val);
 	bool is_dirty = obs.oi.is_dirty();
 	encode(is_dirty, osd_op.outdata);
+	ctx->delta_stats.num_rd++;
+	result = 0;
+      }
+      break;
+
+    case CEPH_OSD_OP_ISHOT:
+      ++ctx->num_read;
+      {
+	//tracepoint(osd, do_osd_op_pre_isdirty, soid.oid.name.c_str(), soid.snap.val);
+	//bool is_dirty = obs.oi.is_dirty();
+	bool is_hot = false;
+	is_hot = hit_set->contains(oi.soid);
+	if (hit_set && !is_hot) {
+	  for (map<time_t,HitSetRef>::reverse_iterator itor =
+		 agent_state->hit_set_map.rbegin();
+	       itor != agent_state->hit_set_map.rend();
+	       ++itor) {
+	    if (itor->second->contains(soid)) {
+	      is_hot = true;
+	      break;
+	    }
+	  }
+	}
+	encode(is_hot, osd_op.outdata);
 	ctx->delta_stats.num_rd++;
 	result = 0;
       }
@@ -10944,7 +10986,7 @@ int PrimaryLogPG::start_flush(
     if (obc->obs.oi.manifest.chunk_map[0].oid.oid.name == 
 	obc->obs.oi.soid.oid.name) {
       // flush
-      flush_manifest(op, obc);
+      flush_manifest(op, obc, obc->obs.oi.manifest.chunk_map[0].oid);
       return -EINPROGRESS;
     }
     int r = start_dedup(op, obc);
@@ -11065,7 +11107,7 @@ int PrimaryLogPG::start_flush(
 }
 
 void PrimaryLogPG::flush_manifest(
-     OpRequestRef op, ObjectContextRef obc)
+     OpRequestRef op, ObjectContextRef obc, hobject_t& t_oid)
 {
   const object_info_t& oi = obc->obs.oi;
   const hobject_t& soid = oi.soid;
@@ -11077,6 +11119,8 @@ void PrimaryLogPG::flush_manifest(
   //fop->on_flush = std::move(on_flush);
   fop->op = op;
 
+  dout(10) << __func__ << " start " << dendl;
+
   ObjectOperation o;
   object_locator_t oloc(soid);
   o.copy_from(soid.oid.name, soid.snap, oloc, oi.user_version,
@@ -11087,7 +11131,7 @@ void PrimaryLogPG::flush_manifest(
 	      LIBRADOS_OP_FLAG_FADVISE_SEQUENTIAL|LIBRADOS_OP_FLAG_FADVISE_NOCACHE);
   C_Manifest_Flush *fin = new C_Manifest_Flush(this, soid, get_last_peering_reset());
 
-  object_locator_t base_oloc(soid);
+  object_locator_t base_oloc(t_oid);
   SnapContext snapc;
   ceph_tid_t tid = osd->objecter->mutate(
     soid.oid, base_oloc, o, snapc,
@@ -14844,6 +14888,8 @@ void PrimaryLogPG::hit_set_trim(OpContextUPtr &ctx, unsigned max)
 void PrimaryLogPG::hit_set_in_memory_trim(uint32_t max_in_memory)
 {
   while (agent_state->hit_set_map.size() > max_in_memory) {
+    dout(10) << __func__ << " hit set map size: " << agent_state->hit_set_map.size()
+	    << " max in memory " << max_in_memory << dendl;
     agent_state->remove_oldest_hit_set();
   }
 }
@@ -14926,8 +14972,10 @@ bool PrimaryLogPG::agent_work(int start_max, int agent_flush_quota)
 
   agent_load_hit_sets();
 
+#if 0
   const pg_pool_t *base_pool = get_osdmap()->get_pg_pool(pool.info.tier_of);
   ceph_assert(base_pool);
+#endif
 
   int ls_min = 1;
   int ls_max = cct->_conf->osd_pool_default_cache_max_evict_check_size;
@@ -14992,12 +15040,14 @@ bool PrimaryLogPG::agent_work(int start_max, int agent_flush_quota)
     }
 
     // be careful flushing omap to an EC pool.
+#if 0
     if (!base_pool->supports_omap() &&
 	obc->obs.oi.is_omap()) {
       dout(20) << __func__ << " skip (omap to EC) " << obc->obs.oi << dendl;
       osd->logger->inc(l_osd_agent_skip);
       continue;
     }
+#endif
 
     if (obc->obs.oi.has_manifest() && obc->obs.oi.manifest.is_chunked()) {
       agent_maybe_evict_tidedup(obc, false);
@@ -15429,11 +15479,13 @@ bool PrimaryLogPG::agent_choose_mode(bool restart, OpRequestRef op)
   // they cannot be flushed.
   uint64_t unflushable = info.stats.stats.sum.num_objects_hit_set_archive;
 
+#if 0
   // also exclude omap objects if ec backing pool
   const pg_pool_t *base_pool = get_osdmap()->get_pg_pool(pool.info.tier_of);
   ceph_assert(base_pool);
   if (!base_pool->supports_omap())
     unflushable += info.stats.stats.sum.num_objects_omap;
+#endif
 
   uint64_t num_user_objects = info.stats.stats.sum.num_objects;
   if (num_user_objects > unflushable)
@@ -15449,12 +15501,14 @@ bool PrimaryLogPG::agent_choose_mode(bool restart, OpRequestRef op)
 
   // also reduce the num_dirty by num_objects_omap
   int64_t num_dirty = info.stats.stats.sum.num_objects_dirty;
+#if 0
   if (!base_pool->supports_omap()) {
     if (num_dirty > info.stats.stats.sum.num_objects_omap)
       num_dirty -= info.stats.stats.sum.num_objects_omap;
     else
       num_dirty = 0;
   }
+#endif
 
   dout(10) << __func__
 	   << " flush_mode: "
@@ -15612,6 +15666,10 @@ bool PrimaryLogPG::agent_choose_mode(bool restart, OpRequestRef op)
       });
     agent_state->evict_mode = evict_mode;
   }
+
+  // TODO
+  agent_state->evict_mode = TierAgentState::EVICT_MODE_SOME;
+
   uint64_t old_effort = agent_state->evict_effort;
   if (evict_effort != agent_state->evict_effort) {
     dout(5) << __func__ << " evict_effort "
