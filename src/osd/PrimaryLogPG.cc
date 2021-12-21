@@ -15050,7 +15050,13 @@ bool PrimaryLogPG::agent_work(int start_max, int agent_flush_quota)
 #endif
 
     if (obc->obs.oi.has_manifest() && obc->obs.oi.manifest.is_chunked()) {
-      agent_maybe_evict_tidedup(obc, false);
+      auto p = obc->obs.oi.manifest.chunk_map.find(0);
+      if (p != obc->obs.oi.manifest.chunk_map.end()) {
+	if (obc->obs.oi.manifest.chunk_map[0].oid.oid.name
+	    == obc->obs.oi.soid.oid.name) {
+	  agent_maybe_evict_tidedup(obc, false);
+	}
+      }
     } 
     // disable
 #if 0
