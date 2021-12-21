@@ -761,6 +761,7 @@ inline namespace v14_2_0 {
      */
     void tier_evict();
     void set_manifest(const IoCtx& tgt_ioctx, int flag = 0);
+    void is_hot(bool *isdirty, int *prval);
   };
 
   /* IoCtx : This is a context in which we can perform I/O.

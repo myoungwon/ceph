@@ -6196,6 +6196,113 @@ TEST_F(LibRadosTwoPoolsPP, ManifestEvictRollback) {
   is_intended_refcount_state(ioctx, "foo", cache_ioctx, "chunk2", 1);
 }
 
+TEST_F(LibRadosTwoPoolsPP, tidedup) {
+  // skip test if not yet pacific
+  if (_get_required_osd_release(cluster) < "pacific") {
+    cout << "cluster is not yet pacific, skipping test" << std::endl;
+    return;
+  }
+
+  unsigned count = 1;
+  unsigned period = 5;
+  bufferlist inbl;
+  ASSERT_EQ(0, cluster.mon_command(set_pool_str(cache_pool_name, "hit_set_count", count),
+						inbl, NULL, NULL));
+  ASSERT_EQ(0, cluster.mon_command(set_pool_str(cache_pool_name, "hit_set_period", period),
+						inbl, NULL, NULL));
+  ASSERT_EQ(0, cluster.mon_command(set_pool_str(cache_pool_name, "hit_set_type", "bloom"),
+				   inbl, NULL, NULL));
+
+  // create object
+  {
+    bufferlist bl;
+    bl.append("CDere hiHI");
+    ObjectWriteOperation op;
+    op.write_full(bl);
+    ASSERT_EQ(0, cache_ioctx.operate("foo", &op));
+  }
+  {
+    bufferlist bl;
+    bl.append("TDere hiHI");
+    ObjectWriteOperation op;
+    op.write_full(bl);
+    ASSERT_EQ(0, cache_ioctx.operate("foo1", &op));
+  }
+  {
+    bufferlist bl;
+    bl.append("DDere hiHI");
+    ObjectWriteOperation op;
+    op.write_full(bl);
+    ASSERT_EQ(0, ioctx.operate("foo1", &op));
+  }
+  {
+    bufferlist bl;
+    bl.append("TDere hiHI");
+    ObjectWriteOperation op;
+    op.write_full(bl);
+    ASSERT_EQ(0, cache_ioctx.operate("foo2", &op));
+  }
+  {
+    bufferlist bl;
+    bl.append("TDere hiHI");
+    ObjectWriteOperation op;
+    op.write_full(bl);
+    ASSERT_EQ(0, cache_ioctx.operate("foo3", &op));
+  }
+  {
+    bufferlist bl;
+    bl.append("CDere hiHI");
+    ObjectWriteOperation op;
+    op.write_full(bl);
+    ASSERT_EQ(0, ioctx.operate("foo", &op));
+  }
+  manifest_set_chunk(cluster, ioctx, cache_ioctx, 0, 10, "foo", "foo");
+
+  // check is hot
+  {
+    bool hot = false;
+    int r = -1;
+    ObjectReadOperation op;
+    op.is_hot(&hot, &r);
+    ASSERT_EQ(0, cache_ioctx.operate("foo", &op, NULL));
+    ASSERT_TRUE(hot);
+    ASSERT_EQ(0, r);
+  }
+
+  sleep(10);
+  // check is hot
+  {
+    bool hot = false;
+    int r = -1;
+    ObjectReadOperation op;
+    op.is_hot(&hot, &r);
+    ASSERT_EQ(0, cache_ioctx.operate("foo", &op, NULL));
+    ASSERT_FALSE(hot);
+    ASSERT_EQ(0, r);
+  }
+
+
+  manifest_set_chunk(cluster, ioctx, cache_ioctx, 0, 10, "foo1", "foo1");
+
+  {
+    ObjectReadOperation op;
+    op.tier_flush();
+    librados::AioCompletion *completion = cluster.aio_create_completion();
+    ASSERT_EQ(0, cache_ioctx.aio_operate(
+      "foo1", completion, &op,
+      librados::OPERATION_IGNORE_CACHE, NULL));
+    completion->wait_for_complete();
+    ASSERT_EQ(0, completion->get_return_value());
+    completion->release();
+  }
+
+  {
+    bufferlist bl;
+    ASSERT_EQ(1, ioctx.read("foo1", bl, 1, 0));
+    ASSERT_EQ('T', bl[0]);
+  }
+}
+
 class LibRadosTwoPoolsECPP : public RadosTestECPP
 {
 public:
