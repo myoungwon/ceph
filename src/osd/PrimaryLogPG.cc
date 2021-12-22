@@ -7503,7 +7503,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  break;
 	}
 	if (!obs.oi.has_manifest()) {
-	  result = 0;
+	  result = -EINVAL;
 	  break;
 	}
 
