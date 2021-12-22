@@ -6248,7 +6248,15 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	    }
 	  }
 	}
+	bool is_backup = false;
+	if (obs.oi.has_manifest() && obs.oi.manifest.is_chunked()) {
+	  auto p = obs.oi.manifest.chunk_map.find(0);
+	  if (p != obs.oi.manifest.chunk_map.end()) {
+	    is_backup = (obs.oi.soid.oid.name == obs.oi.manifest.chunk_map[0].oid.oid.name);
+	  }
+	}
 	encode(is_hot, osd_op.outdata);
+	encode(is_backup, osd_op.outdata);
 	ctx->delta_stats.num_rd++;
 	result = 0;
       }

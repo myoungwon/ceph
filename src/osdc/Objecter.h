@@ -1196,9 +1196,14 @@ struct ObjectOperation {
       try {
 	auto p = bl.cbegin();
 	bool ishot;
+	bool isbackup;
 	decode(ishot, p);
+	decode(isbackup, p);
 	if (pishot)
 	  *pishot = ishot;
+	if (isbackup) {
+	  *prval = 1000; // already backcuped
+	}
       } catch (const ceph::buffer::error& e) {
 	if (prval)
 	  *prval = -EIO;
