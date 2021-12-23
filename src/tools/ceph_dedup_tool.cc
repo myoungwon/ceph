@@ -515,7 +515,7 @@ public:
     ObjectCursor& begin, ObjectCursor end, int32_t report_period,
     uint64_t num_objects, uint32_t sampling_ratio, uint32_t object_dedup_threshold,
     uint32_t chunk_dedup_threshold, int32_t osd_count, size_t chunk_size,
-    crawl_mode_t mode):
+    crawl_mode_t mode, IoCtx* p_cold_io_ctx):
     CrawlerThread(io_ctx, n, m, begin, end, report_period, num_objects),
     chunk_io_ctx(chunk_io_ctx),
     mode(mode),
@@ -523,7 +523,8 @@ public:
     chunk_dedup_threshold(chunk_dedup_threshold),
     object_dedup_threshold(object_dedup_threshold),
     chunk_size(chunk_size),
-    osd_count(osd_count) { }
+    osd_count(osd_count),
+    p_cold_io_ctx(p_cold_io_ctx) { }
   static void clear_fingerprint_store() {
     {
       std::unique_lock lock(fingerprint_lock);
@@ -606,6 +607,7 @@ private:
   std::list<string> dedupable_objects;
   size_t chunk_size = 8192;
   int osd_count;
+  IoCtx* p_cold_io_ctx;
 };
 
 SampleDedup::crawl_mode_t default_crawl_mode = SampleDedup::crawl_mode_t::DEEP;
@@ -958,13 +960,14 @@ int SampleDedup::make_cold(ObjectItem& object) {
   bufferlist data = read_object(object);
   ObjectWriteOperation wop;
   wop.write_full(data);
-  int ret = chunk_io_ctx.operate(object.oid, &wop);
+  assert(p_cold_io_ctx);
+  int ret = p_cold_io_ctx->operate(object.oid, &wop);
   if (ret < 0) {
     cerr << __func__ << " write_full error : " << cpp_strerror(ret) << std::endl;
     return ret;
   }
   ObjectReadOperation op;
-  op.set_chunk(0, data.length(), chunk_io_ctx, object.oid, 0,
+  op.set_chunk(0, data.length(), *p_cold_io_ctx, object.oid, 0,
       CEPH_OSD_OP_FLAG_WITH_REFERENCE);
   ret = io_ctx.operate(object.oid, &op, NULL);
   if (ret < 0) {
@@ -972,6 +975,7 @@ int SampleDedup::make_cold(ObjectItem& object) {
     return ret;
   }
   if (ret >= 0 ) {
+    // TODO: current promote_object for chunked object is not appropriate
     oid_for_evict.insert(object.oid);
   }
   return ret;
@@ -1931,7 +1935,8 @@ int make_crawling_daemon(const map<string, string> &opts,
   }
 
   list<string> pool_names;
-  IoCtx io_ctx, chunk_io_ctx;
+  IoCtx io_ctx, chunk_io_ctx, cold_io_ctx;
+  IoCtx* p_cold_io_ctx;
   pool_names.push_back(base_pool_name);
   ret = rados.ioctx_create(base_pool_name.c_str(), io_ctx);
   if (ret < 0) {
@@ -1970,6 +1975,26 @@ int make_crawling_daemon(const map<string, string> &opts,
     cerr << " operate fail : " << cpp_strerror(ret) << std::endl;
     return ret;
   }
+  string cold_pool_name;
+  i = opts.find("cold-pool");
+  if (i != opts.end()) {
+    cold_pool_name = i->second.c_str();
+  } else {
+    cold_pool_name = chunk_pool_name;
+    p_cold_io_ctx = &chunk_io_ctx;
+  }
+
+  if (cold_pool_name != chunk_pool_name) {
+    ret = rados.ioctx_create(cold_pool_name.c_str(), cold_io_ctx);
+    if (ret < 0) {
+      cerr << "error opening chunk pool "
+	<< chunk_pool_name << ": "
+	<< cpp_strerror(ret) << std::endl;
+      return -EINVAL;
+    }
+    p_cold_io_ctx = &cold_io_ctx;
+  }
+
   cout << "SampleRatio : " << sampling_ratio << std::endl
     << "Object Dedup Threshold : " << object_dedup_threshold << std::endl
     << "Chunk Dedup Threshold : " << chunk_dedup_threshold << std::endl
@@ -2021,7 +2046,8 @@ int make_crawling_daemon(const map<string, string> &opts,
             chunk_dedup_threshold,
             osd_count,
             chunk_size,
-            crawl_mode));
+            crawl_mode,
+	    p_cold_io_ctx));
       ptr->set_debug(debug);
       ptr->create("sample_dedup");
       estimate_threads.push_back(move(ptr));
@@ -2124,6 +2150,8 @@ int main(int argc, const char **argv)
       opts["iterative"] = "true";
     } else if (ceph_argparse_flag(args, i, "--shallow-crawling", (char*)NULL)) {
       opts["shallow-crawling"] = true;
+    } else if (ceph_argparse_witharg(args, i, &val, "--cold-pool", (char*)NULL)) {
+      opts["cold-pool"] = val;
     } else if (ceph_argparse_flag(args, i, "--debug", (char*)NULL)) {
       opts["debug"] = "true";
     } else {
