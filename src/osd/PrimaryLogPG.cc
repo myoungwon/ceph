@@ -6249,14 +6249,20 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  }
 	}
 	bool is_backup = false;
+	bool is_deduped = false;
 	if (obs.oi.has_manifest() && obs.oi.manifest.is_chunked()) {
 	  auto p = obs.oi.manifest.chunk_map.find(0);
 	  if (p != obs.oi.manifest.chunk_map.end()) {
 	    is_backup = (obs.oi.soid.oid.name == obs.oi.manifest.chunk_map[0].oid.oid.name);
+	  } 
+	  if (!is_backup && obs.oi.manifest.chunk_map.size() > 0) {
+	    is_deduped = true;
 	  }
 	}
+
 	encode(is_hot, osd_op.outdata);
 	encode(is_backup, osd_op.outdata);
+	encode(is_deduped, osd_op.outdata);
 	ctx->delta_stats.num_rd++;
 	result = 0;
       }
@@ -14895,6 +14901,8 @@ void PrimaryLogPG::hit_set_trim(OpContextUPtr &ctx, unsigned max)
 
 void PrimaryLogPG::hit_set_in_memory_trim(uint32_t max_in_memory)
 {
+  dout(10) << __func__ << " hit set map size: " << agent_state->hit_set_map.size()
+	  << " max in memory " << max_in_memory << dendl;
   while (agent_state->hit_set_map.size() > max_in_memory) {
     dout(10) << __func__ << " hit set map size: " << agent_state->hit_set_map.size()
 	    << " max in memory " << max_in_memory << dendl;

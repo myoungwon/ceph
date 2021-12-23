@@ -579,7 +579,7 @@ private:
   bool check_object_dedup(size_t dedup_size, size_t total_size);
   bool is_dirty(ObjectItem& object);
   int make_cold(ObjectItem& object);
-  bool is_hot(ObjectItem& object, bool& backup);
+  bool is_hot(ObjectItem& object, bool& backup, bool& deduped);
   
   Rados rados;
   IoCtx chunk_io_ctx;
@@ -658,12 +658,15 @@ void SampleDedup::crawl() {
 	 * if no, check whether the object either manifest or not
 	 */
 	bool backup = false;
-	if (!is_hot(target, backup)) {
+	bool deduped = false;
+	if (!is_hot(target, backup, deduped)) {
 	  cout << " object is not hot : " << target.oid << std::endl;
-          bool is_deduped = try_dedup_and_accumulate_result(target, completions);
-	  if (!is_deduped && !backup) {
-	    cout << " cold object : " << target.oid << std::endl;
-	    make_cold(target);
+	  if (!deduped) {
+	    bool is_deduped = try_dedup_and_accumulate_result(target, completions);
+	    if (!is_deduped && !backup) {
+	      cout << " cold object : " << target.oid << std::endl;
+	      make_cold(target);
+	    }
 	  }
 	} 
 #if 0
@@ -713,7 +716,7 @@ bool SampleDedup::is_dirty(ObjectItem& object) {
   return dirty;
 }
 
-bool SampleDedup::is_hot(ObjectItem& object, bool& backup) {
+bool SampleDedup::is_hot(ObjectItem& object, bool& backup, bool& deduped) {
   ObjectReadOperation op;
   bool hot = false;
   int r = -1;
@@ -721,6 +724,8 @@ bool SampleDedup::is_hot(ObjectItem& object, bool& backup) {
   io_ctx.operate(object.oid, &op, NULL);
   if (r == 1000) { // backup
     backup = true;
+  } else if (r == 2000) { // deduped
+    deduped = true;
   }
   return hot;
 }

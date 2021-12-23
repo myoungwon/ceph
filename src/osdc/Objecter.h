@@ -1197,12 +1197,16 @@ struct ObjectOperation {
 	auto p = bl.cbegin();
 	bool ishot;
 	bool isbackup;
+	bool isdeduped;
 	decode(ishot, p);
 	decode(isbackup, p);
+	decode(isdeduped, p);
 	if (pishot)
 	  *pishot = ishot;
 	if (isbackup) {
 	  *prval = 1000; // already backcuped
+	} else if (isdeduped) {
+	  *prval = 2000; // already deduped
 	}
       } catch (const ceph::buffer::error& e) {
 	if (prval)
