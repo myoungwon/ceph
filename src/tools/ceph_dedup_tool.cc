@@ -657,8 +657,10 @@ void SampleDedup::crawl() {
 	 */
 	bool backup = false;
 	if (!is_hot(target, backup)) {
+	  cout << " object is not hot : " << target.oid << std::endl;
           bool is_deduped = try_dedup_and_accumulate_result(target, completions);
 	  if (!is_deduped && !backup) {
+	    cout << " cold object : " << target.oid << std::endl;
 	    make_cold(target);
 	  }
 	} 
@@ -956,14 +958,13 @@ int SampleDedup::make_cold(ObjectItem& object) {
   bufferlist data = read_object(object);
   ObjectWriteOperation wop;
   wop.write_full(data);
-  std::string fp_oid = generate_fingerprint(data);
-  int ret = chunk_io_ctx.operate(fp_oid, &wop);
+  int ret = chunk_io_ctx.operate(object.oid, &wop);
   if (ret < 0) {
     cerr << __func__ << " write_full error : " << cpp_strerror(ret) << std::endl;
     return ret;
   }
   ObjectReadOperation op;
-  op.set_chunk(0, data.length(), chunk_io_ctx, fp_oid, 0,
+  op.set_chunk(0, data.length(), chunk_io_ctx, object.oid, 0,
       CEPH_OSD_OP_FLAG_WITH_REFERENCE);
   ret = io_ctx.operate(object.oid, &op, NULL);
   if (ret < 0) {
@@ -1816,11 +1817,11 @@ int make_crawling_daemon(const map<string, string> &opts,
     iterative = true;
   }
   string base_pool_name;
-  i = opts.find("base-pool");
+  i = opts.find("pool");
   if (i != opts.end()) {
     base_pool_name = i->second.c_str();
   } else {
-    cerr << "must specify --base-pool" << std::endl;
+    cerr << "must specify --pool" << std::endl;
     return -EINVAL;
   }
 
@@ -1969,7 +1970,7 @@ int make_crawling_daemon(const map<string, string> &opts,
     cerr << " operate fail : " << cpp_strerror(ret) << std::endl;
     return ret;
   }
-  cout << "SamnpleRatio : " << sampling_ratio << std::endl
+  cout << "SampleRatio : " << sampling_ratio << std::endl
     << "Object Dedup Threshold : " << object_dedup_threshold << std::endl
     << "Chunk Dedup Threshold : " << chunk_dedup_threshold << std::endl
     << "Chunk Size : " << chunk_size << std::endl
@@ -2004,6 +2005,7 @@ int make_crawling_daemon(const map<string, string> &opts,
     estimate_threads.clear();
     SampleDedup::clear_fingerprint_store();
     for (unsigned i = 0; i < max_thread; i++) {
+      cout << " add thread.. " << std::endl;
       unique_ptr<CrawlerThread> ptr (
           new SampleDedup(
             io_ctx,
