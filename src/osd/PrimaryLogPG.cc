@@ -6259,6 +6259,9 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	    is_deduped = true;
 	  }
 	}
+	if (is_deduped && obs.oi.is_dirty()) {
+	  is_deduped = false;
+	}
 
 	encode(is_hot, osd_op.outdata);
 	encode(is_backup, osd_op.outdata);
