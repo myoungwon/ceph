@@ -724,8 +724,14 @@ bool SampleDedup::is_hot(ObjectItem& object, bool& backup, bool& deduped) {
   io_ctx.operate(object.oid, &op, NULL);
   if (r == 1000) { // backup
     backup = true;
+    if (debug) { 
+      cout << __func__ << " object " << object.oid << " is already backuped " << std::endl;
+    }
   } else if (r == 2000) { // deduped
     deduped = true;
+    if (debug) { 
+      cout << __func__ << " object " << object.oid << " is already deduped " << std::endl;
+    }
   }
   return hot;
 }
@@ -988,7 +994,10 @@ int SampleDedup::make_cold(ObjectItem& object) {
 
 AioCompletion* SampleDedup::flush(ObjectItem& object) {
   ObjectReadOperation op;
+#if 0
   AioCompletion* completion = rados.aio_create_completion();
+#endif
+  AioCompletion* completion = nullptr;
   op.tier_flush();
   if (debug) {
     cout << "try flush " << object.oid << " " << &flushed_objects<<std::endl;
@@ -998,9 +1007,15 @@ AioCompletion* SampleDedup::flush(ObjectItem& object) {
     flushed_objects.insert(object.oid);
   }
 
+#if 0
   int ret = io_ctx.aio_operate(
       object.oid,
       completion,
+      &op,
+      NULL);
+#endif
+  int ret = io_ctx.operate(
+      object.oid,
       &op,
       NULL);
   if (ret == -EINVAL) {
