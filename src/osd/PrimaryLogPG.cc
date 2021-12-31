@@ -15322,7 +15322,7 @@ bool PrimaryLogPG::agent_maybe_evict_tidedup(ObjectContextRef& obc, bool after_f
     osd->agent_finish_op(oid);
   };
   int result = start_flush(
-    OpRequestRef(), obc, false, NULL,
+    OpRequestRef(), obc, true, NULL,
     on_flush);
   if (result != -EINPROGRESS) {
     on_flush();
