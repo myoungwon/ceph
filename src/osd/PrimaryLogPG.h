@@ -281,7 +281,7 @@ public:
     std::map<hobject_t, std::pair<uint64_t, uint64_t>> chunks;
     uint64_t num_chunks = 0;
     object_manifest_t new_manifest;
-    
+    ObjectContextRef obc;
 
     ManifestOp(RefCountCallback* cb)
       : cb(cb) {}

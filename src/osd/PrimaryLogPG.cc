@@ -10629,6 +10629,7 @@ int PrimaryLogPG::start_dedup(OpRequestRef op, ObjectContextRef obc)
    * This op will be finished if all the operations are completed.
    */
   ManifestOpRef mop(std::make_shared<ManifestOp>());
+  mop->obc = obc;
 
   // cdc
   std::map<uint64_t, bufferlist> chunks; 
@@ -10784,7 +10785,7 @@ int PrimaryLogPG::finish_set_dedup(hobject_t oid, int r, ceph_tid_t tid, uint64_
     // there are on-going works
     return -EINPROGRESS;
   }
-  ObjectContextRef obc = get_object_context(oid, false);
+  ObjectContextRef obc = mop->obc;
   if (!obc) {
     if (mop->op)
       osd->reply_op_error(mop->op, -EINVAL);
