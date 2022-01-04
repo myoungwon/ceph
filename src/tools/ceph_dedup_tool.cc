@@ -1077,6 +1077,7 @@ void SampleDedup::mark_dedup(chunk_t& chunk,
   {
     std::shared_lock lock(flushed_lock);
     if (flushed_objects.find(chunk.oid) != flushed_objects.end()) {
+      oid_for_evict.insert(chunk.oid);
       return;
     }
   }
