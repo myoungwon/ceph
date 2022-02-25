@@ -509,7 +509,57 @@ void ChunkScrub::chunk_scrub_common()
 }
 
 #define DEBUG_OUT(x) if(debug==1){std::cout<<x;}else{}
+static int make_manifest_object_and_flush(
+  std::string& oid,
+  IoCtx& io_ctx,
+  IoCtx& chunk_io_ctx) {
+  // try to make manifest object
+  ObjectWriteOperation op;
+  bufferlist temp;
+  temp.append("temp");
+  op.write_full(temp);
 
+  auto gen_r_num = [] () -> string {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<uint64_t> dist;
+    uint64_t r_num = dist(gen);
+    return to_string(r_num);
+  };
+  string temp_oid = gen_r_num();
+  // create temp chunk object for set-chunk
+  int ret = chunk_io_ctx.operate(temp_oid, &op);
+  if (ret == -EEXIST) {
+    // one more try
+    temp_oid = gen_r_num();
+    ret = chunk_io_ctx.operate(temp_oid, &op);
+  }
+  if (ret < 0) {
+    cerr << " operate fail : " << cpp_strerror(ret) << std::endl;
+    return ret;
+  }
+
+  // set-chunk to make manifest object
+   ObjectReadOperation chunk_op;
+  chunk_op.set_chunk(0, 4, chunk_io_ctx, temp_oid, 0,
+      CEPH_OSD_OP_FLAG_WITH_REFERENCE);
+  ret = io_ctx.operate(oid, &chunk_op, NULL);
+  if (ret < 0) {
+    cerr << " set_chunk fail : " << cpp_strerror(ret) << std::endl;
+    return ret;
+  }
+
+  // tier-flush to perform deduplication
+  ObjectReadOperation flush_op;
+  flush_op.tier_flush();
+  ret = io_ctx.operate(oid, &flush_op, NULL);
+  if (ret < 0) {
+    cerr << " tier_flush fail : " << cpp_strerror(ret) << std::endl;
+    return ret;
+  }
+  return ret;
+}
+   
 class SampleDedup : public CrawlerThread
 {
 public:
@@ -553,7 +603,7 @@ private:
     size_t start = 0;
     size_t size = 0;
     string fingerprint = "";
-    bufferlist data;
+    bufferlist data = bufferlist();
   };
 
   void crawl();
@@ -615,7 +665,7 @@ private:
               target.processed = true;
               // When a fingerprint firstly detected to be duplicated more than
               // threshold, add all previously found chunks to duplicable_chunks
-              duplicable_chunks.splice(target.found_chunks.begin(), target.found_chunks);
+              duplicable_chunks.splice(duplicable_chunks.begin(), target.found_chunks);
             } else {
               duplicable_chunks.push_back(chunk);
             }
@@ -931,60 +981,11 @@ void SampleDedup::flush_duplicable_object(ObjectItem& object) {
     flushed_objects.insert(object.oid);
   }
 
-  int ret = io_ctx.operate(
-      object.oid,
-      &op,
-      NULL);
-  if (ret == -EINVAL) {
-    // try to make manifest object
-    ObjectWriteOperation op;
-    bufferlist temp;
-    temp.append("temp");
-    op.write_full(temp);
-
-    auto gen_r_num = [] () -> string {
-      std::random_device rd;
-      std::mt19937 gen(rd());
-      std::uniform_int_distribution<uint64_t> dist;
-      uint64_t r_num = dist(gen);
-      return to_string(r_num);
-    };
-    string temp_oid = gen_r_num();
-    // create temp chunk object for set-chunk
-    int ret = chunk_io_ctx.operate(temp_oid, &op);
-    if (ret == -EEXIST) {
-      // one more try
-      temp_oid = gen_r_num();
-      ret = chunk_io_ctx.operate(temp_oid, &op);
-    }
-    if (ret < 0) {
-      cerr << " operate fail : " << cpp_strerror(ret) << std::endl;
-      return;
-    }
-
-    // set-chunk to make manifest object
-    ObjectReadOperation chunk_op;
-    chunk_op.set_chunk(0, 4, chunk_io_ctx, temp_oid, 0,
-        CEPH_OSD_OP_FLAG_WITH_REFERENCE);
-    ret = io_ctx.operate(object.oid, &chunk_op, NULL);
-    if (ret < 0) {
-      cerr << " set_chunk fail : " << cpp_strerror(ret) << std::endl;
-      return;
-    }
-
-    // tier-flush to perform deduplication
-    ObjectReadOperation flush_op;
-    flush_op.tier_flush();
-    ret = io_ctx.operate(object.oid, &flush_op, NULL);
-    if (ret < 0) {
-      cerr << " tier_flush fail : " << cpp_strerror(ret) << std::endl;
-      return;
-    }
-
-    if (ret < 0) {
-      cerr << __func__ << " flushing object(" << object.oid << ") is failed\n";
-    }
+  int ret = make_manifest_object_and_flush(object.oid, io_ctx, chunk_io_ctx);
+  if (ret < 0) {
+    cerr << __func__ << " flushing object(" << object.oid << ") is failed\n";
   }
+
   return;
 }
 
@@ -1672,48 +1673,9 @@ int make_dedup_object(const std::map < std::string, std::string > &opts,
      * the object a manifest object, the tier_flush() will remove
      * it and replace it with the real contents.
      */
-    // convert object to manifest object
-    ObjectWriteOperation op;
-    bufferlist temp;
-    temp.append("temp");
-    op.write_full(temp);
-
-    auto gen_r_num = [] () -> string {
-      std::random_device rd;
-      std::mt19937 gen(rd());
-      std::uniform_int_distribution<uint64_t> dist;
-      uint64_t r_num = dist(gen);
-      return to_string(r_num);
-    };
-    string temp_oid = gen_r_num();
-    // create temp chunk object for set-chunk
-    ret = chunk_io_ctx.operate(temp_oid, &op);
-    if (ret == -EEXIST) {
-      // one more try
-      temp_oid = gen_r_num();
-      ret = chunk_io_ctx.operate(temp_oid, &op);
-    }
+    ret = make_manifest_object_and_flush(object_name, io_ctx, chunk_io_ctx);
     if (ret < 0) {
-      cerr << " operate fail : " << cpp_strerror(ret) << std::endl;
-      goto out;
-    }
-
-    // set-chunk to make manifest object
-    ObjectReadOperation chunk_op;
-    chunk_op.set_chunk(0, 4, chunk_io_ctx, temp_oid, 0,
-      CEPH_OSD_OP_FLAG_WITH_REFERENCE);
-    ret = io_ctx.operate(object_name, &chunk_op, NULL);
-    if (ret < 0) {
-      cerr << " set_chunk fail : " << cpp_strerror(ret) << std::endl;
-      goto out;
-    }
-
-    // tier-flush to perform deduplication
-    ObjectReadOperation flush_op;
-    flush_op.tier_flush();
-    ret = io_ctx.operate(object_name, &flush_op, NULL);
-    if (ret < 0) {
-      cerr << " tier_flush fail : " << cpp_strerror(ret) << std::endl;
+      cerr << __func__ << " failed\n";
       goto out;
     }
 
@@ -1855,7 +1817,16 @@ int make_crawling_daemon(const map<string, string> &opts,
     return ret;
   }
 
-  cout << "Object Dedup Threshold : " << object_dedup_threshold << std::endl
+  ret = rados.mon_command(
+      make_pool_str(base_pool_name, "dedup_tier", chunk_pool_name),
+      inbl, NULL, NULL);
+  if (ret < 0) {
+    cerr << " operate fail : " << cpp_strerror(ret) << std::endl;
+    return ret;
+  }
+  
+  cout << "SampleRatio : " << sampling_ratio << std::endl
+    << "Object Dedup Threshold : " << object_dedup_threshold << std::endl
     << "Chunk Dedup Threshold : " << chunk_dedup_threshold << std::endl
     << "Chunk Size : " << chunk_size << std::endl
     << std::endl;
