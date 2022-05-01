@@ -1144,42 +1144,6 @@ int make_dedup_object(const std::map < std::string, std::string > &opts,
      * the object a manifest object, the tier_flush() will remove
      * it and replace it with the real contents.
      */
-    // convert object to manifest object
-    ObjectWriteOperation op;
-    bufferlist temp;
-    temp.append("temp");
-    op.write_full(temp);
-
-    auto gen_r_num = [] () -> string {
-      std::random_device rd;
-      std::mt19937 gen(rd());
-      std::uniform_int_distribution<uint64_t> dist;
-      uint64_t r_num = dist(gen);
-      return to_string(r_num);
-    };
-    string temp_oid = gen_r_num();
-    // create temp chunk object for set-chunk
-    ret = chunk_io_ctx.operate(temp_oid, &op);
-    if (ret == -EEXIST) {
-      // one more try
-      temp_oid = gen_r_num();
-      ret = chunk_io_ctx.operate(temp_oid, &op);
-    }
-    if (ret < 0) {
-      cerr << " operate fail : " << cpp_strerror(ret) << std::endl;
-      goto out;
-    }
-
-    // set-chunk to make manifest object
-    ObjectReadOperation chunk_op;
-    chunk_op.set_chunk(0, 4, chunk_io_ctx, temp_oid, 0,
-      CEPH_OSD_OP_FLAG_WITH_REFERENCE);
-    ret = io_ctx.operate(object_name, &chunk_op, NULL);
-    if (ret < 0) {
-      cerr << " set_chunk fail : " << cpp_strerror(ret) << std::endl;
-      goto out;
-    }
-
     // tier-flush to perform deduplication
     ObjectReadOperation flush_op;
     flush_op.tier_flush();
