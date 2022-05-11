@@ -1,0 +1,28 @@
+tasks:
+- s3tests:
+    client.0:
+      force-branch: ceph-master
+      rgw_server: client.0
+- exec:
+    client.0:
+      - sudo ceph osd pool create low_tier 4
+- deduplication:
+    clients: [client.0]
+    op: 'sample-dedup'
+    pool: 'default.rgw.buckets.data'
+    chunk_pool: 'low_tier'
+    chunk_size: 8192
+    chunk_algorithm: 'fastcdc'
+    fingerprint_algorithm: 'sha1'
+    object_dedup_threshold: 15
+    chunk_dedup_threshold: 5
+    max_thread: 2
+    wakeup_period: 20
+overrides:
+  ceph:
+    conf:
+      client:
+        rgw lc debug interval: 10
+        rgw crypt s3 kms backend: testing
+        rgw crypt s3 kms encryption keys: testkey-1=YmluCmJvb3N0CmJvb3N0LWJ1aWxkCmNlcGguY29uZgo= testkey-2=aWIKTWFrZWZpbGUKbWFuCm91dApzcmMKVGVzdGluZwo=
+        rgw crypt require ssl: false
