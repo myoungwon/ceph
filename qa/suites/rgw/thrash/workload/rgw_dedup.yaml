@@ -14,9 +14,10 @@ tasks:
     chunk_size: 8192
     chunk_algorithm: 'fastcdc'
     fingerprint_algorithm: 'sha1'
-    object_dedup_threshold: 50
+    object_dedup_threshold: 15
     chunk_dedup_threshold: 5
     max_thread: 2
+    wakeup_period: 20
 overrides:
   ceph:
     conf:

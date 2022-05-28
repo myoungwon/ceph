@@ -81,60 +81,12 @@ def task(ctx, config):
             pools: [foo]
             ...
 
-    Alternatively, you can provide a pool prefix:
-
-        tasks:
-        - ceph:
-        - exec:
-            client.0:
-              - ceph osd pool create foo.client.0
-        - rados:
-            clients: [client.0]
-            pool_prefix: foo
-            ...
-
-    The tests are run asynchronously, they are not complete when the task
-    returns. For instance:
-
-        - rados:
-            clients: [client.0]
-            pools: [ecbase]
-            ops: 4000
-            objects: 500
-            op_weights:
-              read: 100
-              write: 100
-              delete: 50
-              copy_from: 50
-        - print: "**** done rados ec-cache-agent (part 2)"
-
-     will run the print task immediately after the rados tasks begins but
-     not after it completes. To make the rados task a blocking / sequential
-     task, use:
-
-        - sequential:
-          - rados:
-              clients: [client.0]
-              pools: [ecbase]
-              ops: 4000
-              objects: 500
-              op_weights:
-                read: 100
-                write: 100
-                delete: 50
-                copy_from: 50
-        - print: "**** done rados ec-cache-agent (part 2)"
-
     """
     log.info('Beginning deduplication...')
     assert isinstance(config, dict), \
         "please list clients to run on"
 
     #assert hasattr(ctx, 'rgw')
-    """
-    object_size = int(config.get('object_size', 4000000))
-    op_weights = config.get('op_weights', {})
-    """
     testdir = teuthology.get_testdir(ctx)
     args = [
         'adjust-ulimits',
@@ -157,6 +109,8 @@ def task(ctx, config):
         args.extend(['--chunk-dedup-threshold', str(config.get('chunk_dedup_threshold', 5))])
     if config.get('max_thread', False):
         args.extend(['--max-thread', str(config.get('max_thread', 2))])
+    if config.get('wakeup_period', False):
+        args.extend(['"--wakeup-period"', str(config.get('wakeup_period', 30))])
     if config.get('pool', False):
         args.extend(['--pool', config.get('pool', None)])
 
@@ -164,17 +118,6 @@ def task(ctx, config):
         '--debug',
         '--deamon',
         '--iterative'])
-    """
-    args.extend([
-        '--max-ops', str(config.get('ops', 10000)),
-        '--objects', str(config.get('objects', 500)),
-        '--max-in-flight', str(config.get('max_in_flight', 16)),
-        '--size', str(object_size),
-        '--min-stride-size', str(config.get('min_stride_size', object_size // 10)),
-        '--max-stride-size', str(config.get('max_stride_size', object_size // 5)),
-        '--max-seconds', str(config.get('max_seconds', 0))
-        ])
-    """
 
     def thread():
         clients = ['client.{id}'.format(id=id_) for id_ in teuthology.all_roles_of_type(ctx.cluster, 'client')]
