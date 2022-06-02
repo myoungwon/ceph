@@ -212,6 +212,7 @@ struct cbjournal_test_t : public seastar_test_suite_t
   }
 
   auto replay() {
+    cbj->open_device_read_header(CBJOURNAL_START_ADDRESS).unsafe_get0();
     cbj->replay(
       [this](const auto &offsets, const auto &e, auto j_seq, auto last_modified) 
       -> Journal::replay_ret {

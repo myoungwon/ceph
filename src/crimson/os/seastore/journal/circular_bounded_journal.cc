@@ -359,96 +359,94 @@ Journal::replay_ret CircularBoundedJournal::replay(
    * read records from last applied record prior to written_to, and replay
    */
   LOG_PREFIX(CircularBoundedJournal::replay);
-  auto fut = open_device_read_header(CBJOURNAL_START_ADDRESS);
-  return fut.safe_then([this, FNAME, delta_handler=std::move(delta_handler)] (auto addr) {
-    return seastar::do_with(
-      rbm_abs_addr(get_journal_tail()),
-      std::move(delta_handler),
-      segment_seq_t(),
-      [this, FNAME](auto &cursor_addr, auto &d_handler, auto &last_seq) {
-      return crimson::repeat(
-	[this, &cursor_addr, &d_handler, &last_seq, FNAME]() mutable
-	-> replay_ertr::future<seastar::stop_iteration> {
-	paddr_t cursor_paddr = convert_abs_addr_to_paddr(
-	  cursor_addr,
-	  header.device_id);
-	return read_record(cursor_paddr
-	).safe_then([this, &cursor_addr, &d_handler, &last_seq, FNAME](auto ret) {
-	  if (!ret.has_value()) {
-	    DEBUG("no more records");
-	    return replay_ertr::make_ready_future<
-	      seastar::stop_iteration>(seastar::stop_iteration::yes);
-	  }
-	  auto [r_header, bl] = *ret;
-	  if (last_seq > r_header.committed_to.segment_seq) {
-	    DEBUG("found invalide record. stop replaying");
-	    return replay_ertr::make_ready_future<
-	      seastar::stop_iteration>(seastar::stop_iteration::yes);
-	  }
-	  bufferlist mdbuf;
-	  mdbuf.substr_of(bl, 0, r_header.mdlength);
-	  paddr_t record_block_base = paddr_t::make_blk_paddr(
-	    header.device_id, cursor_addr + r_header.mdlength);
-	  auto maybe_record_deltas_list = try_decode_deltas(
-	    r_header, mdbuf, record_block_base);
-	  if (!maybe_record_deltas_list) {
-	    DEBUG("unable to decode deltas for record {} at {}",
-	      r_header, record_block_base);
-	    return replay_ertr::make_ready_future<
-	      seastar::stop_iteration>(seastar::stop_iteration::yes);
-	  }
-	  DEBUG(" record_group_header_t: {}, cursor_addr: {} ",
-	    r_header, cursor_addr);
-	  auto write_result = write_result_t{
-	    r_header.committed_to,
-	    (seastore_off_t)bl.length()
-	  };
-	  cur_segment_seq = r_header.committed_to.segment_seq + 1;
-	  cursor_addr += bl.length();
-	  set_written_to(cursor_addr);
-	  last_seq = r_header.committed_to.segment_seq;
-	  return seastar::do_with(
-	    std::move(*maybe_record_deltas_list),
+  ceph_assert(initialized);
+  return seastar::do_with(
+    rbm_abs_addr(get_journal_tail()),
+    std::move(delta_handler),
+    segment_seq_t(),
+    [this, FNAME](auto &cursor_addr, auto &d_handler, auto &last_seq) {
+    return crimson::repeat(
+      [this, &cursor_addr, &d_handler, &last_seq, FNAME]() mutable
+      -> replay_ertr::future<seastar::stop_iteration> {
+      paddr_t cursor_paddr = convert_abs_addr_to_paddr(
+	cursor_addr,
+	header.device_id);
+      return read_record(cursor_paddr
+      ).safe_then([this, &cursor_addr, &d_handler, &last_seq, FNAME](auto ret) {
+	if (!ret.has_value()) {
+	  DEBUG("no more records");
+	  return replay_ertr::make_ready_future<
+	    seastar::stop_iteration>(seastar::stop_iteration::yes);
+	}
+	auto [r_header, bl] = *ret;
+	if (last_seq > r_header.committed_to.segment_seq) {
+	  DEBUG("found invalide record. stop replaying");
+	  return replay_ertr::make_ready_future<
+	    seastar::stop_iteration>(seastar::stop_iteration::yes);
+	}
+	bufferlist mdbuf;
+	mdbuf.substr_of(bl, 0, r_header.mdlength);
+	paddr_t record_block_base = paddr_t::make_blk_paddr(
+	  header.device_id, cursor_addr + r_header.mdlength);
+	auto maybe_record_deltas_list = try_decode_deltas(
+	  r_header, mdbuf, record_block_base);
+	if (!maybe_record_deltas_list) {
+	  DEBUG("unable to decode deltas for record {} at {}",
+	    r_header, record_block_base);
+	  return replay_ertr::make_ready_future<
+	    seastar::stop_iteration>(seastar::stop_iteration::yes);
+	}
+	DEBUG(" record_group_header_t: {}, cursor_addr: {} ",
+	  r_header, cursor_addr);
+	auto write_result = write_result_t{
+	  r_header.committed_to,
+	  (seastore_off_t)bl.length()
+	};
+	cur_segment_seq = r_header.committed_to.segment_seq + 1;
+	cursor_addr += bl.length();
+	set_written_to(cursor_addr);
+	last_seq = r_header.committed_to.segment_seq;
+	return seastar::do_with(
+	  std::move(*maybe_record_deltas_list),
+	  [write_result,
+	  this,
+	  &d_handler,
+	  &cursor_addr,
+	  FNAME](auto& record_deltas_list) {
+	  return crimson::do_for_each(
+	    record_deltas_list,
 	    [write_result,
-	    this,
-	    &d_handler,
-	    &cursor_addr,
-	    FNAME](auto& record_deltas_list) {
+	    &d_handler, FNAME](record_deltas_t& record_deltas) {
+	    auto locator = record_locator_t{
+	      record_deltas.record_block_base,
+	      write_result
+	    };
+	    DEBUG("processing {} deltas at block_base {}",
+		record_deltas.deltas.size(),
+		locator);
 	    return crimson::do_for_each(
-	      record_deltas_list,
-	      [write_result,
-	      &d_handler, FNAME](record_deltas_t& record_deltas) {
-	      auto locator = record_locator_t{
-		record_deltas.record_block_base,
-		write_result
-	      };
-	      DEBUG("processing {} deltas at block_base {}",
-		  record_deltas.deltas.size(),
-		  locator);
-	      return crimson::do_for_each(
-		record_deltas.deltas,
-		[locator,
-		&d_handler](auto& p) {
-		auto& commit_time = p.first;
-		auto& delta = p.second;
-		return d_handler(locator,
-		  delta,
-		  locator.write_result.start_seq,
-		  seastar::lowres_system_clock::time_point(
-		    seastar::lowres_system_clock::duration(commit_time))
-		  );
-	      });
-	    }).safe_then([this, &cursor_addr]() {
-	      if (cursor_addr >= get_journal_end()) {
-		cursor_addr = (cursor_addr - get_journal_end()) + get_start_addr();
-	      }
-	      if (get_written_to() +
-		  ceph::encoded_sizeof_bounded<record_group_header_t>() > get_journal_end()) {
-		cursor_addr = get_start_addr();
-	      }
-	      return replay_ertr::make_ready_future<
-		seastar::stop_iteration>(seastar::stop_iteration::no);
+	      record_deltas.deltas,
+	      [locator,
+	      &d_handler](auto& p) {
+	      auto& commit_time = p.first;
+	      auto& delta = p.second;
+	      return d_handler(locator,
+		delta,
+		locator.write_result.start_seq,
+		seastar::lowres_system_clock::time_point(
+		  seastar::lowres_system_clock::duration(commit_time))
+		);
 	    });
+	  }).safe_then([this, &cursor_addr]() {
+	    if (cursor_addr >= get_journal_end()) {
+	      cursor_addr = (cursor_addr - get_journal_end()) + get_start_addr();
+	    }
+	    if (get_written_to() +
+		ceph::encoded_sizeof_bounded<record_group_header_t>() > get_journal_end()) {
+	      cursor_addr = get_start_addr();
+	    }
+	    return replay_ertr::make_ready_future<
+	      seastar::stop_iteration>(seastar::stop_iteration::no);
 	  });
 	});
       });

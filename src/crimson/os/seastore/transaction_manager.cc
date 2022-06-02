@@ -666,6 +666,7 @@ TransactionManagerRef make_transaction_manager(tm_make_config_t config)
   } else {
     journal = journal::make_circularbounded(
       nullptr, "");
+    async_cleaner->set_journal(journal.get());
     async_cleaner->set_disable_trim(true);
     ERROR("disabling journal trimming since support for CircularBoundedJournal\
 	  hasn't been added yet");

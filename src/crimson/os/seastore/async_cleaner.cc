@@ -1007,32 +1007,9 @@ AsyncCleaner::gc_reclaim_space_ret AsyncCleaner::gc_reclaim_space()
   });
 }
 
-AsyncCleaner::mount_ret AsyncCleaner::mount()
+AsyncCleaner::mount_ret AsyncCleaner::_mount_segments()
 {
-  LOG_PREFIX(AsyncCleaner::mount);
-  const auto& sms = sm_group->get_segment_managers();
-  INFO("{} segment managers", sms.size());
-  init_complete = false;
-  stats = {};
-  journal_tail_target = JOURNAL_SEQ_NULL;
-  journal_tail_committed = JOURNAL_SEQ_NULL;
-  dirty_extents_replay_from = JOURNAL_SEQ_NULL;
-  alloc_info_replay_from = JOURNAL_SEQ_NULL;
-  
-  space_tracker.reset(
-    detailed ?
-    (SpaceTrackerI*)new SpaceTrackerDetailed(
-      sms) :
-    (SpaceTrackerI*)new SpaceTrackerSimple(
-      sms));
-  
-  segments.reset();
-  for (auto sm : sms) {
-    segments.add_segment_manager(*sm);
-  }
-  metrics.clear();
-  register_metrics();
-
+  LOG_PREFIX(SegmentCleaner::_mount_segments);
   INFO("{} segments", segments.get_num_segments());
   return seastar::do_with(
     std::vector<std::pair<segment_id_t, segment_header_t>>(),
@@ -1091,6 +1068,56 @@ AsyncCleaner::mount_ret AsyncCleaner::mount()
 	  crimson::ct_error::assert_all{"unexpected error"}
 	);
       });
+  });
+}
+
+AsyncCleaner::mount_ret AsyncCleaner::_mount_cbjournal()
+{
+  LOG_PREFIX(AsyncCleaner::_mount_cbjournal);
+  auto j = static_cast<journal::CircularBoundedJournal*>(journal);
+  return j->open_device_read_header(journal::CBJOURNAL_START_ADDRESS
+  ).safe_then([this, FNAME, &j](auto j_seq) {
+    journal_tail_committed = j_seq;
+    return mount_ertr::now();
+  }).handle_error(
+    crimson::ct_error::input_output_error::pass_further{},
+    crimson::ct_error::assert_all{"unexpected error"}
+  );
+}
+
+AsyncCleaner::mount_ret AsyncCleaner::mount()
+{
+  LOG_PREFIX(AsyncCleaner::mount);
+  const auto& sms = sm_group->get_segment_managers();
+  INFO("{} segment managers", sms.size());
+  init_complete = false;
+  stats = {};
+  journal_tail_target = JOURNAL_SEQ_NULL;
+  journal_tail_committed = JOURNAL_SEQ_NULL;
+  dirty_extents_replay_from = JOURNAL_SEQ_NULL;
+  alloc_info_replay_from = JOURNAL_SEQ_NULL;
+
+  space_tracker.reset(
+    detailed ?
+    (SpaceTrackerI*)new SpaceTrackerDetailed(
+      sms) :
+    (SpaceTrackerI*)new SpaceTrackerSimple(
+      sms));
+
+  segments.reset();
+  for (auto sm : sms) {
+    segments.add_segment_manager(*sm);
+  }
+  metrics.clear();
+  register_metrics();
+
+  return _mount_segments(
+  ).safe_then([this] {
+    if (journal && journal->get_type() ==
+	journal_type_t::CIRCULARBOUNDED_JOURNAL) {
+      return _mount_cbjournal();
+    }
+    return mount_ertr::now();
   });
 }
 

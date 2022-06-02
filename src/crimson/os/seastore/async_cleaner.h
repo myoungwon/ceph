@@ -17,6 +17,8 @@
 #include "crimson/os/seastore/segment_manager_group.h"
 #include "crimson/os/seastore/transaction.h"
 #include "crimson/os/seastore/segment_seq_allocator.h"
+#include "crimson/os/seastore/journal.h"
+#include "crimson/os/seastore/journal/circular_bounded_journal.h"
 
 namespace crimson::os::seastore {
 
@@ -716,6 +718,7 @@ private:
    * Should be removed once proper support is added. TODO
    */
   bool disable_trim = false;
+  Journal *journal = nullptr;
 public:
   AsyncCleaner(
     config_t config,
@@ -731,6 +734,8 @@ public:
     crimson::ct_error::input_output_error>;
   using mount_ret = mount_ertr::future<>;
   mount_ret mount();
+  mount_ret _mount_segments();
+  mount_ret _mount_cbjournal();
 
   /*
    * SegmentProvider interfaces
@@ -840,6 +845,9 @@ public:
 
   void set_disable_trim(bool val) {
     disable_trim = val;
+  }
+  void set_journal(Journal *j) {
+    journal = j;
   }
 
   using work_ertr = ExtentCallbackInterface::extent_mapping_ertr;
