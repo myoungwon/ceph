@@ -1076,7 +1076,8 @@ AsyncCleaner::mount_ret AsyncCleaner::_mount_cbjournal()
   LOG_PREFIX(AsyncCleaner::_mount_cbjournal);
   auto j = static_cast<journal::CircularBoundedJournal*>(journal);
   return j->open_device_read_header(journal::CBJOURNAL_START_ADDRESS
-  ).safe_then([this, FNAME, &j](auto j_seq) {
+  ).safe_then([this, FNAME, j](auto j_seq) {
+    journal_tail_target = j->get_journal_tail();
     journal_tail_committed = j_seq;
     return mount_ertr::now();
   }).handle_error(

@@ -41,7 +41,11 @@ CircularBoundedJournal::mkfs(const mkfs_config_t& config)
     CircularBoundedJournal::cbj_header_t head;
     head.block_size = config.block_size;
     head.size = config.total_size - device->get_block_size();
-    head.journal_tail = device->get_block_size();
+    head.journal_tail =
+      journal_seq_t{0,
+	convert_abs_addr_to_paddr(
+	  device->get_block_size(),
+	  config.device_id)};
     head.applied_to = head.journal_tail;
     head.device_id = config.device_id;
     start_dev_addr = config.start;
@@ -103,15 +107,9 @@ ceph::bufferlist CircularBoundedJournal::encode_header()
 CircularBoundedJournal::open_for_write_ret CircularBoundedJournal::open_for_write()
 {
   ceph_assert(initialized);
-  paddr_t paddr = convert_abs_addr_to_paddr(
-    get_written_to(),
-    header.device_id);
   return open_for_write_ret(
     open_for_write_ertr::ready_future_marker{},
-    journal_seq_t{
-      cur_segment_seq,
-      paddr
-  });
+    get_written_to());
 }
 
 CircularBoundedJournal::close_ertr::future<> CircularBoundedJournal::close()
@@ -144,17 +142,11 @@ CircularBoundedJournal::open_device_read_header(rbm_abs_addr start)
       auto &[head, bl] = *p;
       header = head;
       DEBUG("header : {}", header);
-      paddr_t paddr = convert_abs_addr_to_paddr(
-	get_written_to(),
-	header.device_id);
       start_dev_addr = start;
       initialized = true;
       return open_for_write_ret(
 	open_for_write_ertr::ready_future_marker{},
-	journal_seq_t{
-	  cur_segment_seq,
-	  paddr
-	});
+	get_written_to());
     });
   }).handle_error(
     open_for_write_ertr::pass_further{},
@@ -215,7 +207,7 @@ CircularBoundedJournal::submit_record_ret CircularBoundedJournal::submit_record(
   assert(write_pipeline);
   auto r_size = record_group_size_t(record.size, get_block_size());
   auto encoded_size = r_size.get_encoded_length();
-  if (get_written_to() +
+  if (get_written_to_rbm_addr() +
       ceph::encoded_sizeof_bounded<record_group_header_t>() > get_journal_end()) {
     // not enough space between written_to and the end of journal,
     // so that set written_to to the beginning of cbjournal to append 
@@ -223,7 +215,9 @@ CircularBoundedJournal::submit_record_ret CircularBoundedJournal::submit_record(
     // |        cbjournal      |
     // 	          v            v
     //      written_to <-> the end of journal
-    set_written_to(get_start_addr());
+    paddr_t addr = convert_abs_addr_to_paddr(get_start_addr(), header.device_id);
+    set_written_to(
+      journal_seq_t{cur_segment_seq, addr});
   }
   if (encoded_size > get_available_size()) {
     ERROR(
@@ -234,26 +228,27 @@ CircularBoundedJournal::submit_record_ret CircularBoundedJournal::submit_record(
     return crimson::ct_error::erange::make();
   }
 
-  journal_seq_t j_seq {
-    cur_segment_seq++,
-    convert_abs_addr_to_paddr(
-      get_written_to(),
-      header.device_id)};
+  journal_seq_t j_seq = get_written_to();
   ceph::bufferlist to_write = encode_record(
     std::move(record), device->get_block_size(),
     j_seq, 0);
-  auto target = get_written_to();
-  if (get_written_to() + to_write.length() >= get_journal_end()) {
-    set_written_to(get_start_addr() +
-      (to_write.length() - (get_journal_end() - get_written_to())));
+  auto target = get_written_to_rbm_addr();
+  if (get_written_to_rbm_addr() + to_write.length() >= get_journal_end()) {
+    paddr_t addr = convert_abs_addr_to_paddr(
+      get_start_addr() +
+      (to_write.length() - (get_journal_end() - get_written_to_rbm_addr())),
+      header.device_id);
+    set_written_to(
+      journal_seq_t{++cur_segment_seq, addr});
   } else {
-    set_written_to(get_written_to() + to_write.length());
+    add_written_to(++cur_segment_seq, to_write.length());
   }
   DEBUG(
-    "submit_record: mdlength {}, dlength {}, target {}",
+    "submit_record: mdlength {}, dlength {}, target {}, journal seq {}",
     r_size.get_mdlength(),
     r_size.dlength,
-    target);
+    target,
+    j_seq);
 
   auto write_result = write_result_t{
     j_seq,
@@ -361,7 +356,7 @@ Journal::replay_ret CircularBoundedJournal::replay(
   LOG_PREFIX(CircularBoundedJournal::replay);
   ceph_assert(initialized);
   return seastar::do_with(
-    rbm_abs_addr(get_journal_tail()),
+    rbm_abs_addr(get_journal_tail_rbm_addr()),
     std::move(delta_handler),
     segment_seq_t(),
     [this, FNAME](auto &cursor_addr, auto &d_handler, auto &last_seq) {
@@ -404,7 +399,11 @@ Journal::replay_ret CircularBoundedJournal::replay(
 	};
 	cur_segment_seq = r_header.committed_to.segment_seq + 1;
 	cursor_addr += bl.length();
-	set_written_to(cursor_addr);
+	paddr_t addr = convert_abs_addr_to_paddr(
+	  cursor_addr,
+	  header.device_id);
+	set_written_to(
+	  journal_seq_t{cur_segment_seq, addr});
 	last_seq = r_header.committed_to.segment_seq;
 	return seastar::do_with(
 	  std::move(*maybe_record_deltas_list),
@@ -441,7 +440,7 @@ Journal::replay_ret CircularBoundedJournal::replay(
 	    if (cursor_addr >= get_journal_end()) {
 	      cursor_addr = (cursor_addr - get_journal_end()) + get_start_addr();
 	    }
-	    if (get_written_to() +
+	    if (get_written_to_rbm_addr() +
 		ceph::encoded_sizeof_bounded<record_group_header_t>() > get_journal_end()) {
 	      cursor_addr = get_start_addr();
 	    }

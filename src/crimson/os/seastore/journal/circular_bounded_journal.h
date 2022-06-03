@@ -209,9 +209,9 @@ public:
     uint64_t size = 0;   // max length of journal
 
     // start offset of CircularBoundedJournal in the device
-    rbm_abs_addr journal_tail = 0;
+    journal_seq_t journal_tail;
     // address to represent where last appllied record is written
-    rbm_abs_addr applied_to = 0;
+    journal_seq_t applied_to;
 
     device_id_t device_id;
 
@@ -244,9 +244,9 @@ public:
    */
 
   size_t get_used_size() const {
-    return get_written_to() >= get_journal_tail() ?
-      get_written_to() - get_journal_tail() :
-      get_written_to() + get_total_size() - get_journal_tail();
+    return get_written_to_rbm_addr() >= get_journal_tail_rbm_addr() ?
+      get_written_to_rbm_addr() - get_journal_tail_rbm_addr() :
+      get_written_to_rbm_addr() + get_total_size() - get_journal_tail_rbm_addr();
   }
   size_t get_total_size() const {
     return header.size;
@@ -258,12 +258,15 @@ public:
     return get_total_size() - get_used_size();
   }
 
-  write_ertr::future<> update_journal_tail(rbm_abs_addr addr) {
-    header.journal_tail = addr;
+  write_ertr::future<> update_journal_tail(journal_seq_t seq) {
+    header.journal_tail = seq;
     return write_header();
   }
-  rbm_abs_addr get_journal_tail() const {
+  journal_seq_t get_journal_tail() const {
     return header.journal_tail;
+  }
+  inline rbm_abs_addr get_journal_tail_rbm_addr() const {
+    return convert_paddr_to_abs_addr(header.journal_tail.offset);
   }
 
   write_ertr::future<> write_header();
@@ -274,11 +277,18 @@ public:
     write_pipeline = _write_pipeline;
   }
 
-  rbm_abs_addr get_written_to() const {
+  journal_seq_t get_written_to() const {
     return written_to;
   }
-  void set_written_to(rbm_abs_addr addr) {
-    written_to = addr;
+  inline rbm_abs_addr get_written_to_rbm_addr() const {
+    return convert_paddr_to_abs_addr(written_to.offset);
+  }
+  void set_written_to(journal_seq_t seq) {
+    written_to = seq;
+  }
+  void add_written_to(segment_seq_t seq, rbm_abs_addr addr) {
+    written_to.segment_seq = seq;
+    written_to = written_to.add_offset(addr);
   }
   device_id_t get_device_id() const {
     return header.device_id;
@@ -307,7 +317,7 @@ private:
   segment_seq_t cur_segment_seq = 0; // segment seq to track the sequence to written records
   rbm_abs_addr start_dev_addr = 0; // cbjournal start address in device
   // start address where the newest record will be written
-  rbm_abs_addr written_to = 0;
+  journal_seq_t written_to;
 };
 
 std::ostream &operator<<(std::ostream &out, const CircularBoundedJournal::cbj_header_t &header);
