@@ -37,7 +37,8 @@ TransactionManager::TransactionManager(
     epm(std::move(epm)),
     backref_manager(std::move(backref_manager)),
     sm_group(*async_cleaner->get_segment_manager_group()),
-    config(config)
+    config(config),
+    rb_group(*async_cleaner->get_rbdevice_group())
 {
   async_cleaner->set_extent_callback(this);
   journal->set_write_pipeline(&write_pipeline);
@@ -644,6 +645,7 @@ TransactionManagerRef make_transaction_manager(tm_make_config_t config)
   auto lba_manager = lba_manager::create_lba_manager(*cache);
   auto sms = std::make_unique<SegmentManagerGroup>();
   auto backref_manager = create_backref_manager(*sms, *cache);
+  auto rbs = std::make_unique<RandomBlockDeviceGroup>();
 
   bool cleaner_is_detailed;
   AsyncCleaner::config_t cleaner_config;
@@ -659,6 +661,7 @@ TransactionManagerRef make_transaction_manager(tm_make_config_t config)
     std::move(sms),
     *backref_manager,
     cleaner_is_detailed);
+  async_cleaner->set_rbgroup(std::move(rbs));
 
   JournalRef journal;
   if (config.j_type == journal_type_t::SEGMENT_JOURNAL) {

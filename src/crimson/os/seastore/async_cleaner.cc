@@ -270,6 +270,11 @@ bool SpaceTrackerSimple::equals(const SpaceTrackerI &_other) const
     assert(0 == "segment counts should match");
     return false;
   }
+  if (other.live_bytes_by_block.size() != live_bytes_by_block.size()) {
+    ERROR("different block counts, bug in test");
+    assert(0 == "block counts should match");
+    return false;
+  }
 
   bool all_match = true;
   for (auto i = live_bytes_by_segment.begin(), j = other.live_bytes_by_segment.begin();
@@ -277,6 +282,14 @@ bool SpaceTrackerSimple::equals(const SpaceTrackerI &_other) const
     if (i->second.live_bytes != j->second.live_bytes) {
       all_match = false;
       DEBUG("segment_id {} live bytes mismatch *this: {}, other: {}",
+            i->first, i->second.live_bytes, j->second.live_bytes);
+    }
+  }
+  for (auto i = live_bytes_by_block.begin(), j = other.live_bytes_by_block.begin();
+       i != live_bytes_by_block.end(); ++i, ++j) {
+    if (i->second.live_bytes != j->second.live_bytes) {
+      all_match = false;
+      DEBUG("block {} live bytes mismatch *this: {}, other: {}",
             i->first, i->second.live_bytes, j->second.live_bytes);
     }
   }
@@ -347,6 +360,11 @@ bool SpaceTrackerDetailed::equals(const SpaceTrackerI &_other) const
     assert(0 == "segment counts should match");
     return false;
   }
+  if (other.block_usage.size() != block_usage.size()) {
+    ERROR("different block counts, bug in test");
+    assert(0 == "block counts should match");
+    return false;
+  }
 
   bool all_match = true;
   for (auto i = segment_usage.begin(), j = other.segment_usage.begin();
@@ -355,6 +373,14 @@ bool SpaceTrackerDetailed::equals(const SpaceTrackerI &_other) const
       all_match = false;
       ERROR("segment_id {} live bytes mismatch *this: {}, other: {}",
             i->first, i->second.get_usage(), j->second.get_usage());
+    }
+  }
+  for (auto i = block_usage.begin(), j = other.block_usage.begin();
+       i != block_usage.end(); ++i, ++j) {
+    if (i->second.live_bytes != j->second.live_bytes) {
+      all_match = false;
+      DEBUG("block {} live bytes mismatch *this: {}, other: {}",
+            i->first, i->second.live_bytes, j->second.live_bytes);
     }
   }
   return all_match;
@@ -1090,7 +1116,9 @@ AsyncCleaner::mount_ret AsyncCleaner::mount()
 {
   LOG_PREFIX(AsyncCleaner::mount);
   const auto& sms = sm_group->get_segment_managers();
-  INFO("{} segment managers", sms.size());
+  const auto& rbs = rb_group->get_rb_devices();
+  INFO("{} segment managers {} randomblock devices",
+      sms.size(), rbs.size());
   init_complete = false;
   stats = {};
   journal_tail_target = JOURNAL_SEQ_NULL;
@@ -1101,9 +1129,9 @@ AsyncCleaner::mount_ret AsyncCleaner::mount()
   space_tracker.reset(
     detailed ?
     (SpaceTrackerI*)new SpaceTrackerDetailed(
-      sms) :
+      sms, rbs) :
     (SpaceTrackerI*)new SpaceTrackerSimple(
-      sms));
+      sms, rbs));
 
   segments.reset();
   for (auto sm : sms) {
@@ -1261,38 +1289,44 @@ void AsyncCleaner::mark_space_used(
   bool init_scan)
 {
   LOG_PREFIX(AsyncCleaner::mark_space_used);
-  if (addr.get_addr_type() != addr_types_t::SEGMENT) {
-    return;
-  }
-  auto& seg_addr = addr.as_seg_paddr();
-
   if (!init_scan && !init_complete) {
     return;
   }
 
   stats.used_bytes += len;
-  auto old_usage = calc_utilization(seg_addr.get_segment_id());
-  [[maybe_unused]] auto ret = space_tracker->allocate(
-    seg_addr.get_segment_id(),
-    seg_addr.get_segment_off(),
-    len);
-  auto new_usage = calc_utilization(seg_addr.get_segment_id());
-  adjust_segment_util(old_usage, new_usage);
+  if (addr.get_addr_type() == addr_types_t::SEGMENT) {
+    auto& seg_addr = addr.as_seg_paddr();
+    auto old_usage = calc_utilization(seg_addr.get_segment_id());
+    [[maybe_unused]] auto ret = space_tracker->allocate(
+      addr,
+      len);
+    auto new_usage = calc_utilization(seg_addr.get_segment_id());
+    adjust_segment_util(old_usage, new_usage);
 
-  // use the last extent's last modified time for the calculation of the projected
-  // time the segments' live extents are to stay unmodified; this is an approximation
-  // of the sprite lfs' segment "age".
+    // use the last extent's last modified time for the calculation of the projected
+    // time the segments' live extents are to stay unmodified; this is an approximation
+    // of the sprite lfs' segment "age".
 
-  segments.update_last_modified_rewritten(
-      seg_addr.get_segment_id(), last_modified, last_rewritten);
+    segments.update_last_modified_rewritten(
+	seg_addr.get_segment_id(), last_modified, last_rewritten);
 
-  gc_process.maybe_wake_on_space_used();
-  assert(ret > 0);
-  DEBUG("segment {} new len: {}~{}, live_bytes: {}",
-        seg_addr.get_segment_id(),
-        addr,
-        len,
-        space_tracker->get_usage(seg_addr.get_segment_id()));
+    gc_process.maybe_wake_on_space_used();
+    assert(ret > 0);
+    DEBUG("segment {} new len: {}~{}, live_bytes: {}",
+	  seg_addr.get_segment_id(),
+	  addr,
+	  len,
+	  space_tracker->get_usage(seg_addr.get_segment_id()));
+  } else {
+    [[maybe_unused]] auto ret = space_tracker->allocate(
+      addr,
+      len);
+    DEBUG("new len: {}~{}, live_bytes: {}",
+	  addr,
+	  len,
+	  space_tracker->get_usage(addr));
+
+  }
 }
 
 void AsyncCleaner::mark_space_free(
@@ -1304,30 +1338,37 @@ void AsyncCleaner::mark_space_free(
   if (!init_complete && !force) {
     return;
   }
-  if (addr.get_addr_type() != addr_types_t::SEGMENT) {
-    return;
-  }
-
   ceph_assert(stats.used_bytes >= len);
   stats.used_bytes -= len;
-  auto& seg_addr = addr.as_seg_paddr();
 
-  DEBUG("segment {} free len: {}~{}",
-        seg_addr.get_segment_id(), addr, len);
-  auto old_usage = calc_utilization(seg_addr.get_segment_id());
-  [[maybe_unused]] auto ret = space_tracker->release(
-    seg_addr.get_segment_id(),
-    seg_addr.get_segment_off(),
-    len);
-  auto new_usage = calc_utilization(seg_addr.get_segment_id());
-  adjust_segment_util(old_usage, new_usage);
-  maybe_wake_gc_blocked_io();
-  assert(ret >= 0);
-  DEBUG("segment {} free len: {}~{}, live_bytes: {}",
-        seg_addr.get_segment_id(),
-        addr,
-        len,
-        space_tracker->get_usage(seg_addr.get_segment_id()));
+  if (addr.get_addr_type() == addr_types_t::SEGMENT) {
+    auto& seg_addr = addr.as_seg_paddr();
+
+    DEBUG("segment {} free len: {}~{}",
+	  seg_addr.get_segment_id(), addr, len);
+    auto old_usage = calc_utilization(seg_addr.get_segment_id());
+    [[maybe_unused]] auto ret = space_tracker->release(
+      addr,
+      len);
+    auto new_usage = calc_utilization(seg_addr.get_segment_id());
+    adjust_segment_util(old_usage, new_usage);
+    maybe_wake_gc_blocked_io();
+    assert(ret >= 0);
+    DEBUG("segment {} free len: {}~{}, live_bytes: {}",
+	  seg_addr.get_segment_id(),
+	  addr,
+	  len,
+	  space_tracker->get_usage(seg_addr.get_segment_id()));
+  } else {
+    [[maybe_unused]] auto ret = space_tracker->release(
+      addr,
+      len);
+    DEBUG("free len: {}~{}, live_bytes: {}",
+	  addr,
+	  len,
+	  space_tracker->get_usage(addr));
+
+  }
 }
 
 journal_seq_t AsyncCleaner::get_next_gc_target() const

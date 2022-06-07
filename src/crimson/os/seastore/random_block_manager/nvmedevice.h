@@ -466,7 +466,9 @@ private:
 class TestMemory : public NVMeBlockDevice {
 public:
 
-  TestMemory(size_t size) : buf(nullptr), size(size) {}
+  TestMemory(size_t size) : buf(nullptr) {
+    NVMeBlockDevice::size = size;
+  }
   ~TestMemory() {
     if (buf) {
       ::munmap(buf, size);
@@ -504,6 +506,5 @@ public:
     uint16_t stream = 0) final;
 
   char *buf;
-  size_t size;
 };
 }

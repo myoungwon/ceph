@@ -30,6 +30,7 @@
 #include "crimson/os/seastore/extent_placement_manager.h"
 #include "crimson/os/seastore/device.h"
 #include "crimson/os/seastore/segment_manager_group.h"
+#include "crimson/os/seastore/random_block_device_group.h"
 
 namespace crimson::os::seastore {
 class Journal;
@@ -586,6 +587,10 @@ public:
       auto sm = dynamic_cast<SegmentManager*>(dev);
       ceph_assert(sm != nullptr);
       sm_group.add_segment_manager(sm);
+    } else {
+      auto rb = dynamic_cast<nvme_device::NVMeBlockDevice*>(dev);
+      ceph_assert(rb != nullptr);
+      rb_group.add_rbdevice(rb);
     }
   }
 
@@ -605,6 +610,7 @@ private:
   WritePipeline write_pipeline;
 
   tm_make_config_t config;
+  RandomBlockDeviceGroup &rb_group;
   rewrite_extent_ret rewrite_logical_extent(
     Transaction& t,
     LogicalCachedExtentRef extent);

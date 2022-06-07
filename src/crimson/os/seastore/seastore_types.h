@@ -427,6 +427,7 @@ private:
 };
 
 using block_off_t = uint64_t;
+
 /**
  * paddr_t
  *
@@ -711,6 +712,180 @@ private:
   void check_blk_off_valid(const block_off_t offset) const {
     assert(offset <= BLK_OFF_MAX);
   }
+};
+
+template <typename T>
+class block_map_t {
+public:
+  block_map_t() {
+    device_to_blocks.resize(DEVICE_ID_GLOBAL_MAX);
+    device_block_size.resize(DEVICE_ID_GLOBAL_MAX);
+  }
+  void add_device(device_id_t device, std::size_t blocks, const T& init,
+		  size_t block_size) {
+    ceph_assert(device <= DEVICE_ID_GLOBAL_MAX);
+    ceph_assert(device_to_blocks[device].size() == 0);
+    ceph_assert(blocks > 0);
+    device_to_blocks[device].resize(blocks, init);
+    total_blocks += blocks;
+    device_block_size[device] = block_size;
+  }
+  void clear() {
+    device_to_blocks.clear();
+    device_to_blocks.resize(DEVICE_ID_GLOBAL_MAX);
+    total_blocks = 0;
+  }
+
+  T& operator[](paddr_t block) {
+    ceph_assert(device_to_blocks[block.get_device_id()].size() != 0);
+    auto &blk = block.as_blk_paddr();
+    auto block_id = get_block_id(block.get_device_id(), blk.get_block_off());
+    return device_to_blocks[block.get_device_id()][block_id];
+  }
+  const T& operator[](paddr_t block) const {
+    ceph_assert(device_to_blocks[block.get_device_id()].size() != 0);
+    auto &blk = block.as_blk_paddr();
+    auto block_id = get_block_id(block.get_device_id(), blk.get_block_off());
+    return device_to_blocks[block.get_device_id()][block_id];
+  }
+
+  auto begin() {
+    return iterator<false>::lower_bound(*this, 0, 0);
+  }
+  auto begin() const {
+    return iterator<true>::lower_bound(*this, 0, 0);
+  }
+
+  auto end() {
+    return iterator<false>::end_iterator(*this);
+  }
+  auto end() const {
+    return iterator<true>::end_iterator(*this);
+  }
+
+  size_t size() const {
+    return total_blocks;
+  }
+
+  uint32_t get_block_id(device_id_t device_id, block_off_t blk_off) const {
+    auto block_size = device_block_size[device_id];
+    return blk_off== 0 ? 0 : blk_off/block_size;
+  }
+
+  template <bool is_const = false>
+  class iterator {
+    /// points at set being iterated over
+    std::conditional_t<
+      is_const,
+      const block_map_t &,
+      block_map_t &> parent;
+
+    /// points at current device, or DEVICE_ID_MAX_VALID if is_end()
+    device_id_t device_id;
+
+    /// segment at which we are pointing, 0 if is_end()
+    block_off_t blk_off;
+
+    /// holds referent for operator* and operator-> when !is_end()
+    std::optional<
+      std::pair<
+        const block_off_t,
+	std::conditional_t<is_const, const T&, T&>
+	>> current;
+
+    bool is_end() const {
+      return device_id == DEVICE_ID_GLOBAL_MAX;
+    }
+
+    uint32_t get_block_id() {
+      return parent.get_block_id(device_id, blk_off);
+    }
+
+    void find_valid() {
+      assert(!is_end());
+      auto &device_vec = parent.device_to_blocks[device_id];
+      if (device_vec.size() == 0 ||
+	  get_block_id() == device_vec.size()) {
+	while (++device_id < DEVICE_ID_GLOBAL_MAX&&
+	       parent.device_to_blocks[device_id].size() == 0);
+	blk_off = 0;
+      }
+      if (is_end()) {
+	current = std::nullopt;
+      } else {
+	current.emplace(
+	  blk_off,
+	  parent.device_to_blocks[device_id][get_block_id()]
+	);
+      }
+    }
+
+    iterator(
+      decltype(parent) &parent,
+      device_id_t device_id,
+      block_off_t device_block_off)
+      : parent(parent), device_id(device_id),
+	blk_off(device_block_off) {}
+
+  public:
+    static iterator lower_bound(
+      decltype(parent) &parent,
+      device_id_t device_id,
+      block_off_t block_off) {
+      if (device_id == DEVICE_ID_GLOBAL_MAX) {
+	return end_iterator(parent);
+      } else {
+	auto ret = iterator{parent, device_id, block_off};
+	ret.find_valid();
+	return ret;
+      }
+    }
+
+    static iterator end_iterator(
+      decltype(parent) &parent) {
+      return iterator{parent, DEVICE_ID_GLOBAL_MAX, 0};
+    }
+
+    iterator<is_const>& operator++() {
+      assert(!is_end());
+      auto block_size = parent.device_block_size[device_id];
+      blk_off += block_size;
+      find_valid();
+      return *this;
+    }
+
+    bool operator==(iterator<is_const> rit) {
+      return (device_id == rit.device_id &&
+	      blk_off == rit.blk_off);
+    }
+
+    bool operator!=(iterator<is_const> rit) {
+      return !(*this == rit);
+    }
+    template <bool c = is_const, std::enable_if_t<c, int> = 0>
+    const std::pair<const block_off_t, const T&> *operator->() {
+      assert(!is_end());
+      return &*current;
+    }
+    template <bool c = is_const, std::enable_if_t<!c, int> = 0>
+    std::pair<const block_off_t, T&> *operator->() {
+      assert(!is_end());
+      return &*current;
+    }
+    template <bool c = is_const, std::enable_if_t<c, int> = 0>
+    const std::pair<const block_off_t, const T&> &operator*() {
+      assert(!is_end());
+      return *current;
+    }
+    template <bool c = is_const, std::enable_if_t<!c, int> = 0>
+    std::pair<const block_off_t, T&> &operator*() {
+      assert(!is_end());
+      return *current;
+    }
+  };
+  std::vector<std::vector<T>> device_to_blocks;
+  std::vector<size_t> device_block_size;
+  size_t total_blocks = 0;
 };
 
 constexpr paddr_t P_ADDR_MIN = paddr_t::make_seg_paddr(MIN_SEG_ID, 0);

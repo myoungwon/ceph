@@ -19,6 +19,7 @@
 #include "crimson/os/seastore/segment_seq_allocator.h"
 #include "crimson/os/seastore/journal.h"
 #include "crimson/os/seastore/journal/circular_bounded_journal.h"
+#include "crimson/os/seastore/random_block_device_group.h"
 
 namespace crimson::os::seastore {
 
@@ -263,17 +264,17 @@ public:
 class SpaceTrackerI {
 public:
   virtual int64_t allocate(
-    segment_id_t segment,
-    seastore_off_t offset,
+    paddr_t addr,
     extent_len_t len) = 0;
 
   virtual int64_t release(
-    segment_id_t segment,
-    seastore_off_t offset,
+    paddr_t addr,
     extent_len_t len) = 0;
 
   virtual int64_t get_usage(
     segment_id_t segment) const = 0;
+  virtual int64_t get_usage(
+    paddr_t addr) const = 0;
 
   virtual bool equals(const SpaceTrackerI &other) const = 0;
 
@@ -289,6 +290,28 @@ public:
 };
 using SpaceTrackerIRef = std::unique_ptr<SpaceTrackerI>;
 
+struct block_bytes_t {
+  int64_t live_bytes = 0;
+  seastore_off_t total_bytes = 0;
+
+  int64_t allocate(blk_paddr_t &blk, extent_len_t len) {
+    live_bytes += len;
+    assert(live_bytes >= 0);
+    return live_bytes;
+  }
+  int64_t release(blk_paddr_t &blk, extent_len_t len) {
+    live_bytes += -(int64_t)len;
+    assert(live_bytes >= 0);
+    return live_bytes;
+  }
+  void reset() {
+    live_bytes = 0;
+  }
+  int64_t get_usage() const {
+    return live_bytes;
+  }
+};
+
 class SpaceTrackerSimple : public SpaceTrackerI {
   struct segment_bytes_t {
     int64_t live_bytes = 0;
@@ -296,6 +319,7 @@ class SpaceTrackerSimple : public SpaceTrackerI {
   };
   // Tracks live space for each segment
   segment_map_t<segment_bytes_t> live_bytes_by_segment;
+  block_map_t<block_bytes_t> live_bytes_by_block;
 
   int64_t update_usage(segment_id_t segment, int64_t delta) {
     live_bytes_by_segment[segment].live_bytes += delta;
@@ -304,31 +328,53 @@ class SpaceTrackerSimple : public SpaceTrackerI {
   }
 public:
   SpaceTrackerSimple(const SpaceTrackerSimple &) = default;
-  SpaceTrackerSimple(const std::vector<SegmentManager*> &sms) {
+  SpaceTrackerSimple(const std::vector<SegmentManager*> &sms,
+		     const std::vector<nvme_device::NVMeBlockDevice*> &rbs)
+  {
     for (auto sm : sms) {
       live_bytes_by_segment.add_device(
 	sm->get_device_id(),
 	sm->get_num_segments(),
 	{0, sm->get_segment_size()});
     }
+    for (auto rb : rbs) {
+      live_bytes_by_block.add_device(
+	rb->get_device_id(),
+	rb->get_size() / rb->get_block_size(),
+	{0, rb->get_block_size()},
+	rb->get_block_size());
+    }
   }
 
   int64_t allocate(
-    segment_id_t segment,
-    seastore_off_t offset,
+    paddr_t addr,
     extent_len_t len) final {
-    return update_usage(segment, len);
+    if (addr.get_addr_type() == addr_types_t::SEGMENT) {
+      auto &seg = addr.as_seg_paddr();
+      return update_usage(seg.get_segment_id(), len);
+    } else {
+      auto &blk = addr.as_blk_paddr();
+      return live_bytes_by_block[addr].allocate(blk, len);
+    }
   }
 
   int64_t release(
-    segment_id_t segment,
-    seastore_off_t offset,
+    paddr_t addr,
     extent_len_t len) final {
-    return update_usage(segment, -(int64_t)len);
+    if (addr.get_addr_type() == addr_types_t::SEGMENT) {
+      auto &seg = addr.as_seg_paddr();
+      return update_usage(seg.get_segment_id(), -(int64_t)len);
+    } else {
+      auto &blk = addr.as_blk_paddr();
+      return live_bytes_by_block[addr].release(blk, len);
+    }
   }
 
   int64_t get_usage(segment_id_t segment) const final {
     return live_bytes_by_segment[segment].live_bytes;
+  }
+  int64_t get_usage(paddr_t addr) const final {
+    return live_bytes_by_block[addr].get_usage();
   }
 
   double calc_utilization(segment_id_t segment) const final {
@@ -340,6 +386,9 @@ public:
 
   void reset() final {
     for (auto &i : live_bytes_by_segment) {
+      i.second = {0, 0};
+    }
+    for (auto &i : live_bytes_by_block) {
       i.second = {0, 0};
     }
   }
@@ -403,11 +452,13 @@ class SpaceTrackerDetailed : public SpaceTrackerI {
 
   // Tracks live space for each segment
   segment_map_t<SegmentMap> segment_usage;
+  block_map_t<block_bytes_t> block_usage;
   std::vector<size_t> block_size_by_segment_manager;
 
 public:
   SpaceTrackerDetailed(const SpaceTrackerDetailed &) = default;
-  SpaceTrackerDetailed(const std::vector<SegmentManager*> &sms)
+  SpaceTrackerDetailed(const std::vector<SegmentManager*> &sms,
+		       const std::vector<nvme_device::NVMeBlockDevice*> &rbs)
   {
     block_size_by_segment_manager.resize(DEVICE_ID_MAX, 0);
     for (auto sm : sms) {
@@ -419,32 +470,52 @@ public:
 	  sm->get_segment_size()));
       block_size_by_segment_manager[sm->get_device_id()] = sm->get_block_size();
     }
+    for (auto rb : rbs) {
+      block_usage.add_device(
+	rb->get_device_id(),
+	rb->get_size() / rb->get_block_size(),
+	{0, rb->get_block_size()},
+	rb->get_block_size());
+    }
   }
 
   int64_t allocate(
-    segment_id_t segment,
-    seastore_off_t offset,
+    paddr_t addr,
     extent_len_t len) final {
-    return segment_usage[segment].allocate(
-      segment.device_segment_id(),
-      offset,
-      len,
-      block_size_by_segment_manager[segment.device_id()]);
+    if (addr.get_addr_type() == addr_types_t::SEGMENT) {
+      auto &seg = addr.as_seg_paddr();
+      return segment_usage[seg.get_segment_id()].allocate(
+	seg.get_segment_id().device_segment_id(),
+	seg.get_segment_off(),
+	len,
+	block_size_by_segment_manager[seg.get_segment_id().device_id()]);
+    } else {
+      auto &blk = addr.as_blk_paddr();
+      return block_usage[addr].allocate(blk, len);
+    }
   }
 
   int64_t release(
-    segment_id_t segment,
-    seastore_off_t offset,
+    paddr_t addr,
     extent_len_t len) final {
-    return segment_usage[segment].release(
-      segment.device_segment_id(),
-      offset,
-      len,
-      block_size_by_segment_manager[segment.device_id()]);
+    if (addr.get_addr_type() == addr_types_t::SEGMENT) {
+      auto &seg = addr.as_seg_paddr();
+      return segment_usage[seg.get_segment_id()].release(
+	seg.get_segment_id().device_segment_id(),
+	seg.get_segment_off(),
+	len,
+	block_size_by_segment_manager[seg.get_segment_id().device_id()]);
+    } else {
+      auto &blk = addr.as_blk_paddr();
+      return block_usage[addr].release(blk, len);
+    }
   }
 
   int64_t get_usage(segment_id_t segment) const final {
     return segment_usage[segment].get_usage();
+  }
+  int64_t get_usage(paddr_t addr) const final {
+    return block_usage[addr].get_usage();
   }
 
   double calc_utilization(segment_id_t segment) const final {
@@ -455,6 +526,9 @@ public:
 
   void reset() final {
     for (auto &i: segment_usage) {
+      i.second.reset();
+    }
+    for (auto &i: block_usage) {
       i.second.reset();
     }
   }
@@ -651,6 +725,7 @@ private:
   SpaceTrackerIRef space_tracker;
   segments_info_t segments;
   bool init_complete = false;
+  RandomBlockDeviceGroupRef rb_group;
 
   struct {
     /**
@@ -736,6 +811,9 @@ public:
   mount_ret mount();
   mount_ret _mount_segments();
   mount_ret _mount_cbjournal();
+  RandomBlockDeviceGroup* get_rbdevice_group() {
+    return rb_group.get();
+  }
 
   /*
    * SegmentProvider interfaces
@@ -848,6 +926,9 @@ public:
   }
   void set_journal(Journal *j) {
     journal = j;
+  }
+  void set_rbgroup(RandomBlockDeviceGroupRef&& rb) {
+    rb_group = std::move(rb);
   }
 
   using work_ertr = ExtentCallbackInterface::extent_mapping_ertr;
