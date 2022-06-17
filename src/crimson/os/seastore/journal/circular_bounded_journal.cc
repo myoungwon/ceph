@@ -462,7 +462,7 @@ CircularBoundedJournal::return_record(record_group_header_t& header, bufferlist 
 {
   LOG_PREFIX(CircularBoundedJournal::return_record);
   bufferlist md_bl, data_bl;
-  md_bl.substr_of(bl, 0, get_block_size());
+  md_bl.substr_of(bl, 0, header.mdlength);
   data_bl.substr_of(bl, header.mdlength, header.dlength);
   if (validate_records_metadata(md_bl) &&
       validate_records_data(header, data_bl)) {
