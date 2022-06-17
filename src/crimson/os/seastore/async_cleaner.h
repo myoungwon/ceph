@@ -616,6 +616,21 @@ public:
 	  1<<24 // rewrite_backref_bytes_per_cycle
 	};
     }
+
+    static config_t get_cbj_test() {
+      return config_t{
+	  4,    // target_journal_segments
+	  8,    // max_journal_segments
+	  4,	// target_backref_inflight_segments
+	  .9,   // available_ratio_gc_max
+	  .2,   // available_ratio_hard_limit
+	  .8,   // reclaim_ratio_hard_limit
+	  .6,   // reclaim_ratio_gc_threshold
+	  1<<20,// reclaim_bytes_per_cycle
+	  1<<17,// rewrite_dirty_bytes_per_cycle
+	  1<<24 // rewrite_backref_bytes_per_cycle
+	};
+    }
   };
 
   /// Callback interface for querying and operating on segments
@@ -785,15 +800,10 @@ private:
 
   SegmentSeqAllocatorRef ool_segment_seq_allocator;
 
-  /**
-   * disable_trim
-   *
-   * added to enable unit testing of CircularBoundedJournal before
-   * proper support is added to AsyncCleaner.
-   * Should be removed once proper support is added. TODO
-   */
-  bool disable_trim = false;
   Journal *journal = nullptr;
+
+  /// most recently committed journal_head
+  journal_seq_t journal_head_committed;
 public:
   AsyncCleaner(
     config_t config,
@@ -858,8 +868,8 @@ public:
     journal_seq_t alloc_replay_from);
 
   void init_mkfs() {
-    auto journal_head = segments.get_journal_head();
-    ceph_assert(disable_trim || journal_head != JOURNAL_SEQ_NULL);
+    auto journal_head = get_journal_head();
+    ceph_assert(journal_head != JOURNAL_SEQ_NULL);
     journal_tail_target = journal_head;
     journal_tail_committed = journal_head;
   }
@@ -921,14 +931,17 @@ public:
     return space_tracker->equals(tracker);
   }
 
-  void set_disable_trim(bool val) {
-    disable_trim = val;
-  }
   void set_journal(Journal *j) {
     journal = j;
   }
   void set_rbgroup(RandomBlockDeviceGroupRef&& rb) {
     rb_group = std::move(rb);
+  }
+  void update_latest_journal_head_committed(journal_seq_t j) {
+    if (journal->get_type() ==
+      journal_type_t::CIRCULARBOUNDED_JOURNAL) {
+      journal_head_committed = j;
+    }
   }
 
   using work_ertr = ExtentCallbackInterface::extent_mapping_ertr;
@@ -994,7 +1007,7 @@ private:
     journal_seq_t limit);
 
   journal_seq_t get_dirty_tail() const {
-    auto ret = segments.get_journal_head();
+    auto ret = get_journal_head();
     ceph_assert(ret != JOURNAL_SEQ_NULL);
     if (ret.segment_seq >= config.target_journal_segments) {
       ret.segment_seq -= config.target_journal_segments;
@@ -1006,7 +1019,7 @@ private:
   }
 
   journal_seq_t get_dirty_tail_limit() const {
-    auto ret = segments.get_journal_head();
+    auto ret = get_journal_head();
     ceph_assert(ret != JOURNAL_SEQ_NULL);
     if (ret.segment_seq >= config.max_journal_segments) {
       ret.segment_seq -= config.max_journal_segments;
@@ -1018,7 +1031,7 @@ private:
   }
 
   journal_seq_t get_backref_tail() const {
-    auto ret = segments.get_journal_head();
+    auto ret = get_journal_head();
     ceph_assert(ret != JOURNAL_SEQ_NULL);
     if (ret.segment_seq >= config.target_backref_inflight_segments) {
       ret.segment_seq -= config.target_backref_inflight_segments;
@@ -1077,6 +1090,8 @@ private:
   public:
     GCProcess(AsyncCleaner &cleaner) : cleaner(cleaner) {}
 
+    std::optional<bool> is_running;
+
     void start() {
       ceph_assert(is_stopping());
       process_join = seastar::now(); // allow run()
@@ -1100,7 +1115,7 @@ private:
       return seastar::do_until(
 	[this] {
 	  cleaner.log_gc_state("GCProcess::run_until_halt");
-	  return !cleaner.gc_should_run();
+	  return !cleaner.gc_should_run() || is_running;
 	},
 	[this] {
 	  return cleaner.do_gc_cycle();
@@ -1157,7 +1172,8 @@ private:
    * Segments calculations
    */
   std::size_t get_segments_in_journal() const {
-    if (!init_complete) {
+    if (!init_complete || journal->get_type() ==
+      journal_type_t::CIRCULARBOUNDED_JOURNAL) {
       return 0;
     }
     if (journal_tail_committed == JOURNAL_SEQ_NULL) {
@@ -1256,12 +1272,10 @@ private:
    * Encapsulates whether block pending gc.
    */
   bool should_block_on_trim() const {
-    if (disable_trim) return false;
     return get_dirty_tail_limit() > journal_tail_target;
   }
 
   bool should_block_on_reclaim() const {
-    if (disable_trim) return false;
     if (get_segments_reclaimable() == 0) {
       return false;
     }
@@ -1311,7 +1325,6 @@ private:
    * Encapsulates logic for whether gc should be reclaiming segment space.
    */
   bool gc_should_reclaim_space() const {
-    if (disable_trim) return false;
     if (get_segments_reclaimable() == 0) {
       return false;
     }
@@ -1342,7 +1355,6 @@ private:
    * True if gc should be running.
    */
   bool gc_should_run() const {
-    if (disable_trim) return false;
     ceph_assert(init_complete);
     return gc_should_reclaim_space()
       || gc_should_trim_journal()
@@ -1361,6 +1373,31 @@ private:
     if (s_type == segment_type_t::OOL) {
       ool_segment_seq_allocator->set_next_segment_seq(seq);
     }
+  }
+
+  journal_seq_t get_journal_head() const {
+    if (journal->get_type() ==
+	journal_type_t::SEGMENT_JOURNAL) {
+      return segments.get_journal_head();
+    } else {
+      return journal_head_committed;
+    }
+  }
+
+  seastar::future<> update_tail_if_needed() {
+    if (journal && journal->get_type() ==
+	journal_type_t::CIRCULARBOUNDED_JOURNAL) {
+      auto j = static_cast<journal::CircularBoundedJournal*>(journal);
+      return j->update_journal_tail(
+	journal_tail_target,
+	alloc_info_replay_from
+      ).handle_error(
+	crimson::ct_error::assert_all{
+	  "GCProcess::run encountered invalid error in gc_trim_journal"
+	}
+      );
+    }
+    return seastar::now();
   }
 };
 using AsyncCleanerRef = std::unique_ptr<AsyncCleaner>;

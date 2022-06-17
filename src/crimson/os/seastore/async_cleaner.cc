@@ -589,9 +589,6 @@ void AsyncCleaner::update_journal_tail_target(
   journal_seq_t alloc_replay_from)
 {
   LOG_PREFIX(AsyncCleaner::update_journal_tail_target);
-  if (disable_trim) return;
-  assert(dirty_replay_from.offset.get_addr_type() != addr_types_t::RANDOM_BLOCK);
-  assert(alloc_replay_from.offset.get_addr_type() != addr_types_t::RANDOM_BLOCK);
   if (dirty_extents_replay_from == JOURNAL_SEQ_NULL
       || dirty_replay_from > dirty_extents_replay_from) {
     DEBUG("dirty_extents_replay_from={} => {}",
@@ -729,17 +726,26 @@ AsyncCleaner::gc_cycle_ret AsyncCleaner::GCProcess::run()
 
 AsyncCleaner::gc_cycle_ret AsyncCleaner::do_gc_cycle()
 {
+  if (gc_process.is_running) {
+    return seastar::now();
+  }
+
+  gc_process.is_running = true;
   if (gc_should_trim_journal()) {
     return gc_trim_journal(
-    ).handle_error(
+    ).safe_then([this] {
+      gc_process.is_running = std::nullopt;
+      return update_tail_if_needed();
+    }).handle_error(
       crimson::ct_error::assert_all{
 	"GCProcess::run encountered invalid error in gc_trim_journal"
       }
     );
   } else if (gc_should_trim_backref()) {
     return gc_trim_backref(get_backref_tail()
-    ).safe_then([](auto) {
-      return seastar::now();
+    ).safe_then([this](auto) {
+      gc_process.is_running = std::nullopt;
+      return update_tail_if_needed();
     }).handle_error(
       crimson::ct_error::assert_all{
 	"GCProcess::run encountered invalid error in gc_trim_backref"
@@ -747,12 +753,16 @@ AsyncCleaner::gc_cycle_ret AsyncCleaner::do_gc_cycle()
     );
   } else if (gc_should_reclaim_space()) {
     return gc_reclaim_space(
-    ).handle_error(
+    ).safe_then([this] {
+      gc_process.is_running = std::nullopt;
+      return seastar::now();
+    }).handle_error(
       crimson::ct_error::assert_all{
 	"GCProcess::run encountered invalid error in gc_reclaim_space"
       }
     );
   } else {
+    gc_process.is_running = std::nullopt;
     return seastar::now();
   }
 }
@@ -1103,8 +1113,11 @@ AsyncCleaner::mount_ret AsyncCleaner::_mount_cbjournal()
   auto j = static_cast<journal::CircularBoundedJournal*>(journal);
   return j->open_device_read_header(journal::CBJOURNAL_START_ADDRESS
   ).safe_then([this, FNAME, j](auto j_seq) {
-    journal_tail_target = j->get_journal_tail();
     journal_tail_committed = j_seq;
+    journal_head_committed = j_seq;
+    update_journal_tail_target(
+      j->get_journal_tail(),
+      j->get_alloc_info_replay_from());
     return mount_ertr::now();
   }).handle_error(
     crimson::ct_error::input_output_error::pass_further{},
@@ -1271,12 +1284,8 @@ AsyncCleaner::maybe_release_segment(Transaction &t)
 void AsyncCleaner::complete_init()
 {
   LOG_PREFIX(AsyncCleaner::complete_init);
-  if (disable_trim) {
-    init_complete = true;
-    return;
-  }
   INFO("done, start GC");
-  ceph_assert(segments.get_journal_head() != JOURNAL_SEQ_NULL);
+  ceph_assert(get_journal_head() != JOURNAL_SEQ_NULL);
   init_complete = true;
   gc_process.start();
 }
@@ -1403,8 +1412,7 @@ journal_seq_t AsyncCleaner::get_next_gc_target() const
 void AsyncCleaner::log_gc_state(const char *caller) const
 {
   LOG_PREFIX(AsyncCleaner::log_gc_state);
-  if (LOCAL_LOGGER.is_enabled(seastar::log_level::debug) &&
-      !disable_trim) {
+  if (LOCAL_LOGGER.is_enabled(seastar::log_level::debug)) {
     DEBUG(
       "caller {}, "
       "empty {}, "
@@ -1440,7 +1448,7 @@ void AsyncCleaner::log_gc_state(const char *caller) const
       segments.get_available_ratio(),
       should_block_on_gc(),
       gc_should_reclaim_space(),
-      segments.get_journal_head(),
+      get_journal_head(),
       journal_tail_target,
       journal_tail_committed,
       get_dirty_tail(),
@@ -1453,10 +1461,6 @@ void AsyncCleaner::log_gc_state(const char *caller) const
 seastar::future<>
 AsyncCleaner::reserve_projected_usage(std::size_t projected_usage)
 {
-  if (disable_trim) {
-    return seastar::now();
-  }
-  ceph_assert(init_complete);
   // The pipeline configuration prevents another IO from entering
   // prepare until the prior one exits and clears this.
   ceph_assert(!blocked_io_wake);
@@ -1498,7 +1502,6 @@ AsyncCleaner::reserve_projected_usage(std::size_t projected_usage)
 
 void AsyncCleaner::release_projected_usage(std::size_t projected_usage)
 {
-  if (disable_trim) return;
   ceph_assert(init_complete);
   ceph_assert(stats.projected_used_bytes >= projected_usage);
   stats.projected_used_bytes -= projected_usage;

@@ -410,6 +410,7 @@ TransactionManager::submit_transaction_direct(
       lba_manager->complete_transaction(tref, lba_to_clear, lba_to_link);
       backref_manager->complete_transaction(tref, backref_to_clear, backref_to_link);
 
+      async_cleaner->update_latest_journal_head_committed(start_seq);
       async_cleaner->update_journal_tail_target(
 	cache->get_oldest_dirty_from().value_or(start_seq),
 	cache->get_oldest_backref_dirty_from().value_or(start_seq));
@@ -639,7 +640,6 @@ TransactionManager::~TransactionManager() {}
 
 TransactionManagerRef make_transaction_manager(tm_make_config_t config)
 {
-  LOG_PREFIX(make_transaction_manager);
   auto epm = std::make_unique<ExtentPlacementManager>();
   auto cache = std::make_unique<Cache>(*epm);
   auto lba_manager = lba_manager::create_lba_manager(*cache);
@@ -651,7 +651,11 @@ TransactionManagerRef make_transaction_manager(tm_make_config_t config)
   AsyncCleaner::config_t cleaner_config;
   if (config.is_test) {
     cleaner_is_detailed = true;
-    cleaner_config = AsyncCleaner::config_t::get_test();
+    if (config.j_type == journal_type_t::SEGMENT_JOURNAL) {
+      cleaner_config = AsyncCleaner::config_t::get_test();
+    } else {
+      cleaner_config = AsyncCleaner::config_t::get_cbj_test();
+    }
   } else {
     cleaner_is_detailed = false;
     cleaner_config = AsyncCleaner::config_t::get_default();
@@ -669,11 +673,8 @@ TransactionManagerRef make_transaction_manager(tm_make_config_t config)
   } else {
     journal = journal::make_circularbounded(
       nullptr, "");
-    async_cleaner->set_journal(journal.get());
-    async_cleaner->set_disable_trim(true);
-    ERROR("disabling journal trimming since support for CircularBoundedJournal\
-	  hasn't been added yet");
   }
+  async_cleaner->set_journal(journal.get());
   epm->init_ool_writers(
       *async_cleaner,
       async_cleaner->get_ool_segment_seq_allocator());

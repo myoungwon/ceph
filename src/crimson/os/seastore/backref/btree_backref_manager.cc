@@ -122,9 +122,12 @@ BtreeBackrefManager::new_mapping(
   extent_types_t type)
 {
   ceph_assert(
-    is_aligned(
-      key.as_seg_paddr().get_segment_off(),
-      (uint64_t)sm_group.get_block_size()));
+    key.get_addr_type() == addr_types_t::SEGMENT ?
+      is_aligned(
+	key.as_seg_paddr().get_segment_off(),
+	(uint64_t)sm_group.get_block_size()) :
+      true
+    );
   struct state_t {
     paddr_t last_end;
 
