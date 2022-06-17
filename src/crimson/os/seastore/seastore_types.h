@@ -567,9 +567,22 @@ public:
   friend bool operator<(const paddr_t &, const paddr_t&);
   friend bool operator>=(const paddr_t &, const paddr_t&);
   friend bool operator>(const paddr_t &, const paddr_t&);
+  #define GET_DEV_ADDR(a)	\
+    (a & (std::numeric_limits<paddr_t::common_addr_t>::max() >> 1))
 };
 WRITE_EQ_OPERATORS_1(paddr_t, dev_addr);
-WRITE_CMP_OPERATORS_1(paddr_t, dev_addr);
+inline bool operator>(const paddr_t &l, const paddr_t &r) {
+  return GET_DEV_ADDR(l.dev_addr) > GET_DEV_ADDR(r.dev_addr);
+}
+inline bool operator<(const paddr_t &l, const paddr_t &r) {
+  return GET_DEV_ADDR(l.dev_addr) < GET_DEV_ADDR(r.dev_addr);
+}
+inline bool operator>=(const paddr_t &l, const paddr_t &r) {
+  return GET_DEV_ADDR(l.dev_addr) >= GET_DEV_ADDR(r.dev_addr);
+}
+inline bool operator<=(const paddr_t &l, const paddr_t &r) {
+  return GET_DEV_ADDR(l.dev_addr) <= GET_DEV_ADDR(r.dev_addr);
+}
 
 std::ostream &operator<<(std::ostream &out, const paddr_t &rhs);
 
