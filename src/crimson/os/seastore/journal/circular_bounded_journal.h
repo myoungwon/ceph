@@ -210,6 +210,7 @@ public:
 
     // start offset of CircularBoundedJournal in the device
     journal_seq_t journal_tail;
+    journal_seq_t alloc_info_replay_from;
     // address to represent where last appllied record is written
     journal_seq_t applied_to;
 
@@ -223,6 +224,7 @@ public:
       denc(v.size, p);
 
       denc(v.journal_tail, p);
+      denc(v.alloc_info_replay_from, p);
 
       denc(v.applied_to, p);
 
@@ -258,12 +260,18 @@ public:
     return get_total_size() - get_used_size();
   }
 
-  write_ertr::future<> update_journal_tail(journal_seq_t seq) {
+  write_ertr::future<> update_journal_tail(
+    journal_seq_t seq,
+    journal_seq_t alloc_info) {
     header.journal_tail = seq;
+    header.alloc_info_replay_from = alloc_info;
     return write_header();
   }
   journal_seq_t get_journal_tail() const {
     return header.journal_tail;
+  }
+  journal_seq_t get_alloc_info_replay_from() const {
+    return header.alloc_info_replay_from;
   }
   inline rbm_abs_addr get_journal_tail_rbm_addr() const {
     return convert_paddr_to_abs_addr(header.journal_tail.offset);

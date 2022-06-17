@@ -46,6 +46,7 @@ CircularBoundedJournal::mkfs(const mkfs_config_t& config)
 	convert_abs_addr_to_paddr(
 	  device->get_block_size(),
 	  config.device_id)};
+    head.alloc_info_replay_from = head.journal_tail;
     head.applied_to = head.journal_tail;
     head.device_id = config.device_id;
     start_dev_addr = config.start;
@@ -144,6 +145,7 @@ CircularBoundedJournal::open_device_read_header(rbm_abs_addr start)
       DEBUG("header : {}", header);
       start_dev_addr = start;
       initialized = true;
+      written_to = header.journal_tail;
       return open_for_write_ret(
 	open_for_write_ertr::ready_future_marker{},
 	get_written_to());
@@ -264,7 +266,7 @@ CircularBoundedJournal::submit_record_ret CircularBoundedJournal::submit_record(
         "Invalid error in CircularBoundedJournal::append_record"
       }
     );
-  }).safe_then([this, &handle] {
+  }).safe_then([this, &handle, FNAME, write_result] {
     return handle.enter(write_pipeline->finalize);
   }).safe_then([this, target,
     length=to_write.length(),
@@ -414,7 +416,8 @@ Journal::replay_ret CircularBoundedJournal::replay(
 	  FNAME](auto& record_deltas_list) {
 	  return crimson::do_for_each(
 	    record_deltas_list,
-	    [write_result,
+	    [this,
+	    write_result,
 	    &d_handler, FNAME](record_deltas_t& record_deltas) {
 	    auto locator = record_locator_t{
 	      record_deltas.record_block_base,
@@ -425,13 +428,14 @@ Journal::replay_ret CircularBoundedJournal::replay(
 		locator);
 	    return crimson::do_for_each(
 	      record_deltas.deltas,
-	      [locator,
+	      [this,
+	      locator,
 	      &d_handler](auto& p) {
 	      auto& commit_time = p.first;
 	      auto& delta = p.second;
 	      return d_handler(locator,
 		delta,
-		locator.write_result.start_seq,
+		header.alloc_info_replay_from,
 		seastar::lowres_system_clock::time_point(
 		  seastar::lowres_system_clock::duration(commit_time))
 		);
