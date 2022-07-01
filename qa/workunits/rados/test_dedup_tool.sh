@@ -337,14 +337,6 @@ function test_sample_dedup()
     $RADOS_TOOL -p $POOL put foo_$num ./foo
   done
 
-  # 7 Duplicated objects but less than chunk dedup threshold
-  CONTENT_2="There hiHI2"
-  echo $CONTENT_2 > foo2
-  for num in `seq 1 7`
-  do
-    $RADOS_TOOL -p $POOL put foo2_$num ./foo2
-  done
-
   # 1 Unique object
   CONTENT_3="There hiHI3"
   echo $CONTENT_3 > foo3
@@ -353,23 +345,37 @@ function test_sample_dedup()
   sleep 2
 
   # Execute dedup crawler
-  RESULT=$($DEDUP_TOOL --pool $POOL --chunk-pool $CHUNK_POOL --op sample-dedup --fingerprint-algorithm sha1 --chunk-dedup-threshold 8 --object-dedup-threshold 50)
+  RESULT=$($DEDUP_TOOL --pool $POOL --chunk-pool $CHUNK_POOL --op sample-dedup --fingerprint-algorithm sha1 --chunk-dedup-threshold 3 --sampling-ratio 50)
 
   CHUNK_OID_1=$(echo $CONTENT_1 | sha1sum | awk '{print $1}')
-  CHUNK_OID_2=$(echo $CONTENT_2 | sha1sum | awk '{print $1}')
   CHUNK_OID_3=$(echo $CONTENT_3 | sha1sum | awk '{print $1}')
 
   # Find chunk object has references of 8 dedupable meta objects
   RESULT=$($DEDUP_TOOL --op dump-chunk-refs --chunk-pool $CHUNK_POOL --object $CHUNK_OID_1)
+  DEDUP_COUNT=0
   for num in `seq 1 8`
   do
     GREP_RESULT=$(echo $RESULT | grep foo_$num)
-    if [ -z "$GREP_RESULT" ]; then
-      $CEPH_TOOL osd pool delete $POOL $POOL --yes-i-really-really-mean-it
-      $CEPH_TOOL osd pool delete $CHUNK_POOL $CHUNK_POOL --yes-i-really-really-mean-it
-      die "Chunk object has no reference of first meta object"
+    if [ -n "$GREP_RESULT" ]; then
+      DEDUP_COUNT=$(($DEDUP_COUNT + 1))
     fi
   done
+  if [ $DEDUP_COUNT -lt 2 ]; then
+    $CEPH_TOOL osd pool delete $POOL $POOL --yes-i-really-really-mean-it
+    $CEPH_TOOL osd pool delete $CHUNK_POOL $CHUNK_POOL --yes-i-really-really-mean-it
+    die "Chunk object has no reference of first meta object"
+  fi
+
+  # 7 Duplicated objects but less than chunk dedup threshold
+  CONTENT_2="There hiHI2"
+  echo $CONTENT_2 > foo2
+  for num in `seq 1 7`
+  do
+    $RADOS_TOOL -p $POOL put foo2_$num ./foo2
+  done
+  CHUNK_OID_2=$(echo $CONTENT_2 | sha1sum | awk '{print $1}')
+
+  RESULT=$($DEDUP_TOOL --pool $POOL --chunk-pool $CHUNK_POOL --op sample-dedup --fingerprint-algorithm sha1 --object-dedup-threshold 50 --sampling-ratio 100)
 
   # Objects duplicates less than chunk dedup threshold should be deduplicated because of they satisfies object-dedup-threshold
   # The only object, which is crawled at the very first, should not be deduplicated because it was not duplicated at initial time
