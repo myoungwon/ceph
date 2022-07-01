@@ -530,8 +530,6 @@ public:
   public:
     struct fp_store_entry_t {
       size_t duplication_count = 1;
-      std::list<chunk_t> found_chunks;
-      bool processed = false;
     };
 
     bool find(string& fp) {
@@ -543,28 +541,21 @@ public:
       return false;
     }
 
-    void add(chunk_t& chunk, std::list<chunk_t>& duplicable_chunks) {
+    // return true if the chunk is duplicate
+    bool add(chunk_t& chunk) {
       std::unique_lock lock(fingerprint_lock);
       auto found_iter = fp_map.find(chunk.fingerprint);
       if (found_iter != fp_map.end()) {
         auto& target = found_iter->second;
         target.duplication_count++;
-        target.found_chunks.push_back(chunk);
         if (target.duplication_count >= dedup_threshold) {
-          if (target.processed == false) {
-            target.processed = true;
-            // When a fingerprint firstly detected to be duplicated more than
-            // threshold, add all previously found chunks to duplicable_chunks
-            duplicable_chunks.splice(target.found_chunks.begin(), target.found_chunks);
-          } else {
-            duplicable_chunks.push_back(chunk);
-          }
+	  return true;
         }
       } else {
         fp_store_entry_t fp_entry;
-        fp_entry.found_chunks.push_back(chunk);
         fp_map.insert({chunk.fingerprint, fp_entry});
       }
+      return false;
     }
 
     void init(size_t dedup_threshold_) {
@@ -581,8 +572,6 @@ public:
 
   struct SampleDedupGlobal {
     FpStore fp_store;
-    std::unordered_set<std::string> flushed_objects;
-    std::shared_mutex flushed_lock;
   };
 
   SampleDedupWorkerThread(
@@ -626,10 +615,10 @@ private:
     ObjectCursor end,
     size_t max_object_count);
   std::vector<size_t> sample_object(size_t count);
-  void try_object_dedup_and_accumulate_result(ObjectItem& object);
+  void try_dedup_and_accumulate_result(ObjectItem& object);
   bool ok_to_dedup_all();
-  void flush_duplicable_object(ObjectItem& object);
-  AioCompletion* set_chunk_duplicated(chunk_t& chunk);
+  void do_object_dedup(ObjectItem& object);
+  int do_chunk_dedup(chunk_t& chunk);
   void mark_non_dedup(ObjectCursor start, ObjectCursor end);
   bufferlist read_object(ObjectItem& object);
   std::vector<std::tuple<bufferlist, pair<uint64_t, uint64_t>>> do_cdc(
@@ -671,9 +660,9 @@ void SampleDedupWorkerThread::crawl()
     std::vector<ObjectItem> objects;
     // Get the list of object IDs to deduplicate
     std::tie(objects, current_object) = get_objects(
-        current_object,
-        shard_end,
-        100);
+	current_object,
+	shard_end,
+	100);
 
     // Pick few objects to be processed. Sampling ratio decides how many
     // objects to pick. Lower sampling ratio makes crawler have lower crawling
@@ -683,31 +672,14 @@ void SampleDedupWorkerThread::crawl()
       ObjectItem target = objects[index];
       // Only process dirty objects which are expected not processed yet
       if (is_dirty(target)) {
-        try_object_dedup_and_accumulate_result(target);
+	try_dedup_and_accumulate_result(target);
       }
-    }
-  }
-
-  map<std::string,AioCompletion*> set_chunk_completions;
-  // Do set_chunk to make found duplicable chunks can be evicted by tier_evict()
-  for (auto& duplicable_chunk : duplicable_chunks) {
-    auto completion = set_chunk_duplicated(duplicable_chunk);
-    if (completion != nullptr) {
-      set_chunk_completions[duplicable_chunk.oid] = completion;
     }
   }
 
   vector<AioCompRef> evict_completions(oid_for_evict.size());
   int i = 0;
   for (auto& oid : oid_for_evict) {
-    auto completion_iter = set_chunk_completions.find(oid);
-    // Related set_chunk should be completed before tier_evict because
-    // tier_evict() only evict data processed by set_chunk() or tier_flush()
-    if (completion_iter != set_chunk_completions.end()) {
-      auto completion = completion_iter->second;
-      completion->wait_for_complete();
-      delete completion;
-    }
     auto completion = do_async_evict(oid);
     evict_completions[i] = move(completion);
     i++;
@@ -799,7 +771,7 @@ std::vector<size_t> SampleDedupWorkerThread::sample_object(size_t count)
   return indexes;
 }
 
-void SampleDedupWorkerThread::try_object_dedup_and_accumulate_result(ObjectItem& object)
+void SampleDedupWorkerThread::try_dedup_and_accumulate_result(ObjectItem& object)
 {
   bufferlist data = read_object(object);
   if (data.length() == 0) {
@@ -822,6 +794,7 @@ void SampleDedupWorkerThread::try_object_dedup_and_accumulate_result(ObjectItem&
   }
 
   size_t duplicated_size = 0;
+  list<chunk_t> redundant_chunks;
   for (auto& chunk : chunks) {
     auto& chunk_data = std::get<0>(chunk);
     std::string fingerprint = generate_fingerprint(chunk_data);
@@ -837,15 +810,22 @@ void SampleDedupWorkerThread::try_object_dedup_and_accumulate_result(ObjectItem&
     if (sample_dedup_global.fp_store.find(fingerprint)) {
       duplicated_size += chunk_data.length();
     }
-    sample_dedup_global.fp_store.add(chunk_info, duplicable_chunks);
+    if (sample_dedup_global.fp_store.add(chunk_info)) {
+      redundant_chunks.push_back(chunk_info);
+    }
   }
 
   size_t object_size = data.length();
 
   // if the chunks in an object are duplicated higher than object_dedup_threshold,
-  //   // try deduplicate whole object via tier_flush
+  // try deduplicate whole object via tier_flush
   if (check_whole_object_dedupable(duplicated_size, object_size)) {
-    flush_duplicable_object(object);
+    do_object_dedup(object);
+  } else {
+    // otherwise, perform chunk-dedup
+    for (auto& p : redundant_chunks) {
+      do_chunk_dedup(p);
+    }
   }
   total_duplicated_size += duplicated_size;
   total_object_size += object_size;
@@ -925,14 +905,10 @@ bool SampleDedupWorkerThread::check_whole_object_dedupable(
   }
 }
 
-void SampleDedupWorkerThread::flush_duplicable_object(ObjectItem& object)
+void SampleDedupWorkerThread::do_object_dedup(ObjectItem& object)
 {
   ObjectReadOperation op;
   op.tier_flush();
-  {
-    std::unique_lock lock(sample_dedup_global.flushed_lock);
-    sample_dedup_global.flushed_objects.insert(object.oid);
-  }
 
   int ret = io_ctx.operate(
       object.oid,
@@ -944,16 +920,8 @@ void SampleDedupWorkerThread::flush_duplicable_object(ObjectItem& object)
   return;
 }
 
-AioCompletion* SampleDedupWorkerThread::set_chunk_duplicated(chunk_t& chunk)
+int SampleDedupWorkerThread::do_chunk_dedup(chunk_t& chunk)
 {
-  {
-    std::shared_lock lock(sample_dedup_global.flushed_lock);
-    if (sample_dedup_global.flushed_objects.find(chunk.oid) != sample_dedup_global.flushed_objects.end()) {
-      oid_for_evict.insert(chunk.oid);
-      return nullptr;
-    }
-  }
-
   uint64_t size;
   time_t mtime;
 
@@ -970,7 +938,6 @@ AioCompletion* SampleDedupWorkerThread::set_chunk_duplicated(chunk_t& chunk)
   }
 
   ObjectReadOperation op;
-  AioCompletion* completion = rados.aio_create_completion();
   op.set_chunk(
       chunk.start,
       chunk.size,
@@ -978,13 +945,9 @@ AioCompletion* SampleDedupWorkerThread::set_chunk_duplicated(chunk_t& chunk)
       chunk.fingerprint,
       0,
       CEPH_OSD_OP_FLAG_WITH_REFERENCE);
-  io_ctx.aio_operate(
-      chunk.oid,
-      completion,
-      &op,
-      NULL);
+  ret = io_ctx.operate(chunk.oid, &op, nullptr);
   oid_for_evict.insert(chunk.oid);
-  return completion;
+  return ret;
 }
 
 void ChunkScrub::print_status(Formatter *f, ostream &out)
@@ -1879,7 +1842,7 @@ int make_crawling_daemon(const map<string, string> &opts,
     }
 
     if (iterative) {
-     sleep(wakeup_period);
+      sleep(wakeup_period);
     } else {
       break;
     }
