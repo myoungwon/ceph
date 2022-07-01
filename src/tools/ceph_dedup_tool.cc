@@ -529,7 +529,7 @@ public:
   class FpStore {
   public:
     struct fp_store_entry_t {
-      size_t duplication_count = 1;
+      int duplication_count = 1;
     };
 
     bool find(string& fp) {
@@ -548,7 +548,8 @@ public:
       if (found_iter != fp_map.end()) {
         auto& target = found_iter->second;
         target.duplication_count++;
-        if (target.duplication_count >= dedup_threshold) {
+        if (target.duplication_count >= dedup_threshold &&
+	    dedup_threshold != -1) {
 	  return true;
         }
       } else {
@@ -563,15 +564,19 @@ public:
       fp_map.clear();
       dedup_threshold = dedup_threshold_;
     }
+    FpStore(size_t chunk_threshold) : dedup_threshold(chunk_threshold) { }
 
   private:
-    size_t dedup_threshold = -1;
+    int dedup_threshold = -1;
     std::unordered_map<std::string, fp_store_entry_t> fp_map; 
     std::shared_mutex fingerprint_lock;
   };
 
   struct SampleDedupGlobal {
     FpStore fp_store;
+    int object_dedup_threshold = -1;
+    SampleDedupGlobal(int chunk_threshold, int object_threshold) :
+      fp_store(chunk_threshold), object_dedup_threshold(object_threshold) {}
   };
 
   SampleDedupWorkerThread(
@@ -584,16 +589,12 @@ public:
     int32_t report_period,
     uint64_t num_objects,
     uint32_t sampling_ratio, // sampling_ratio: percentage in [0, 100]
-    uint32_t object_dedup_threshold,
-    uint32_t chunk_dedup_threshold,
     size_t chunk_size,
     std::string& fp_algo,
     SampleDedupGlobal& sample_dedup_global) :
     CrawlerThread(io_ctx, n, m, begin, end, report_period, num_objects),
     chunk_io_ctx(chunk_io_ctx),
     sampling_ratio(sampling_ratio),
-    chunk_dedup_threshold(chunk_dedup_threshold),
-    object_dedup_threshold(object_dedup_threshold),
     chunk_size(chunk_size),
     fp_type(pg_pool_t::get_fingerprint_from_str(fp_algo)),
     sample_dedup_global(sample_dedup_global) { }
@@ -635,8 +636,6 @@ private:
   std::list<chunk_t> duplicable_chunks;
   size_t total_duplicated_size = 0;
   size_t total_object_size = 0;
-  size_t chunk_dedup_threshold = 0;
-  size_t object_dedup_threshold = 0;
 
   std::set<std::string> oid_for_evict;
   size_t chunk_size = 0;
@@ -897,9 +896,9 @@ bool SampleDedupWorkerThread::check_whole_object_dedupable(
   size_t dedup_size,
   size_t total_size)
 {
-  if (total_size > 0) {
+  if (total_size > 0 && sample_dedup_global.object_dedup_threshold != -1) {
     double dedup_ratio = dedup_size * 100 / total_size;
-    return dedup_ratio >= object_dedup_threshold;
+    return dedup_ratio >= sample_dedup_global.object_dedup_threshold;
   } else {
     return false;
   }
@@ -1681,7 +1680,7 @@ int make_crawling_daemon(const map<string, string> &opts,
     }
   }
 
-  uint32_t object_dedup_threshold = 50;
+  int object_dedup_threshold = -1;
   i = opts.find("object-dedup-threshold");
   if (i != opts.end()) {
     if (rados_sistrtoll(i, &object_dedup_threshold)) {
@@ -1697,7 +1696,7 @@ int make_crawling_daemon(const map<string, string> &opts,
     }
   }
 
-  uint32_t chunk_dedup_threshold = 2;
+  int chunk_dedup_threshold = -1;
   i = opts.find("chunk-dedup-threshold");
   if (i != opts.end()) {
     if (rados_sistrtoll(i, &chunk_dedup_threshold)) {
@@ -1812,7 +1811,8 @@ int make_crawling_daemon(const map<string, string> &opts,
     }
 
     estimate_threads.clear();
-    SampleDedupWorkerThread::SampleDedupGlobal sample_dedup_global;
+    SampleDedupWorkerThread::SampleDedupGlobal sample_dedup_global(
+      chunk_dedup_threshold, object_dedup_threshold);
 
     for (unsigned i = 0; i < max_thread; i++) {
       cout << " add thread.. " << std::endl;
@@ -1827,8 +1827,6 @@ int make_crawling_daemon(const map<string, string> &opts,
             report_period,
             s.num_objects,
             sampling_ratio,
-            object_dedup_threshold,
-            chunk_dedup_threshold,
             chunk_size,
             fp_algo,
             sample_dedup_global));
