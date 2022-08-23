@@ -186,7 +186,7 @@ po::options_description make_usage() {
     ("sampling-ratio", po::value<int>(), ": set the sampling ratio (percentile)")
     ("daemon", ": execute sample dedup in daemon mode")
     ("loop", ": execute sample dedup in a loop until terminated. Sleeps 'wakeup-period' seconds between iterations")
-    ("wakeup-period", ": set the wakeup period of crawler thread (sec)")
+    ("wakeup-period", po::value<int>(), ": set the wakeup period of crawler thread (sec)")
   ;
   desc.add(op_desc);
   return desc;
@@ -222,7 +222,6 @@ class CrawlerThread : public Thread
   uint64_t examined_objects = 0;
   uint64_t examined_bytes = 0;
   uint64_t max_read_size = 0;
-  bool debug = false;
 #define COND_WAIT_INTERVAL 10
 
 public:
@@ -233,6 +232,7 @@ public:
     report_period(report_period), total_objects(num_objects), max_read_size(max_read_size)
   {}
   CrawlerThread() { }
+  bool debug = false;
 
   void signal(int signum) {
     std::lock_guard l{m_lock};
@@ -565,14 +565,14 @@ public:
     bool add(chunk_t& chunk) {
       std::unique_lock lock(fingerprint_lock);
       auto found_iter = fp_map.find(chunk.fingerprint);
-      if (found_iter != fp_map.end()) {
-        auto &target = found_iter->second;
-        target++;
-        if (target >= dedup_threshold && dedup_threshold != -1) {
-          return true;
-        }
-      } else {
-        fp_map.insert({chunk.fingerprint, 1});
+      if (found_iter == fp_map.end()) {
+        auto ret = fp_map.insert({chunk.fingerprint, 1});
+	found_iter = ret.first;
+      }
+      auto &target = found_iter->second;
+      target++;
+      if (target >= dedup_threshold && dedup_threshold != -1) {
+	return true;
       }
       return false;
     }
@@ -674,6 +674,11 @@ void SampleDedupWorkerThread::crawl()
     // Pick few objects to be processed. Sampling ratio decides how many
     // objects to pick. Lower sampling ratio makes crawler have lower crawling
     // overhead but find less duplication.
+    if (debug) {
+      for (auto p : objects) {
+	cout << "oid: " << p.oid << std::endl;
+      }
+    }
     auto sampled_indexes = sample_object(objects.size());
     for (size_t index : sampled_indexes) {
       ObjectItem target = objects[index];
@@ -1179,8 +1184,6 @@ int chunk_scrub_common(const po::variables_map &opts)
 
   op_name = get_opts_op_name(opts);
   chunk_pool_name = get_opts_chunk_pool(opts);
-  max_thread = get_opts_max_thread(opts);
-  report_period = get_opts_report_period(opts);
   boost::optional<pg_t> pgid(opts.count("pgid"), pg_t());
 
   ret = rados.init_with_context(g_ceph_context);
@@ -1323,6 +1326,8 @@ int chunk_scrub_common(const po::variables_map &opts)
     return 0;
   }
 
+  max_thread = get_opts_max_thread(opts);
+  report_period = get_opts_report_period(opts);
   glock.lock();
   begin = chunk_io_ctx.object_list_begin();
   end = chunk_io_ctx.object_list_end();
