@@ -11,13 +11,13 @@ tasks:
     op: 'sample-dedup'
     pool: 'default.rgw.buckets.data'
     chunk_pool: 'low_tier'
-    chunk_size: 8192
+    chunk_size: 131072
     chunk_algorithm: 'fastcdc'
     fingerprint_algorithm: 'sha1'
-    object_dedup_threshold: 15
-    chunk_dedup_threshold: 5
+    chunk_dedup_threshold: 1
     max_thread: 2
     wakeup_period: 20
+    sampling_ratio: 100
 overrides:
   ceph:
     conf:
