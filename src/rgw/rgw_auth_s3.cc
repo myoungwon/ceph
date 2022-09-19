@@ -459,7 +459,7 @@ bool is_non_s3_op(RGWOpType op_type)
       op_type == RGW_OP_CREATE_ROLE ||
       op_type == RGW_OP_DELETE_ROLE ||
       op_type == RGW_OP_GET_ROLE ||
-      op_type == RGW_OP_MODIFY_ROLE ||
+      op_type == RGW_OP_MODIFY_ROLE_TRUST_POLICY ||
       op_type == RGW_OP_LIST_ROLES ||
       op_type == RGW_OP_PUT_ROLE_POLICY ||
       op_type == RGW_OP_GET_ROLE_POLICY ||
@@ -479,7 +479,8 @@ bool is_non_s3_op(RGWOpType op_type)
       op_type == RGW_OP_PUBSUB_TOPIC_DELETE ||
       op_type == RGW_OP_TAG_ROLE ||
       op_type == RGW_OP_LIST_ROLE_TAGS ||
-      op_type == RGW_OP_UNTAG_ROLE) {
+      op_type == RGW_OP_UNTAG_ROLE ||
+      op_type == RGW_OP_UPDATE_ROLE) {
     return true;
   }
   return false;
@@ -610,11 +611,12 @@ std::string get_v4_canonical_qs(const req_info& info, const bool using_qs)
 }
 
 static void add_v4_canonical_params_from_map(const map<string, string>& m,
-                                        std::map<string, string> *result)
+                                        std::map<string, string> *result,
+                                        bool is_non_s3_op)
 {
   for (auto& entry : m) {
     const auto& key = entry.first;
-    if (key.empty()) {
+    if (key.empty() || (is_non_s3_op && key == "PayloadHash")) {
       continue;
     }
 
@@ -622,12 +624,12 @@ static void add_v4_canonical_params_from_map(const map<string, string>& m,
   }
 }
 
-std::string gen_v4_canonical_qs(const req_info& info)
+std::string gen_v4_canonical_qs(const req_info& info, bool is_non_s3_op)
 {
   std::map<std::string, std::string> canonical_qs_map;
 
-  add_v4_canonical_params_from_map(info.args.get_params(), &canonical_qs_map);
-  add_v4_canonical_params_from_map(info.args.get_sys_params(), &canonical_qs_map);
+  add_v4_canonical_params_from_map(info.args.get_params(), &canonical_qs_map, is_non_s3_op);
+  add_v4_canonical_params_from_map(info.args.get_sys_params(), &canonical_qs_map, false);
 
   if (canonical_qs_map.empty()) {
     return string();

@@ -125,7 +125,7 @@ public:
     const std::optional<std::string> &start ///< [in] start, empty for begin
     ) = 0; ///< @return <done, values> values.empty() only if done
 
-  virtual read_errorator::future<bufferlist> omap_get_header(
+  virtual get_attr_errorator::future<bufferlist> omap_get_header(
     CollectionRef c,
     const ghobject_t& oid) = 0;
 
@@ -158,7 +158,7 @@ public:
   virtual seastar::future<OmapIteratorRef> get_omap_iterator(
     CollectionRef ch,
     const ghobject_t& oid) = 0;
-  virtual seastar::future<std::map<uint64_t, uint64_t>> fiemap(
+  virtual read_errorator::future<std::map<uint64_t, uint64_t>> fiemap(
     CollectionRef ch,
     const ghobject_t& oid,
     uint64_t off,

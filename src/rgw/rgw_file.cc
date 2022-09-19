@@ -1820,14 +1820,13 @@ namespace rgw {
   }
 
   int RGWWriteRequest::exec_start() {
-    struct req_state* state = get_state();
+    req_state* state = get_state();
 
     /* Object needs a bucket from this point */
     state->object->set_bucket(state->bucket.get());
 
     auto compression_type =
-      get_store()->get_zone()->get_params().get_compression_type(
-	state->bucket->get_placement_rule());
+      get_store()->get_compression_type(state->bucket->get_placement_rule());
 
     /* not obviously supportable */
     ceph_assert(! dlo_manifest);
@@ -1866,7 +1865,7 @@ namespace rgw {
       }
     }
     processor = get_store()->get_atomic_writer(this, state->yield, state->object->clone(),
-					 state->bucket_owner.get_id(), *state->obj_ctx,
+					 state->bucket_owner.get_id(),
 					 &state->dest_placement, 0, state->req_id);
 
     op_ret = processor->prepare(state->yield);
@@ -1893,7 +1892,7 @@ namespace rgw {
 
   int RGWWriteRequest::exec_continue()
   {
-    struct req_state* state = get_state();
+    req_state* state = get_state();
     op_ret = 0;
 
     /* check guards (e.g., contig write) */
@@ -1905,7 +1904,7 @@ namespace rgw {
       return -EIO;
     }
 
-    op_ret = state->bucket->check_quota(this, user_quota, bucket_quota, real_ofs, null_yield, true);
+    op_ret = state->bucket->check_quota(this, quota, real_ofs, null_yield, true);
     /* max_size exceed */
     if (op_ret < 0)
       return -EIO;
@@ -1931,7 +1930,7 @@ namespace rgw {
     map<string, string>::iterator iter;
     char calc_md5[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 1];
     unsigned char m[CEPH_CRYPTO_MD5_DIGESTSIZE];
-    struct req_state* state = get_state();
+    req_state* state = get_state();
 
     size_t osize = rgw_fh->get_size();
     struct timespec octime = rgw_fh->get_ctime();
@@ -1947,7 +1946,7 @@ namespace rgw {
       goto done;
     }
 
-    op_ret = state->bucket->check_quota(this, user_quota, bucket_quota, state->obj_size, null_yield, true);
+    op_ret = state->bucket->check_quota(this, quota, state->obj_size, null_yield, true);
     /* max_size exceed */
     if (op_ret < 0) {
       goto done;

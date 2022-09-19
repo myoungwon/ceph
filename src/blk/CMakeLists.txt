@@ -44,8 +44,12 @@ if(WITH_ZBD)
 endif()
 
 if(WITH_BLUESTORE_PMEM)
+  if(HAVE_LIBDML)
+    target_link_libraries(blk PRIVATE dml::dml dml::dmlhl)
+  endif()
+
   target_link_libraries(blk
-    PRIVATE pmem::pmem)
+    PRIVATE pmdk::pmem)
 endif()
 
 if(WITH_EVENTTRACE)

@@ -247,6 +247,7 @@ public:
   void reset_fnode(fnode_const_ptr&& ptr) {
     fnode = std::move(ptr);
   }
+  void set_fresh_fnode(fnode_const_ptr&& ptr);
 
   const fnode_const_ptr& get_fnode() const {
     return fnode;
@@ -736,8 +737,6 @@ protected:
   dirfrag_load_vec_t pop_auth_subtree_nested;
 
   ceph::coarse_mono_time last_popularity_sample = ceph::coarse_mono_clock::zero();
-
-  load_spread_t pop_spread;
 
   elist<CInode*> pop_lru_subdirs;
 

@@ -28,8 +28,10 @@ import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
 })
 export class ServiceFormComponent extends CdForm implements OnInit {
   readonly RGW_SVC_ID_PATTERN = /^([^.]+)(\.([^.]+)\.([^.]+))?$/;
+  readonly MDS_SVC_ID_PATTERN = /^[a-zA-Z_.-][a-zA-Z0-9_.-]*$/;
   readonly SNMP_DESTINATION_PATTERN = /^[^\:]+:[0-9]/;
   readonly SNMP_ENGINE_ID_PATTERN = /^[0-9A-Fa-f]{10,64}/g;
+  readonly INGRESS_SUPPORTED_SERVICE_TYPES = ['rgw', 'nfs'];
   @ViewChild(NgbTypeahead, { static: false })
   typeahead: NgbTypeahead;
 
@@ -45,6 +47,7 @@ export class ServiceFormComponent extends CdForm implements OnInit {
   action: string;
   resource: string;
   serviceTypes: string[] = [];
+  serviceIds: string[] = [];
   hosts: any;
   labels: string[];
   labelClick = new Subject<string>();
@@ -52,6 +55,7 @@ export class ServiceFormComponent extends CdForm implements OnInit {
   pools: Array<object>;
   services: Array<CephServiceSpec> = [];
   pageURL: string;
+  serviceList: CephServiceSpec[];
 
   constructor(
     public actionLabels: ActionLabelsI18n,
@@ -83,9 +87,20 @@ export class ServiceFormComponent extends CdForm implements OnInit {
       service_id: [
         null,
         [
-          CdValidators.requiredIf({
-            service_type: 'mds'
-          }),
+          CdValidators.composeIf(
+            {
+              service_type: 'mds'
+            },
+            [
+              Validators.required,
+              CdValidators.custom('mdsPattern', (value: string) => {
+                if (_.isEmpty(value)) {
+                  return false;
+                }
+                return !this.MDS_SVC_ID_PATTERN.test(value);
+              })
+            ]
+          ),
           CdValidators.requiredIf({
             service_type: 'nfs'
           }),
@@ -108,7 +123,10 @@ export class ServiceFormComponent extends CdForm implements OnInit {
                 return !this.RGW_SVC_ID_PATTERN.test(value);
               })
             ]
-          )
+          ),
+          CdValidators.custom('uniqueName', (service_id: string) => {
+            return this.serviceIds && this.serviceIds.includes(service_id);
+          })
         ]
       ],
       placement: ['hosts'],
@@ -176,8 +194,26 @@ export class ServiceFormComponent extends CdForm implements OnInit {
           })
         ]
       ],
-      frontend_port: [null, [CdValidators.number(false)]],
-      monitor_port: [null, [CdValidators.number(false)]],
+      frontend_port: [
+        null,
+        [
+          CdValidators.number(false),
+          CdValidators.requiredIf({
+            service_type: 'ingress',
+            unmanaged: false
+          })
+        ]
+      ],
+      monitor_port: [
+        null,
+        [
+          CdValidators.number(false),
+          CdValidators.requiredIf({
+            service_type: 'ingress',
+            unmanaged: false
+          })
+        ]
+      ],
       virtual_interface_networks: [null],
       // RGW, Ingress & iSCSI
       ssl: [false],
@@ -199,6 +235,14 @@ export class ServiceFormComponent extends CdForm implements OnInit {
               ssl: true
             },
             [Validators.required, CdValidators.sslCert()]
+          ),
+          CdValidators.composeIf(
+            {
+              service_type: 'ingress',
+              unmanaged: false,
+              ssl: true
+            },
+            [Validators.required, CdValidators.pemCert()]
           )
         ]
       ],
@@ -310,6 +354,14 @@ export class ServiceFormComponent extends CdForm implements OnInit {
         this.serviceType = params.type;
       });
     }
+
+    this.cephServiceService.list().subscribe((services: CephServiceSpec[]) => {
+      this.serviceList = services;
+      this.services = services.filter((service: any) =>
+        this.INGRESS_SUPPORTED_SERVICE_TYPES.includes(service.service_type)
+      );
+    });
+
     this.cephServiceService.getKnownTypes().subscribe((resp: Array<string>) => {
       // Remove service types:
       // osd       - This is deployed a different way.
@@ -333,9 +385,6 @@ export class ServiceFormComponent extends CdForm implements OnInit {
     });
     this.poolService.getList().subscribe((resp: Array<object>) => {
       this.pools = resp;
-    });
-    this.cephServiceService.list().subscribe((services: CephServiceSpec[]) => {
-      this.services = services.filter((service: any) => service.service_type === 'rgw');
     });
 
     if (this.editing) {
@@ -432,6 +481,12 @@ export class ServiceFormComponent extends CdForm implements OnInit {
         }
       });
     }
+  }
+
+  getServiceIds(selectedServiceType: string) {
+    this.serviceIds = this.serviceList
+      .filter((service) => service['service_type'] === selectedServiceType)
+      .map((service) => service['service_id']);
   }
 
   disableForEditing(serviceType: string) {
@@ -593,7 +648,9 @@ export class ServiceFormComponent extends CdForm implements OnInit {
         task: new FinishedTask(taskUrl, {
           service_name: serviceName
         }),
-        call: this.cephServiceService.create(serviceSpec)
+        call: this.editing
+          ? this.cephServiceService.update(serviceSpec)
+          : this.cephServiceService.create(serviceSpec)
       })
       .subscribe({
         error() {

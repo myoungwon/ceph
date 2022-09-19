@@ -368,7 +368,7 @@ TEST_F(b_dummy_tree_test_t, 3_random_insert_erase_leaf_node)
       {make_ghobj(4, 4, 4, "ns4", "oid4", 4, 4), values.pick()}};
     auto [smallest_key, smallest_value] = kvs[0];
     auto [largest_key, largest_value] = kvs[kvs.size() - 1];
-    std::random_shuffle(kvs.begin(), kvs.end());
+    std::shuffle(kvs.begin(), kvs.end(), std::default_random_engine{});
     std::for_each(kvs.begin(), kvs.end(), [&f_insert_erase_insert] (auto& kv) {
       f_insert_erase_insert(kv.first, kv.second);
     });
@@ -424,7 +424,7 @@ TEST_F(b_dummy_tree_test_t, 3_random_insert_erase_leaf_node)
     logger().info("\n{}\n", oss.str());
 
     // randomized erase until empty
-    std::random_shuffle(kvs.begin(), kvs.end());
+    std::shuffle(kvs.begin(), kvs.end(), std::default_random_engine{});
     for (auto& [k, v] : kvs) {
       auto e_size = with_trans_intr(*ref_t, [this, &k=k](auto& tr) {
         return tree->erase(tr, k);
@@ -1193,7 +1193,7 @@ class DummyChildPool {
       // erase and merge
       [[maybe_unused]] auto pivot_key = node_to_split->get_pivot_key();
       logger().info("\n\nERASE-MERGE {}:", node_to_split->get_name());
-      assert(pivot_key.compare_to(key_hobj_t(key)) == MatchKindCMP::EQ);
+      assert(pivot_key == key_hobj_t(key));
       with_trans_intr(pool_clone.get_context().t, [&] (auto &t) {
         return node_to_split->merge(
           pool_clone.get_context(), std::move(node_to_split));
@@ -1591,7 +1591,7 @@ TEST_F(d_seastore_tm_test_t, 6_random_tree_insert_erase)
       auto t = create_mutate_transaction();
       INTR(tree->bootstrap, *t).unsafe_get();
       submit_transaction(std::move(t));
-      segment_cleaner->run_until_halt().get0();
+      async_cleaner->run_until_halt().get0();
     }
 
     // test insert
@@ -1599,17 +1599,15 @@ TEST_F(d_seastore_tm_test_t, 6_random_tree_insert_erase)
       auto t = create_mutate_transaction();
       INTR(tree->insert, *t).unsafe_get();
       submit_transaction(std::move(t));
-      segment_cleaner->run_until_halt().get0();
+      async_cleaner->run_until_halt().get0();
     }
     {
       auto t = create_read_transaction();
       INTR(tree->get_stats, *t).unsafe_get();
     }
     if constexpr (TEST_SEASTORE) {
-      logger().info("seastore replay insert begin");
       restart();
       tree->reload(NodeExtentManager::create_seastore(*tm));
-      logger().info("seastore replay insert end");
     }
     {
       // Note: create_weak_transaction() can also work, but too slow.
@@ -1623,17 +1621,15 @@ TEST_F(d_seastore_tm_test_t, 6_random_tree_insert_erase)
       auto size = kvs.size() / 4 * 3;
       INTR_R(tree->erase, *t, size).unsafe_get();
       submit_transaction(std::move(t));
-      segment_cleaner->run_until_halt().get0();
+      async_cleaner->run_until_halt().get0();
     }
     {
       auto t = create_read_transaction();
       INTR(tree->get_stats, *t).unsafe_get();
     }
     if constexpr (TEST_SEASTORE) {
-      logger().info("seastore replay erase-1 begin");
       restart();
       tree->reload(NodeExtentManager::create_seastore(*tm));
-      logger().info("seastore replay erase-1 end");
     }
     {
       auto t = create_read_transaction();
@@ -1646,17 +1642,15 @@ TEST_F(d_seastore_tm_test_t, 6_random_tree_insert_erase)
       auto size = kvs.size();
       INTR_R(tree->erase, *t, size).unsafe_get();
       submit_transaction(std::move(t));
-      segment_cleaner->run_until_halt().get0();
+      async_cleaner->run_until_halt().get0();
     }
     {
       auto t = create_read_transaction();
       INTR(tree->get_stats, *t).unsafe_get();
     }
     if constexpr (TEST_SEASTORE) {
-      logger().info("seastore replay erase-2 begin");
       restart();
       tree->reload(NodeExtentManager::create_seastore(*tm));
-      logger().info("seastore replay erase-2 end");
     }
     {
       auto t = create_read_transaction();
@@ -1703,7 +1697,7 @@ TEST_F(d_seastore_tm_test_t, 7_tree_insert_erase_eagain)
 	  });
 	});
     }).unsafe_get0();
-    segment_cleaner->run_until_halt().get0();
+    async_cleaner->run_until_halt().get0();
 
     // insert
     logger().warn("start inserting {} kvs ...", kvs.size());
@@ -1723,7 +1717,7 @@ TEST_F(d_seastore_tm_test_t, 7_tree_insert_erase_eagain)
 	      });
 	    });
         }).unsafe_get0();
-        segment_cleaner->run_until_halt().get0();
+        async_cleaner->run_until_halt().get0();
         ++iter;
       }
     }
@@ -1769,7 +1763,7 @@ TEST_F(d_seastore_tm_test_t, 7_tree_insert_erase_eagain)
 	      });
 	    });
         }).unsafe_get0();
-        segment_cleaner->run_until_halt().get0();
+        async_cleaner->run_until_halt().get0();
         ++iter;
       }
       kvs.erase_from_random(kvs.random_begin(), kvs.random_end());

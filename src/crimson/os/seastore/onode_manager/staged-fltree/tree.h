@@ -95,12 +95,7 @@ class Btree {
           *p_tree->nm, p_tree->value_builder, p_cursor);
     }
 
-    bool operator>(const Cursor& o) const { return (int)compare_to(o) > 0; }
-    bool operator>=(const Cursor& o) const { return (int)compare_to(o) >= 0; }
-    bool operator<(const Cursor& o) const { return (int)compare_to(o) < 0; }
-    bool operator<=(const Cursor& o) const { return (int)compare_to(o) <= 0; }
-    bool operator==(const Cursor& o) const { return (int)compare_to(o) == 0; }
-    bool operator!=(const Cursor& o) const { return (int)compare_to(o) != 0; }
+    bool operator==(const Cursor& o) const { return operator<=>(o) == 0; }
 
     eagain_ifuture<Cursor> get_next(Transaction& t) {
       assert(!is_end());
@@ -146,7 +141,7 @@ class Btree {
     }
     Cursor(Btree* p_tree) : p_tree{p_tree} {}
 
-    MatchKindCMP compare_to(const Cursor& o) const {
+    std::strong_ordering operator<=>(const Cursor& o) const {
       assert(p_tree == o.p_tree);
       return p_cursor->compare_to(
           *o.p_cursor, p_tree->value_builder.get_header_magic());
@@ -218,6 +213,13 @@ class Btree {
     );
   }
 
+  /**
+   * lower_bound
+   *
+   * Returns a Cursor pointing to the element that is equal to the key, or the
+   * first element larger than the key, or the end Cursor if that element
+   * doesn't exist.
+   */
   eagain_ifuture<Cursor> lower_bound(Transaction& t, const ghobject_t& obj) {
     return seastar::do_with(
       full_key_t<KeyT::HOBJ>(obj),

@@ -72,6 +72,14 @@ class ESubtreeMap;
 
 enum {
   l_mdc_first = 3000,
+
+  // dir updates for replication
+  l_mdc_dir_update,
+  l_mdc_dir_update_receipt,
+  l_mdc_dir_try_discover,
+  l_mdc_dir_send_discover,
+  l_mdc_dir_handle_discover,
+
   // How many inodes currently in stray dentries
   l_mdc_num_strays,
   // How many stray dentries are currently delayed for purge due to refs
@@ -877,7 +885,7 @@ class MDCache {
   void decode_replica_inode(CInode *&in, bufferlist::const_iterator& p, CDentry *dn, MDSContext::vec& finished);
 
   void encode_replica_stray(CDentry *straydn, mds_rank_t who, bufferlist& bl);
-  void decode_replica_stray(CDentry *&straydn, const bufferlist &bl, mds_rank_t from);
+  void decode_replica_stray(CDentry *&straydn, CInode **in, const bufferlist &bl, mds_rank_t from);
 
   // -- namespace --
   void encode_remote_dentry_link(CDentry::linkage_t *dnl, bufferlist& bl);

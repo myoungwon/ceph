@@ -163,18 +163,9 @@ class PGRecoveryStats {
  *
  */
 
-/// Facilitating scrub-realated object access to private PG data
-class ScrubberPasskey {
-private:
-  friend class Scrub::ReplicaReservations;
-  friend class PrimaryLogScrub;
-  friend class PgScrubber;
-  ScrubberPasskey() {}
-  ScrubberPasskey(const ScrubberPasskey&) = default;
-  ScrubberPasskey& operator=(const ScrubberPasskey&) = delete;
-};
-
-class PG : public DoutPrefixProvider, public PeeringState::PeeringListener {
+class PG : public DoutPrefixProvider,
+	   public PeeringState::PeeringListener,
+	   public Scrub::PgScrubBeListener {
   friend struct NamedState;
   friend class PeeringState;
   friend class PgScrubber;
@@ -245,7 +236,7 @@ public:
     return pg_id;
   }
 
-  const PGPool& get_pool() const {
+  const PGPool& get_pgpool() const final {
     return pool;
   }
   uint64_t get_last_user_version() const {
@@ -261,6 +252,11 @@ public:
     return info.history.same_interval_since;
   }
 
+  bool is_waiting_for_unreadable_object() const final
+  {
+    return !waiting_for_unreadable_object.empty();
+  }
+
   static void set_last_scrub_stamp(
     utime_t t, pg_history_t &history, pg_stat_t &stats) {
     stats.last_scrub_stamp = t;
@@ -269,7 +265,7 @@ public:
 
   void set_last_scrub_stamp(utime_t t) {
     recovery_state.update_stats(
-      [=](auto &history, auto &stats) {
+      [t](auto &history, auto &stats) {
 	set_last_scrub_stamp(t, history, stats);
 	return true;
       });
@@ -283,7 +279,7 @@ public:
 
   void set_last_deep_scrub_stamp(utime_t t) {
     recovery_state.update_stats(
-      [=](auto &history, auto &stats) {
+      [t](auto &history, auto &stats) {
 	set_last_deep_scrub_stamp(t, history, stats);
 	return true;
       });
@@ -296,7 +292,7 @@ public:
 
   void add_objects_scrubbed_count(int64_t count) {
     recovery_state.update_stats(
-      [=](auto &history, auto &stats) {
+      [count](auto &history, auto &stats) {
 	add_objects_scrubbed_count(count, stats);
 	return true;
       });
@@ -306,12 +302,12 @@ public:
     stats.objects_scrubbed = 0;
   }
 
-  void reset_objects_scrubbed() {
-    recovery_state.update_stats(
-      [=](auto &history, auto &stats) {
-  reset_objects_scrubbed(stats);
-  return true;
-      });
+  void reset_objects_scrubbed()
+  {
+    recovery_state.update_stats([](auto& history, auto& stats) {
+      reset_objects_scrubbed(stats);
+      return true;
+    });
   }
 
   bool is_deleting() const {
@@ -346,7 +342,7 @@ public:
   int get_acting_primary() const {
     return recovery_state.get_acting_primary();
   }
-  pg_shard_t get_primary() const {
+  pg_shard_t get_primary() const final {
     return recovery_state.get_primary();
   }
   const std::vector<int> get_up() const {
@@ -553,6 +549,45 @@ public:
   uint64_t get_snap_trimq_size() const override {
     return snap_trimq.size();
   }
+
+  static void add_objects_trimmed_count(
+    int64_t count, pg_stat_t &stats) {
+    stats.objects_trimmed += count;
+  }
+
+  void add_objects_trimmed_count(int64_t count) {
+    recovery_state.update_stats_wo_resched(
+      [count](auto &history, auto &stats) {
+        add_objects_trimmed_count(count, stats);
+      });
+  }
+
+  static void reset_objects_trimmed(pg_stat_t &stats) {
+    stats.objects_trimmed = 0;
+  }
+
+  void reset_objects_trimmed() {
+    recovery_state.update_stats_wo_resched(
+      [](auto &history, auto &stats) {
+        reset_objects_trimmed(stats);
+      });
+  }
+
+  utime_t snaptrim_begin_stamp;
+
+  void set_snaptrim_begin_stamp() {
+    snaptrim_begin_stamp = ceph_clock_now();
+  }
+
+  void set_snaptrim_duration() {
+    utime_t cur_stamp = ceph_clock_now();
+    utime_t duration = cur_stamp - snaptrim_begin_stamp;
+    recovery_state.update_stats_wo_resched(
+      [duration](auto &history, auto &stats) {
+        stats.snaptrim_duration = double(duration);
+    });
+  }
+
   unsigned get_target_pg_log_entries() const override;
 
   void clear_publish_stats() override;
@@ -627,7 +662,7 @@ public:
 
   void send_pg_created(pg_t pgid) override;
 
-  ceph::signedspan get_mnow() override;
+  ceph::signedspan get_mnow() const override;
   HeartbeatStampsRef get_hb_stamps(int peer) override;
   void schedule_renew_lease(epoch_t lpr, ceph::timespan delay) override;
   void queue_check_readable(epoch_t lpr, ceph::timespan delay) override;
@@ -1369,20 +1404,29 @@ protected:
   const pg_info_t &info;
 
 
-// ScrubberPasskey getters:
+// ScrubberPasskey getters/misc:
 public:
-  const pg_info_t& get_pg_info(ScrubberPasskey) const {
-    return info;
-  }
+ const pg_info_t& get_pg_info(ScrubberPasskey) const final { return info; }
 
-  OSDService* get_pg_osd(ScrubberPasskey) const {
-    return osd;
-  }
+ OSDService* get_pg_osd(ScrubberPasskey) const { return osd; }
 
-  requested_scrub_t& get_planned_scrub(ScrubberPasskey) {
-    return m_planned_scrub;
-  }
+ requested_scrub_t& get_planned_scrub(ScrubberPasskey)
+ {
+   return m_planned_scrub;
+ }
 
+ void force_object_missing(ScrubberPasskey,
+                           const std::set<pg_shard_t>& peer,
+                           const hobject_t& oid,
+                           eversion_t version) final
+ {
+   recovery_state.force_object_missing(peer, oid, version);
+ }
+
+ uint64_t logical_to_ondisk_size(uint64_t logical_size) const final
+ {
+   return get_pgbackend()->be_get_ondisk_size(logical_size);
+ }
 };
 
 #endif

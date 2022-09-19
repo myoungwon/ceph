@@ -41,13 +41,13 @@ void RecoveryBackend::clean_up(ceph::os::Transaction& t,
   temp_contents.clear();
 
   for (auto& [soid, recovery_waiter] : recovering) {
-    if ((recovery_waiter.pi && recovery_waiter.pi->is_complete())
-	|| (!recovery_waiter.pi
-	  && recovery_waiter.obc && recovery_waiter.obc->obs.exists)) {
-      recovery_waiter.obc->interrupt(
+    if ((recovery_waiter->pi && recovery_waiter->pi->is_complete())
+	|| (!recovery_waiter->pi
+	  && recovery_waiter->obc && recovery_waiter->obc->obs.exists)) {
+      recovery_waiter->obc->interrupt(
 	  ::crimson::common::actingset_changed(
 	      pg.is_primary()));
-      recovery_waiter.interrupt(why);
+      recovery_waiter->interrupt(why);
     }
   }
   recovering.clear();
@@ -81,7 +81,6 @@ void RecoveryBackend::handle_backfill_finish(
   std::ignore = m.get_connection()->send(std::move(reply));
   shard_services.start_operation<crimson::osd::LocalPeeringEvent>(
     static_cast<crimson::osd::PG*>(&pg),
-    shard_services,
     pg.get_pg_whoami(),
     pg.get_pgid(),
     pg.get_osdmap_epoch(),
@@ -180,7 +179,7 @@ RecoveryBackend::scan_for_backfill(
       -> interruptible_future<> {
       crimson::osd::ObjectContextRef obc;
       if (pg.is_primary()) {
-        obc = shard_services.obc_registry.maybe_get_cached_obc(object);
+        obc = shard_services.maybe_get_cached_obc(object);
       }
       if (obc) {
         if (obc->obs.exists) {
@@ -226,7 +225,6 @@ RecoveryBackend::handle_scan_get_digest(
     std::ignore = shard_services.start_operation<crimson::osd::LocalPeeringEvent>(
       // TODO: abstract start_background_recovery
       static_cast<crimson::osd::PG*>(&pg),
-      shard_services,
       pg.get_pg_whoami(),
       pg.get_pgid(),
       pg.get_osdmap_epoch(),

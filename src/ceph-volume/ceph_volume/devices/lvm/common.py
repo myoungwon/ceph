@@ -4,7 +4,6 @@ from ceph_volume import terminal
 from ceph_volume.devices.lvm.zap import Zap
 import argparse
 
-
 def rollback_osd(args, osd_id=None):
     """
     When the process of creating or preparing fails, the OSD needs to be
@@ -40,7 +39,7 @@ common_args = {
     '--data': {
         'help': 'OSD data path. A physical device or logical volume',
         'required': True,
-        'type': arg_validators.ValidDevice(as_string=True),
+        'type': arg_validators.ValidDataDevice(as_string=True),
         #'default':,
         #'type':,
     },
@@ -92,6 +91,7 @@ bluestore_args = {
     '--block.db': {
         'dest': 'block_db',
         'help': 'Path to bluestore block.db logical volume or device',
+        'type': arg_validators.ValidDevice(as_string=True),
     },
     '--block.db-size': {
         'dest': 'block_db_size',
@@ -109,6 +109,7 @@ bluestore_args = {
     '--block.wal': {
         'dest': 'block_wal',
         'help': 'Path to bluestore block.wal logical volume or device',
+        'type': arg_validators.ValidDevice(as_string=True),
     },
     '--block.wal-size': {
         'dest': 'block_wal_size',
@@ -132,6 +133,7 @@ filestore_args = {
     },
     '--journal': {
         'help': 'A logical volume (vg_name/lv_name), or path to a device',
+        'type': arg_validators.ValidDevice(as_string=True),
     },
     '--journal-size': {
         'help': 'Size of journal LV in case a raw block device was passed in --journal',

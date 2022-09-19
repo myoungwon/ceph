@@ -3,15 +3,23 @@
 
 #include "journal.h"
 #include "journal/segmented_journal.h"
+#include "journal/circular_bounded_journal.h"
 
 namespace crimson::os::seastore::journal {
 
 JournalRef make_segmented(
-  SegmentManager &sm,
-  ExtentReader &reader,
-  SegmentProvider &provider)
+  SegmentProvider &provider,
+  JournalTrimmer &trimmer)
 {
-  return std::make_unique<SegmentedJournal>(sm, reader, provider);
+  return std::make_unique<SegmentedJournal>(provider, trimmer);
+}
+
+JournalRef make_circularbounded(
+  JournalTrimmer &trimmer,
+  crimson::os::seastore::random_block_device::RBMDevice* device,
+  std::string path)
+{
+  return std::make_unique<CircularBoundedJournal>(trimmer, device, path);
 }
 
 }
