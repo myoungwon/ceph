@@ -206,6 +206,20 @@ public:
     written_ool_block_list.push_back(ref);
   }
 
+  void mark_mutated_extent_ool(LogicalCachedExtentRef& ref) {
+    assert(ref->get_paddr().is_absolute());
+    assert(!ref->is_inline());
+    mutated_ool_block_list.push_back(ref);
+  }
+
+  void add_overwrite_extent(CachedExtentRef ref) {
+    ceph_assert(!is_weak());
+    ceph_assert(ref);
+    ceph_assert(ref->get_paddr().is_absolute());
+    assert(ref->state == CachedExtent::extent_state_t::DIRTY);
+    partial_overwrite_list.emplace_back(ref->cast<LogicalCachedExtent>());
+  }
+
   void add_mutated_extent(CachedExtentRef ref) {
     ceph_assert(!is_weak());
     assert(ref->is_exist_mutation_pending() ||
@@ -260,6 +274,13 @@ public:
     std::list<LogicalCachedExtentRef> ret;
     assert(num_allocated_invalid_extents == 0);
     for (auto& extent : pre_alloc_list) {
+      if (extent->is_valid()) {
+	ret.push_back(extent);
+      } else {
+	++num_allocated_invalid_extents;
+      }
+    }
+    for (auto& extent : partial_overwrite_list) {
       if (extent->is_valid()) {
 	ret.push_back(extent);
       } else {
@@ -373,7 +394,9 @@ public:
     delayed_alloc_list.clear();
     inline_block_list.clear();
     written_ool_block_list.clear();
+    mutated_ool_block_list.clear();
     pre_alloc_list.clear();
+    partial_overwrite_list.clear();
     retired_set.clear();
     existing_block_list.clear();
     existing_block_stats = {};
@@ -515,12 +538,16 @@ private:
   std::list<CachedExtentRef> inline_block_list;
   /// blocks that will be committed with out-of-line record
   std::list<CachedExtentRef> written_ool_block_list;
+  /// blocks that will be committed with mutated out-of-line record
+  std::list<CachedExtentRef> mutated_ool_block_list;
   /// blocks with delayed allocation, may become inline or ool above
   std::list<LogicalCachedExtentRef> delayed_alloc_list;
 
   /// Extents with pre-allocated addresses,
   /// will be added to written_ool_block_list after write
   std::list<LogicalCachedExtentRef> pre_alloc_list;
+  /// will be added to mutated_ool_block_list after write
+  std::list<LogicalCachedExtentRef> partial_overwrite_list;
 
   /// list of mutated blocks, holds refcounts, subset of write_set
   std::list<CachedExtentRef> mutated_block_list;

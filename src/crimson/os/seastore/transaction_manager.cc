@@ -514,15 +514,23 @@ TransactionManager::rewrite_extent_ret TransactionManager::rewrite_extent(
 
   t.get_rewrite_version_stats().increment(extent->get_version());
 
-  if (is_backref_node(extent->get_type())) {
-    DEBUGT("rewriting backref extent -- {}", t, *extent);
-    return backref_manager->rewrite_extent(t, extent);
-  }
-
   if (extent->get_type() == extent_types_t::ROOT) {
     DEBUGT("rewriting root extent -- {}", t, *extent);
     cache->duplicate_for_write(t, extent);
     return rewrite_extent_iertr::now();
+  }
+
+  if (epm->get_journal_type() == backend_type_t::RANDOM_BLOCK) {
+    // extent already exists in rbm, so overwrite it
+    assert(extent->get_paddr().is_absolute());
+    t.add_overwrite_extent(extent);
+    extent->set_target_rewrite_generation(OOL_GENERATION);
+    return rewrite_extent_iertr::now();
+  }
+
+  if (is_backref_node(extent->get_type())) {
+    DEBUGT("rewriting backref extent -- {}", t, *extent);
+    return backref_manager->rewrite_extent(t, extent);
   }
 
   if (extent->is_logical()) {

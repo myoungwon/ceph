@@ -770,6 +770,11 @@ void Cache::commit_replace_extent(
     CachedExtentRef next,
     CachedExtentRef prev)
 {
+  if (next->version != prev->version + 1 &&
+      is_mutated_ool_applied(prev)) {
+    //adjust next's version if prev has been updated by trim_dirty
+    next->version = prev->version + 1;
+  }
   assert(next->is_dirty());
   assert(next->get_paddr() == prev->get_paddr());
   assert(next->version == prev->version + 1);
@@ -1308,7 +1313,8 @@ record_t Cache::prepare_record(
 	      t.num_allocated_invalid_extents);
 
   auto& ool_stats = t.get_ool_write_stats();
-  ceph_assert(ool_stats.extents.num == t.written_ool_block_list.size());
+  ceph_assert(ool_stats.extents.num == t.written_ool_block_list.size() +
+	      t.mutated_ool_block_list.size());
 
   if (record.is_empty()) {
     SUBINFOT(seastore_t,
@@ -1388,7 +1394,9 @@ record_t Cache::prepare_record(
 
   auto &rewrite_version_stats = t.get_rewrite_version_stats();
   if (trans_src == Transaction::src_t::TRIM_DIRTY) {
-    stats.committed_dirty_version.increment_stat(rewrite_version_stats);
+    if (!rewrite_version_stats.is_clear()) {
+      stats.committed_dirty_version.increment_stat(rewrite_version_stats);
+    }
   } else if (trans_src == Transaction::src_t::CLEANER) {
     stats.committed_reclaim_version.increment_stat(rewrite_version_stats);
   } else {
@@ -1492,6 +1500,17 @@ void Cache::complete_commit(
     } else {
       DEBUGT("commit extent done -- {}", t, *i);
     }
+  }
+
+  for (auto &i: t.mutated_ool_block_list) {
+    if (!i->is_valid()) {
+      continue;
+    }
+    assert(i->state == CachedExtent::extent_state_t::DIRTY);
+    assert(i->version > 0);
+    remove_from_dirty(i);
+    mark_mutated_ool_applied(i);
+    DEBUGT("ool mutated block is commmitted -- {}", t, *i);
   }
 
   for (auto &i: t.retired_set) {
@@ -1775,11 +1794,24 @@ Cache::replay_delta(
       DEBUG("replay extent delta at {} {} ... -- {}, prv_extent={}",
             journal_seq, record_base, delta, *extent);
 
-      assert(extent->last_committed_crc == delta.prev_crc);
-      assert(extent->version == delta.pversion);
-      extent->apply_delta_and_adjust_crc(record_base, delta.bl);
-      extent->set_modify_time(modify_time);
-      assert(extent->last_committed_crc == delta.final_crc);
+      if (epm.get_journal_type() == backend_type_t::SEGMENTED) {
+	assert(extent->last_committed_crc == delta.prev_crc);
+	assert(extent->version == delta.pversion);
+	extent->apply_delta_and_adjust_crc(record_base, delta.bl);
+	extent->set_modify_time(modify_time);
+	assert(extent->last_committed_crc == delta.final_crc);
+      } else {
+	assert(epm.get_journal_type() == backend_type_t::RANDOM_BLOCK);
+	if (delta.pversion == 0) {
+	  assert(extent->last_committed_crc == delta.prev_crc);
+	  assert(extent->version == delta.pversion);
+	}
+	extent->apply_delta_and_adjust_crc(record_base, delta.bl);
+	extent->set_modify_time(modify_time);
+	if (delta.pversion == 0) {
+	  assert(extent->last_committed_crc == delta.final_crc);
+	}
+      }
 
       extent->version++;
       if (extent->version == 1) {

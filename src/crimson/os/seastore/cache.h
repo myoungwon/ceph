@@ -1350,6 +1350,21 @@ private:
     }
   }
 
+  void mark_mutated_ool_applied(CachedExtentRef extent) {
+    extent->version = 0;
+    extent->dirty_from_or_retired_at = JOURNAL_SEQ_MIN;
+    extent->state = CachedExtent::extent_state_t::CLEAN;
+  }
+
+  bool is_mutated_ool_applied(CachedExtentRef extent) {
+    if (extent->version == 0 &&
+	extent->state == CachedExtent::extent_state_t::CLEAN &&
+	extent->dirty_from_or_retired_at == JOURNAL_SEQ_MIN) {
+      return true;
+    }
+    return false;
+  }
+
 };
 using CacheRef = std::unique_ptr<Cache>;
 
