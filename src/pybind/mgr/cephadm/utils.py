@@ -21,7 +21,7 @@ class CephadmNoImage(Enum):
 
 # ceph daemon types that use the ceph container image.
 # NOTE: order important here as these are used for upgrade order
-CEPH_TYPES = ['mgr', 'mon', 'crash', 'osd', 'mds', 'rgw',
+CEPH_TYPES = ['mgr', 'mon', 'crash', 'osd', 'mds', 'rgw', 'ceph-dedup',
               'rbd-mirror', 'cephfs-mirror', 'ceph-exporter']
 GATEWAY_TYPES = ['iscsi', 'nfs', 'nvmeof']
 MONITORING_STACK_TYPES = ['node-exporter', 'prometheus',
@@ -48,7 +48,7 @@ def name_to_config_section(name: str) -> ConfEntity:
     Map from daemon names to ceph entity names (as seen in config)
     """
     daemon_type = name.split('.', 1)[0]
-    if daemon_type in ['rgw', 'rbd-mirror', 'nfs', 'crash', 'iscsi', 'ceph-exporter', 'nvmeof']:
+    if daemon_type in ['rgw', 'ceph-dedup', 'rbd-mirror', 'nfs', 'crash', 'iscsi', 'ceph-exporter', 'nvmeof']:
         return ConfEntity('client.' + name)
     elif daemon_type in ['mon', 'osd', 'mds', 'mgr', 'client']:
         return ConfEntity(name)

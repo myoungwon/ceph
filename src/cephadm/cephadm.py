@@ -392,7 +392,7 @@ class UnauthorizedRegistryError(Error):
 
 
 class Ceph(object):
-    daemons = ('mon', 'mgr', 'osd', 'mds', 'rgw', 'rbd-mirror',
+    daemons = ('mon', 'mgr', 'osd', 'mds', 'rgw', 'ceph-dedup', 'rbd-mirror',
                'crash', 'cephfs-mirror', 'ceph-exporter')
     gateways = ('iscsi', 'nfs', 'nvmeof')
 
@@ -3318,7 +3318,7 @@ def get_container_mounts(ctx, fsid, daemon_type, daemon_id,
             mounts[data_dir] = cdata_dir + ':z'
         if not no_config:
             mounts[data_dir + '/config'] = '/etc/ceph/ceph.conf:z'
-        if daemon_type in ['rbd-mirror', 'cephfs-mirror', 'crash', 'ceph-exporter']:
+        if daemon_type in ['ceph-dedup', 'rbd-mirror', 'cephfs-mirror', 'crash', 'ceph-exporter']:
             # these do not search for their keyrings in a data directory
             mounts[data_dir + '/keyring'] = '/etc/ceph/ceph.client.%s.%s.keyring' % (daemon_type, daemon_id)
 
@@ -3501,6 +3501,9 @@ def get_container(ctx: CephadmContext,
     if daemon_type == 'rgw':
         entrypoint = '/usr/bin/radosgw'
         name = 'client.rgw.%s' % daemon_id
+    elif daemon_type == 'ceph-dedup':
+        entrypoint = '/usr/bin/ceph-dedup-tool'
+        name = 'client.ceph-dedup.%s' % daemon_id
     elif daemon_type == 'rbd-mirror':
         entrypoint = '/usr/bin/rbd-mirror'
         name = 'client.rbd-mirror.%s' % daemon_id
@@ -4374,6 +4377,7 @@ def install_base_units(ctx, fsid):
             'ceph-osd',
             'ceph-fuse',
             'radosgw',
+            'ceph-dedup',
             'rbd-mirror',
             'cephfs-mirror',
             'tcmu-runner'

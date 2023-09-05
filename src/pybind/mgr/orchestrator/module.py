@@ -137,6 +137,7 @@ yaml.add_representer(HostDetails, HostDetails.yaml_representer)
 class ServiceType(enum.Enum):
     mon = 'mon'
     mgr = 'mgr'
+    ceph_dedup = 'ceph-dedup'
     rbd_mirror = 'rbd-mirror'
     cephfs_mirror = 'cephfs-mirror'
     crash = 'crash'

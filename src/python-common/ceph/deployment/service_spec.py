@@ -636,7 +636,7 @@ class ServiceSpec(object):
     start the services.
     """
     KNOWN_SERVICE_TYPES = 'alertmanager crash grafana iscsi nvmeof loki promtail mds mgr mon nfs ' \
-                          'node-exporter osd prometheus rbd-mirror rgw agent ceph-exporter ' \
+                          'node-exporter osd prometheus ceph-dedup rbd-mirror rgw agent ceph-exporter ' \
                           'container ingress cephfs-mirror snmp-gateway jaeger-tracing ' \
                           'elasticsearch jaeger-agent jaeger-collector jaeger-query'.split()
     REQUIRES_SERVICE_ID = 'iscsi nvmeof mds nfs rgw container ingress '.split()

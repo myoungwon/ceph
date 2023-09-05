@@ -53,7 +53,7 @@ from . import utils
 from . import ssh
 from .migrations import Migrations
 from .services.cephadmservice import MonService, MgrService, MdsService, RgwService, \
-    RbdMirrorService, CrashService, CephadmService, CephfsMirrorService, CephadmAgent, \
+    CephDedupService, RbdMirrorService, CrashService, CephadmService, CephfsMirrorService, CephadmAgent, \
     CephExporterService
 from .services.ingress import IngressService
 from .services.container import CustomContainerService
@@ -609,7 +609,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
 
         _service_classes: Sequence[Type[CephadmService]] = [
             OSDService, NFSService, MonService, MgrService, MdsService,
-            RgwService, RbdMirrorService, GrafanaService, AlertmanagerService,
+            RgwService, CephDedupService, RbdMirrorService, GrafanaService, AlertmanagerService,
             PrometheusService, NodeExporterService, LokiService, PromtailService, CrashService, IscsiService,
             IngressService, CustomContainerService, CephfsMirrorService, NvmeofService,
             CephadmAgent, CephExporterService, SNMPGatewayService, ElasticSearchService,
@@ -2284,7 +2284,7 @@ Then run the following:
 
         if action == 'rotate-key':
             if d.daemon_type not in ['mgr', 'osd', 'mds',
-                                     'rgw', 'crash', 'nfs', 'rbd-mirror', 'iscsi']:
+                                     'rgw', 'crash', 'nfs', 'ceph-dedup', 'rbd-mirror', 'iscsi']:
                 raise OrchestratorError(
                     f'key rotation not supported for {d.daemon_type}'
                 )
@@ -3024,6 +3024,7 @@ Then run the following:
                 'ingress': PlacementSpec(count=2),
                 'iscsi': PlacementSpec(count=1),
                 'nvmeof': PlacementSpec(count=1),
+                'ceph-dedup': PlacementSpec(count=2),
                 'rbd-mirror': PlacementSpec(count=2),
                 'cephfs-mirror': PlacementSpec(count=1),
                 'nfs': PlacementSpec(count=1),
@@ -3116,6 +3117,10 @@ Then run the following:
 
     @handle_orch_error
     def apply_iscsi(self, spec: ServiceSpec) -> str:
+        return self._apply(spec)
+
+    @handle_orch_error
+    def apply_ceph_dedup(self, spec: ServiceSpec) -> str:
         return self._apply(spec)
 
     @handle_orch_error

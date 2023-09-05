@@ -501,6 +501,7 @@ class Orchestrator(object):
             'prometheus': self.apply_prometheus,
             'loki': self.apply_loki,
             'promtail': self.apply_promtail,
+            'ceph-dedup': self.apply_ceph_dedup,
             'rbd-mirror': self.apply_rbd_mirror,
             'rgw': self.apply_rgw,
             'ingress': self.apply_ingress,
@@ -667,6 +668,10 @@ class Orchestrator(object):
         """Update ingress daemons"""
         raise NotImplementedError()
 
+    def apply_ceph_dedup(self, spec: ServiceSpec) -> OrchResult[str]:
+        """Update ceph-dedup cluster"""
+        raise NotImplementedError()
+
     def apply_rbd_mirror(self, spec: ServiceSpec) -> OrchResult[str]:
         """Update rbd-mirror cluster"""
         raise NotImplementedError()
@@ -814,6 +819,7 @@ def daemon_type_to_service(dtype: str) -> str:
         'keepalived': 'ingress',
         'iscsi': 'iscsi',
         'nvmeof': 'nvmeof',
+        'ceph-dedup': 'ceph-dedup',
         'rbd-mirror': 'rbd-mirror',
         'cephfs-mirror': 'cephfs-mirror',
         'nfs': 'nfs',
@@ -847,6 +853,7 @@ def service_to_daemon_types(stype: str) -> List[str]:
         'ingress': ['haproxy', 'keepalived'],
         'iscsi': ['iscsi'],
         'nvmeof': ['nvmeof'],
+        'ceph-dedup': ['ceph-dedup'],
         'rbd-mirror': ['rbd-mirror'],
         'cephfs-mirror': ['cephfs-mirror'],
         'nfs': ['nfs'],
