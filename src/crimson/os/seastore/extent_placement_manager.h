@@ -187,6 +187,17 @@ public:
     devices_by_id.resize(DEVICE_ID_MAX, nullptr);
   }
 
+  bool can_overwrite(Transaction& t, CachedExtentRef extent) {
+    if (is_background_transaction(t.get_src()) &&
+	extent->get_paddr().is_absolute() &&
+	get_main_backend_type() == backend_type_t::RANDOM_BLOCK &&
+	(extent->get_type() == extent_types_t::OBJECT_DATA_BLOCK ||
+	 extent->get_type() == extent_types_t::TEST_BLOCK)) {
+      return true;
+    }
+    return false;
+  }
+
   void init(JournalTrimmerImplRef &&, AsyncCleanerRef &&, AsyncCleanerRef &&);
 
   SegmentSeqAllocator &get_ool_segment_seq_allocator() const {

@@ -1330,7 +1330,8 @@ record_t Cache::prepare_record(
 	      t.num_allocated_invalid_extents);
 
   auto& ool_stats = t.get_ool_write_stats();
-  ceph_assert(ool_stats.extents.num == t.written_ool_block_list.size());
+  ceph_assert(ool_stats.extents.num == t.written_ool_block_list.size() +
+      t.overwrite_ool_block_list.size());
 
   if (record.is_empty()) {
     SUBINFOT(seastore_t,
@@ -1410,7 +1411,10 @@ record_t Cache::prepare_record(
 
   auto &rewrite_version_stats = t.get_rewrite_version_stats();
   if (trans_src == Transaction::src_t::TRIM_DIRTY) {
-    stats.committed_dirty_version.increment_stat(rewrite_version_stats);
+    // in the event of RBM's overwrite, version wasn't increased 
+    if (!rewrite_version_stats.is_clear()) {
+      stats.committed_dirty_version.increment_stat(rewrite_version_stats);
+    }
   } else if (trans_src == Transaction::src_t::CLEANER_MAIN ||
              trans_src == Transaction::src_t::CLEANER_COLD) {
     stats.committed_reclaim_version.increment_stat(rewrite_version_stats);
@@ -1511,15 +1515,28 @@ void Cache::complete_commit(
 	   i->prior_instance);
     i->on_delta_write(final_block_start);
     i->pending_for_transaction = TRANS_ID_NULL;
-    i->prior_instance = CachedExtentRef();
     i->state = CachedExtent::extent_state_t::DIRTY;
     assert(i->version > 0);
-    if (i->version == 1 || i->get_type() == extent_types_t::ROOT) {
+    if (i->version == 1 || i->get_type() == extent_types_t::ROOT ||
+      // if the extent has been overwritten most recently, need to reset dirty_from_or_retired_at
+      is_overwrite_ool_applied(i)) {
       i->dirty_from_or_retired_at = start_seq;
       DEBUGT("commit extent done, become dirty -- {}", t, *i);
     } else {
       DEBUGT("commit extent done -- {}", t, *i);
     }
+    i->prior_instance = CachedExtentRef();
+  }
+
+  for (auto &i: t.overwrite_ool_block_list) {
+    if (!i->is_valid()) {
+      continue;
+    }
+    assert(i->state == CachedExtent::extent_state_t::DIRTY);
+    assert(i->version > 0);
+    remove_from_dirty(i);
+    mark_overwrite_ool_applied(i);
+    DEBUGT("ool overwrite block is commmitted -- {}", t, *i);
   }
 
   for (auto &i: t.retired_set) {
@@ -1776,7 +1793,19 @@ Cache::replay_delta(
         return seastar::make_ready_future<CachedExtentRef>();
       }
     };
-    auto extent_fut = (delta.pversion == 0 ?
+    auto need_read_from_disk = [this, &delta]() -> bool {
+      if (delta.paddr.get_addr_type() == paddr_types_t::SEGMENT ||
+	  (delta.type != extent_types_t::OBJECT_DATA_BLOCK &&
+	   delta.type != extent_types_t::TEST_BLOCK)) {
+	return delta.pversion == 0;
+      } else {
+	assert(delta.paddr.get_addr_type() == paddr_types_t::RANDOM_BLOCK);
+	// With partial-overwrite, the version of a delta can be non-zero
+	auto ret = query_cache(delta.paddr, nullptr);
+	return ret ? false : true;
+      }
+    };
+     auto extent_fut = (need_read_from_disk() ?
       // replay is not included by the cache hit metrics
       _get_extent_by_type(
         delta.type,
@@ -1805,11 +1834,29 @@ Cache::replay_delta(
       DEBUG("replay extent delta at {} {} ... -- {}, prv_extent={}",
             journal_seq, record_base, delta, *extent);
 
-      assert(extent->last_committed_crc == delta.prev_crc);
-      assert(extent->version == delta.pversion);
-      extent->apply_delta_and_adjust_crc(record_base, delta.bl);
-      extent->set_modify_time(modify_time);
-      assert(extent->last_committed_crc == delta.final_crc);
+      if (delta.paddr.get_addr_type() == paddr_types_t::SEGMENT ||
+	  (delta.type != extent_types_t::OBJECT_DATA_BLOCK &&
+	  delta.type != extent_types_t::TEST_BLOCK)) {
+	assert(extent->last_committed_crc == delta.prev_crc);
+	assert(extent->version == delta.pversion);
+	extent->apply_delta_and_adjust_crc(record_base, delta.bl);
+	extent->set_modify_time(modify_time);
+	assert(extent->last_committed_crc == delta.final_crc);
+      } else {
+	assert(delta.paddr.get_addr_type() == paddr_types_t::RANDOM_BLOCK);
+    	extent->apply_delta_and_adjust_crc(record_base, delta.bl);
+ 	extent->set_modify_time(modify_time);
+	// This means that the extent is retrieved from the disk,
+	// not the cache. So, we need to put correct version info here
+	// because the version of the retrieved extent is not always zero.
+ 	if (extent->version == 0) {
+	  extent->dirty_from_or_retired_at = journal_seq;
+ 	  extent->version = delta.pversion;
+ 	}
+ 	if (delta.final_crc == extent->last_committed_crc) {
+ 	  assert(extent->version == delta.pversion);
+ 	}
+      }
 
       extent->version++;
       if (extent->version == 1) {
