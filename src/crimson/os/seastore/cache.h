@@ -1670,6 +1670,21 @@ private:
     }
   }
 
+  void mark_overwrite_ool_applied(CachedExtentRef extent) {
+    extent->dirty_from_or_retired_at = JOURNAL_SEQ_MIN;
+    extent->state = CachedExtent::extent_state_t::CLEAN;
+  }
+
+  bool is_overwrite_ool_applied(CachedExtentRef extent) {
+    assert(extent);
+    if (extent->prior_instance && 
+	extent->prior_instance->dirty_from_or_retired_at == JOURNAL_SEQ_MIN &&
+	extent->prior_instance->get_paddr().is_absolute()) {
+      return true;
+    }
+    return false;
+  }
+
   template <
     typename node_key_t,
     typename node_val_t,

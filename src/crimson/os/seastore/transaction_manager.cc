@@ -331,7 +331,7 @@ TransactionManager::do_submit_transaction(
       );
     });
   }).si_then([this, FNAME, &tref] {
-    auto allocated_extents = tref.get_valid_pre_alloc_list();
+    auto allocated_extents = tref.get_valid_pre_alloc_or_overwrite_list();
     auto num_extents = allocated_extents.size();
     SUBTRACET(seastore_t, "process {} allocated extents", tref, num_extents);
     return epm->write_preallocated_ool_extents(tref, allocated_extents
@@ -506,7 +506,13 @@ TransactionManager::rewrite_extent_ret TransactionManager::rewrite_extent(
   }
 
   if (extent->is_logical()) {
-    return rewrite_logical_extent(t, extent->cast<LogicalCachedExtent>());
+    if (!epm->can_overwrite(t, extent)) {
+      return rewrite_logical_extent(t, extent->cast<LogicalCachedExtent>());
+    }
+    t.get_rewrite_version_stats().decrement(extent->get_version());
+    t.add_overwrite_extent(extent);
+    extent->set_target_rewrite_generation(OOL_GENERATION);
+    return rewrite_extent_iertr::now();
   } else {
     DEBUGT("rewriting physical extent -- {}", t, *extent);
     return lba_manager->rewrite_extent(t, extent);
