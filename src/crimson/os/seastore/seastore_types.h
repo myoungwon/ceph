@@ -1281,6 +1281,7 @@ constexpr std::size_t generation_to_writer(rewrite_gen_t gen) {
 // before EPM decision
 constexpr bool is_target_rewrite_generation(rewrite_gen_t gen) {
   return gen == INIT_GENERATION ||
+	 gen == OOL_GENERATION ||
          (gen >= MIN_REWRITE_GENERATION &&
           gen <= REWRITE_GENERATIONS);
 }
