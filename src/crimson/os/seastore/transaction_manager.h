@@ -301,6 +301,20 @@ public:
     });
   }
 
+  template <typename T>
+  alloc_extent_ret<T> get_mutable_extent_by_laddr(Transaction &t, laddr_t laddr, extent_len_t len) {
+    return read_extent<T>(t, laddr, len
+    ).si_then([this, &t](auto&& extent) {
+      auto ext = get_mutable_extent(t, extent)->template cast<T>();
+      return alloc_extent_iertr::make_ready_future<TCachedExtentRef<T>>(
+	std::move(ext));
+    }).handle_error_interruptible(
+     alloc_extent_iertr::pass_further{},
+     crimson::ct_error::assert_all{
+	"TransactionManager::get_mutable_extent_by_laddr hit invalid error"
+     });
+  }
+
   /**
    * remap_pin
    *

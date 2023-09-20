@@ -117,3 +117,8 @@ options:
   level: advanced
   desc: Begin fast eviction when the used ratio of the main tier reaches this value.
   default: 0.7
+- name: seastore_partial_overwrite
+  type: size
+  level: dev
+  desc: overwrite the existing data block if the amount of data is small and rbm is used
+  default: 0
