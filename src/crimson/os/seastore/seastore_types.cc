@@ -768,6 +768,8 @@ std::ostream& operator<<(std::ostream& out, placement_hint_t h)
     return out << "Hint(COLD)";
   case placement_hint_t::REWRITE:
     return out << "Hint(REWRITE)";
+  case placement_hint_t::OVERWRITE:
+    return out << "Hint(OVERWRITE)";
   case PLACEMENT_HINT_NULL:
     return out << "Hint(NULL)";
   default:

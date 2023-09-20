@@ -556,6 +556,10 @@ public:
     return user_hint;
   }
 
+  void set_user_hint(placement_hint_t h) {
+    user_hint = h;
+  }
+
   rewrite_gen_t get_rewrite_generation() const {
     return rewrite_generation;
   }

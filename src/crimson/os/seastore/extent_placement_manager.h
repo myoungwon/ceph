@@ -404,6 +404,8 @@ private:
     } else if (get_main_backend_type() == backend_type_t::SEGMENTED &&
                is_lba_backref_node(type)) {
       gen = INLINE_GENERATION;
+    } else if (hint == placement_hint_t::OVERWRITE) {
+      gen = INLINE_GENERATION;
     } else if (hint == placement_hint_t::COLD) {
       assert(gen == INIT_GENERATION);
       if (background_process.has_cold_tier()) {

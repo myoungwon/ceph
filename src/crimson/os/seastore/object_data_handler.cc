@@ -95,6 +95,16 @@ private:
 };
 using extent_to_write_list_t = std::list<extent_to_write_t>;
 
+struct po_meta_t {
+  enum class po_type_t {
+    NONE, 
+    OVERWRITE,
+    REMAP
+  } type = po_type_t::NONE;
+  uint64_t laddr_start;
+  extent_len_t length;
+}; // partial-overwrite
+
 // Encapsulates extents to be written out using do_remappings.
 struct extent_to_remap_t {
   enum class type_t {
@@ -179,6 +189,8 @@ struct extent_to_insert_t {
   /// non-nullopt if type == DATA
   std::optional<bufferlist> bl;
 
+  po_meta_t po;
+
   extent_to_insert_t(const extent_to_insert_t &) = default;
   extent_to_insert_t(extent_to_insert_t &&) = default;
 
@@ -191,8 +203,9 @@ struct extent_to_insert_t {
   }
 
   static extent_to_insert_t create_data(
-    laddr_t addr, extent_len_t len, std::optional<bufferlist> bl) {
-    return extent_to_insert_t(addr, len, bl);
+    laddr_t addr, extent_len_t len, std::optional<bufferlist> bl,
+    po_meta_t po = {}) {
+    return extent_to_insert_t(addr, len, bl, po);
   }
 
   static extent_to_insert_t create_zero(
@@ -202,8 +215,9 @@ struct extent_to_insert_t {
 
 private:
   extent_to_insert_t(laddr_t addr, extent_len_t len,
-    std::optional<bufferlist> bl)
-    :type(type_t::DATA), addr(addr), len(len), bl(bl) {}
+    std::optional<bufferlist> bl, po_meta_t po = {})
+    :type(type_t::DATA), addr(addr), len(len), bl(bl),
+     po(po) {}
 
   extent_to_insert_t(laddr_t addr, extent_len_t len)
     :type(type_t::ZERO), addr(addr), len(len) {}
@@ -222,7 +236,8 @@ struct overwrite_ops_t {
 // prepare to_remap, to_retire, to_insert list
 overwrite_ops_t prepare_ops_list(
   lba_pin_list_t &pins_to_remove,
-  extent_to_write_list_t &to_write) {
+  extent_to_write_list_t &to_write,
+  bool partial_overwrite) {
   assert(pins_to_remove.size() != 0);
   overwrite_ops_t ops;
   ops.to_remove.swap(pins_to_remove);
@@ -271,13 +286,68 @@ overwrite_ops_t prepare_ops_list(
     }
   }
 
+  interval_set<uint64_t> pre_alloc_addr_removed, pre_alloc_addr_remapped;
+  if (partial_overwrite) {
+    for (auto &r : ops.to_remove) {
+      if (r->get_val().is_absolute()) {
+	pre_alloc_addr_removed.insert(r->get_key(), r->get_length());
+    logger().debug("omw remove range {} ~ {}", r->get_key(), r->get_length());
+
+      }
+    }
+    for (auto &r : ops.to_remap) {
+      if (r.pin && r.pin->get_val().is_absolute()) {
+	pre_alloc_addr_remapped.insert(r.pin->get_key(), r.pin->get_length());
+  logger().debug("omw remap range {} ~ {}", r.pin->get_key(), r.pin->get_length());
+      }
+    }
+  }
+
   // prepare to_insert
   for (auto &region : to_write) {
     if (region.is_data()) {
       visitted++;
       assert(region.to_write.has_value());
-      ops.to_insert.push_back(extent_to_insert_t::create_data(
-	region.addr, region.len, region.to_write));
+      if (pre_alloc_addr_removed.contains(region.addr, region.len)) {
+	// TODO: determine overwrite strategy 
+	po_meta_t po;
+	assert(partial_overwrite);
+	std::erase_if(
+	  ops.to_remove,
+	  [&region, &po](auto &r) {
+	    if (r->get_key() == region.addr && r->get_length() == region.len) {
+	      po.laddr_start = region.addr;
+	      po.length = region.len;
+	      po.type = po_meta_t::po_type_t::OVERWRITE;
+	      return true;
+	    }
+	    return false;
+	  });
+	ops.to_insert.push_back(extent_to_insert_t::create_data(
+	  region.addr, region.len, region.to_write, po));
+      } else if (pre_alloc_addr_remapped.contains(region.addr, region.len)) {
+	po_meta_t po;
+	assert(partial_overwrite);
+	std::erase_if(
+	  ops.to_remap,
+	  [&region, &po](auto &r) {
+	    assert(r.pin);
+	    interval_set<uint64_t> range;
+	    range.insert(r.pin->get_key(), r.pin->get_length());
+	    if (range.contains(region.addr, region.len)) {
+	      po.laddr_start = range.begin().get_start();
+	      po.length = range.begin().get_len();
+	      po.type = po_meta_t::po_type_t::REMAP;
+	      return true;
+	    }
+	    return false;
+	  });
+	ops.to_insert.push_back(extent_to_insert_t::create_data(
+	  region.addr, region.len, region.to_write, po));
+      } else {
+	ops.to_insert.push_back(extent_to_insert_t::create_data(
+	  region.addr, region.len, region.to_write));
+      }
     } else if (region.is_zero()) {
       visitted++;
       assert(!(region.to_write.has_value()));
@@ -331,6 +401,22 @@ void splice_extent_to_write(
     append_extent_to_write(to_write, std::move(to_splice.front()));
     to_splice.pop_front();
     to_write.splice(to_write.end(), std::move(to_splice));
+  }
+}
+
+ceph::bufferlist ObjectDataBlock::get_delta() {
+  ceph::bufferlist bl;
+  encode(delta, bl);
+  return bl;
+}
+
+void ObjectDataBlock::apply_delta(const ceph::bufferlist &bl) {
+  auto biter = bl.begin();
+  decltype(delta) deltas;
+  decode(deltas, biter);
+  for (auto &&d : deltas) {
+    auto iter = d.bl.cbegin();
+    iter.copy(d.len, get_bptr().c_str() + d.offset);
   }
 }
 
@@ -417,6 +503,29 @@ ObjectDataHandler::write_ret do_insertions(
 	       ctx.t,
 	       region.addr,
 	       region.len);
+	if (region.po.type == po_meta_t::po_type_t::OVERWRITE ||
+	    region.po.type == po_meta_t::po_type_t::REMAP) {
+	  return ctx.tm.get_mutable_extent_by_laddr<ObjectDataBlock>(
+	    ctx.t,
+	    region.po.laddr_start,
+	    region.po.length
+	  ).si_then([&region](auto extent) {
+	    uint64_t off = region.addr - region.po.laddr_start;
+	    if (region.po.type == po_meta_t::po_type_t::OVERWRITE) {
+	      ceph_assert(extent->get_laddr() == region.addr);
+	      ceph_assert(extent->get_length() == region.len);
+	      // offset should be zero
+	      ceph_assert(off == 0);
+	    }
+	    extent->set_user_hint(placement_hint_t::OVERWRITE);
+	    extent->add_contents(*region.bl, off);
+      LOG_PREFIX(object_data_handler.cc::do_insertions);
+      DEBUG("OVERWRITE off {} laddr {} length {}", 0, region.addr, region.len);
+	    auto iter = region.bl->cbegin();
+	    iter.copy(region.len, extent->get_bptr().c_str() + off);
+	    return ObjectDataHandler::write_iertr::now();
+	  });
+	}
 	return ctx.tm.alloc_extent<ObjectDataBlock>(
 	  ctx.t,
 	  region.addr,
@@ -961,7 +1070,7 @@ ObjectDataHandler::clear_ret ObjectDataHandler::trim_data_reservation(
   return seastar::do_with(
     lba_pin_list_t(),
     extent_to_write_list_t(),
-    [ctx, size, &object_data](auto &pins, auto &to_write) {
+    [ctx, size, &object_data, this](auto &pins, auto &to_write) {
       LOG_PREFIX(ObjectDataHandler::trim_data_reservation);
       DEBUGT("object_data: {}~{}",
 	     ctx.t,
@@ -1039,9 +1148,9 @@ ObjectDataHandler::clear_ret ObjectDataHandler::trim_data_reservation(
             });
           }
 	}
-      }).si_then([ctx, size, &to_write, &object_data, &pins] {
+      }).si_then([ctx, size, &to_write, &object_data, &pins, this] {
         return seastar::do_with(
-          prepare_ops_list(pins, to_write),
+          prepare_ops_list(pins, to_write, partial_overwrite),
           [ctx, size, &object_data](auto &ops) {
             return do_remappings(ctx, ops.to_remap
             ).si_then([ctx, &ops] {
@@ -1163,7 +1272,7 @@ ObjectDataHandler::write_ret ObjectDataHandler::overwrite(
   return seastar::do_with(
     std::move(_pins),
     extent_to_write_list_t(),
-    [ctx, len, offset, overwrite_plan, bl=std::move(bl)]
+    [ctx, len, offset, overwrite_plan, bl=std::move(bl), this]
     (auto &pins, auto &to_write) mutable
   {
     LOG_PREFIX(ObjectDataHandler::overwrite);
@@ -1179,7 +1288,7 @@ ObjectDataHandler::write_ret ObjectDataHandler::overwrite(
       pins.front(),
       overwrite_plan
     ).si_then([ctx, len, offset, overwrite_plan, bl=std::move(bl),
-               &to_write, &pins](auto p) mutable {
+               &to_write, &pins, this](auto p) mutable {
       auto &[left_extent, headptr] = p;
       if (left_extent) {
         ceph_assert(left_extent->addr == overwrite_plan.pin_begin);
@@ -1196,7 +1305,7 @@ ObjectDataHandler::write_ret ObjectDataHandler::overwrite(
                  pin_begin=overwrite_plan.pin_begin,
                  pin_end=overwrite_plan.pin_end,
                  bl=std::move(bl), headptr=std::move(headptr),
-                 &to_write, &pins](auto p) mutable {
+                 &to_write, &pins, this](auto p) mutable {
         auto &[right_extent, tailptr] = p;
         if (bl.has_value()) {
           auto write_offset = offset;
@@ -1233,7 +1342,7 @@ ObjectDataHandler::write_ret ObjectDataHandler::overwrite(
         assert(pin_end == to_write.back().get_end_addr());
 
         return seastar::do_with(
-          prepare_ops_list(pins, to_write),
+          prepare_ops_list(pins, to_write, partial_overwrite),
           [ctx](auto &ops) {
             return do_remappings(ctx, ops.to_remap
             ).si_then([ctx, &ops] {
