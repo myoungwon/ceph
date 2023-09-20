@@ -179,6 +179,8 @@ struct extent_to_insert_t {
   /// non-nullopt if type == DATA
   std::optional<bufferlist> bl;
 
+  bool paddr_has_been_allocated = false;
+
   extent_to_insert_t(const extent_to_insert_t &) = default;
   extent_to_insert_t(extent_to_insert_t &&) = default;
 
@@ -191,8 +193,8 @@ struct extent_to_insert_t {
   }
 
   static extent_to_insert_t create_data(
-    laddr_t addr, extent_len_t len, std::optional<bufferlist> bl) {
-    return extent_to_insert_t(addr, len, bl);
+    laddr_t addr, extent_len_t len, std::optional<bufferlist> bl, bool paddr_has_been_allocated = false) {
+    return extent_to_insert_t(addr, len, bl, paddr_has_been_allocated);
   }
 
   static extent_to_insert_t create_zero(
@@ -202,8 +204,8 @@ struct extent_to_insert_t {
 
 private:
   extent_to_insert_t(laddr_t addr, extent_len_t len,
-    std::optional<bufferlist> bl)
-    :type(type_t::DATA), addr(addr), len(len), bl(bl) {}
+    std::optional<bufferlist> bl, bool paddr_has_been_allocated = false)
+    :type(type_t::DATA), addr(addr), len(len), bl(bl), paddr_has_been_allocated(paddr_has_been_allocated) {}
 
   extent_to_insert_t(laddr_t addr, extent_len_t len)
     :type(type_t::ZERO), addr(addr), len(len) {}
@@ -271,13 +273,36 @@ overwrite_ops_t prepare_ops_list(
     }
   }
 
+  interval_set<uint64_t> remove_addr;
+  for (auto &r : ops.to_remove) {
+    if (r->get_val().is_absolute()) {
+      remove_addr.insert(r->get_key(), r->get_length());
+    }
+  }
+
   // prepare to_insert
   for (auto &region : to_write) {
     if (region.is_data()) {
       visitted++;
       assert(region.to_write.has_value());
+      if (remove_addr.intersects(region.addr, region.len)) {
+	// TODO: determine overwrite strategy 
+	bool overwrite = false;
+	std::erase_if(
+	  ops.to_remove,
+	  [&region, &overwrite](auto &r) {
+	    if (r->get_key() == region.addr && r->get_length() == region.len) {
+	      overwrite = true;
+	      return true;
+	    }
+	    return false;
+	  });
+      ops.to_insert.push_back(extent_to_insert_t::create_data(
+	region.addr, region.len, region.to_write, overwrite));
+      } else {
       ops.to_insert.push_back(extent_to_insert_t::create_data(
 	region.addr, region.len, region.to_write));
+      }
     } else if (region.is_zero()) {
       visitted++;
       assert(!(region.to_write.has_value()));
@@ -331,6 +356,22 @@ void splice_extent_to_write(
     append_extent_to_write(to_write, std::move(to_splice.front()));
     to_splice.pop_front();
     to_write.splice(to_write.end(), std::move(to_splice));
+  }
+}
+
+ceph::bufferlist ObjectDataBlock::get_delta() {
+  ceph::bufferlist bl;
+  encode(delta, bl);
+  return bl;
+}
+
+void ObjectDataBlock::apply_delta(const ceph::bufferlist &bl) {
+  auto biter = bl.begin();
+  decltype(delta) deltas;
+  decode(deltas, biter);
+  for (auto &&d : deltas) {
+    auto iter = d.bl.cbegin();
+    iter.copy(d.len, get_bptr().c_str() + d.offset);
   }
 }
 
@@ -417,6 +458,20 @@ ObjectDataHandler::write_ret do_insertions(
 	       ctx.t,
 	       region.addr,
 	       region.len);
+	if (region.paddr_has_been_allocated) {
+	  return ctx.tm.get_mutable_extent_by_laddr<ObjectDataBlock>(
+	    ctx.t,
+	    region.addr,
+	    region.len
+	  ).si_then([&region](auto extent) {
+	    ceph_assert(extent->get_laddr() == region.addr);
+	    ceph_assert(extent->get_length() == region.len);
+	    extent->set_user_hint(placement_hint_t::OVERWRITE);
+	    // offset should be zero
+	    extent->add_contents(*region.bl, 0);
+	    return ObjectDataHandler::write_iertr::now();
+	  });
+	}
 	return ctx.tm.alloc_extent<ObjectDataBlock>(
 	  ctx.t,
 	  region.addr,

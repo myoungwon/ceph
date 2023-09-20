@@ -874,6 +874,7 @@ enum class placement_hint_t {
   HOT = 0,   // The default user hint that expects mutations or retirement
   COLD,      // Expect no mutations and no retirement in the near future
   REWRITE,   // Hint for the internal rewrites
+  OVERWRITE,
   NUM_HINTS  // Constant for number of hints or as NULL
 };
 
