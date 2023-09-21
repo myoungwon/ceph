@@ -1078,6 +1078,7 @@ record_t Cache::prepare_record(
   // Add new copy of mutated blocks, set_io_wait to block until written
   record.deltas.reserve(t.mutated_block_list.size());
   io_stat_t delta_stat;
+  std::vector<alloc_delta_t> alloc_deltas;
   for (auto &i: t.mutated_block_list) {
     if (!i->is_valid()) {
       DEBUGT("invalid mutated extent -- {}", t, *i);
@@ -1158,6 +1159,25 @@ record_t Cache::prepare_record(
 	});
       i->last_committed_crc = final_crc;
     }
+
+#if 0
+    // overwrite 
+    if ((i->get_type() == extent_types_t::OBJECT_DATA_BLOCK ||
+	i->get_type() == extent_types_t::TEST_BLOCK) &&
+	i->get_paddr().is_absolute() &&
+	i->get_paddr().get_addr_type() == paddr_types_t::RANDOM_BLOCK) {
+      alloc_delta_t rel_delta;
+      rel_delta.op = alloc_delta_t::op_types_t::RESET;
+      assert(i->is_logical());
+      rel_delta.alloc_blk_ranges.emplace_back(
+	i->get_paddr(),
+	i->cast<LogicalCachedExtent>()->get_laddr(),
+	i->get_length(),
+	i->get_type());
+      alloc_deltas.emplace_back(std::move(rel_delta));
+      DEBUGT(" overwrite extent !!! {} ", t, i->get_paddr());
+    }
+#endif
     assert(delta_length);
     get_by_ext(efforts.delta_bytes_by_ext,
                i->get_type()) += delta_length;
@@ -1167,7 +1187,6 @@ record_t Cache::prepare_record(
   // Transaction is now a go, set up in-memory cache state
   // invalidate now invalid blocks
   io_stat_t retire_stat;
-  std::vector<alloc_delta_t> alloc_deltas;
   alloc_delta_t rel_delta;
   rel_delta.op = alloc_delta_t::op_types_t::CLEAR;
   for (auto &i: t.retired_set) {

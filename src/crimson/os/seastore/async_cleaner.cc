@@ -388,7 +388,8 @@ JournalTrimmerImpl::config_t::get_test(
     max_journal_bytes = 4 * roll_size;
   } else {
     assert(type == journal_type_t::RANDOM_BLOCK);
-    target_dirty_bytes = roll_size / 4;
+    //target_dirty_bytes = roll_size / 4;
+    target_dirty_bytes = 10 * 1024 * 1024;;
     target_alloc_bytes = roll_size / 4;
     max_journal_bytes = roll_size / 2;
   }

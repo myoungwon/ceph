@@ -1745,7 +1745,8 @@ struct alloc_delta_t {
   enum class op_types_t : uint8_t {
     NONE = 0,
     SET = 1,
-    CLEAR = 2
+    CLEAR = 2,
+    RESET = 3
   };
   std::vector<alloc_blk_t> alloc_blk_ranges;
   op_types_t op = op_types_t::NONE;

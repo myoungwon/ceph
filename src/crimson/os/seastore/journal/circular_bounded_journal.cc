@@ -325,8 +325,13 @@ Journal::replay_ret CircularBoundedJournal::replay(
 	if (e.type == extent_types_t::ALLOC_INFO) {
 	  alloc_delta_t alloc_delta;
 	  decode(alloc_delta, e.bl);
-	  if (alloc_delta.op == alloc_delta_t::op_types_t::CLEAR) {
+	  if (alloc_delta.op == alloc_delta_t::op_types_t::CLEAR ||
+	      alloc_delta.op == alloc_delta_t::op_types_t::RESET) {
 	    for (auto &alloc_blk : alloc_delta.alloc_blk_ranges) {
+	      if (alloc_delta.op == alloc_delta_t::op_types_t::RESET) {
+		LOG_PREFIX(CircularBoundedJournal::replay);
+		DEBUG(" RESET paddr {} ", alloc_blk.paddr);
+	      }
 	      map[alloc_blk.paddr] = offsets.write_result.start_seq;
 	    }
 	  }
