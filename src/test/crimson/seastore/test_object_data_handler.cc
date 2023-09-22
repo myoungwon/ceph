@@ -6,6 +6,7 @@
 
 #include "crimson/os/seastore/onode.h"
 #include "crimson/os/seastore/object_data_handler.h"
+#include <random>
 
 using namespace crimson;
 using namespace crimson::os;
@@ -419,6 +420,64 @@ TEST_P(object_data_handler_test_t, multiple_split) {
   });
 }
 
+struct object_data_handler_rbm_test_t :
+  object_data_handler_test_t {
+  
+  object_data_handler_rbm_test_t() : gen(rd()) {}
+  laddr_t get_random_laddr(size_t block_size, laddr_t limit) {
+    return block_size *
+      std::uniform_int_distribution<>(0, (limit / block_size) - 1)(gen);
+  }
+
+  TransactionRef create_transaction() {
+    return create_mutate_transaction();
+  }
+  std::random_device rd;
+  std::mt19937 gen;
+};
+
+TEST_P(object_data_handler_rbm_test_t, test_overwrite)
+{
+  constexpr size_t TOTAL = 4<<20;
+  constexpr size_t BSIZE = 4<<10;
+  constexpr size_t BLOCKS = TOTAL / BSIZE;
+  run_async([this] {
+    for (unsigned i = 0; i < BLOCKS; ++i) {
+      auto t = create_transaction();
+      auto extent = with_trans_intr(*t, [&](auto& trans) {
+	return tm->alloc_extent<ObjectDataBlock>(*t, i * BSIZE, BSIZE, placement_hint_t::HOT);
+      }).unsafe_get0();
+      submit_transaction(std::move(t));
+    }
+
+    for (unsigned i = 0; i < 4; ++i) {
+      for (unsigned j = 0; j < 65; ++j) {
+	auto t = create_transaction();
+	for (unsigned k = 0; k < 2; ++k) {
+	  auto extent = with_trans_intr(*t, [&](auto& trans) {
+	    return tm->get_mutable_extent_by_laddr<ObjectDataBlock>(
+	      *t,
+	      get_random_laddr(BSIZE, TOTAL),
+	      BSIZE);
+	  }).unsafe_get0();
+	  extent->set_user_hint(placement_hint_t::OVERWRITE);
+	  bufferlist bl;
+	  bufferptr bp(ceph::buffer::create_page_aligned(extent->get_length()));
+	  memset(
+	    bp.c_str(),
+	    (char)(j*k),
+	    extent->get_length() / (2*(k+1)));
+	  bl.append(bp);
+	  extent->add_contents(bl, 0);
+	}
+	submit_transaction(std::move(t));
+      }
+      restart();
+      logger().info("random_writes: {} done replaying/checking", i);
+    }
+  });
+}
+
 INSTANTIATE_TEST_SUITE_P(
   object_data_handler_test,
   object_data_handler_test_t,
@@ -428,4 +487,11 @@ INSTANTIATE_TEST_SUITE_P(
   )
 );
 
+INSTANTIATE_TEST_SUITE_P(
+  object_data_handler_test,
+  object_data_handler_rbm_test_t,
+  ::testing::Values (
+    "circularbounded"
+  )
+);
 
