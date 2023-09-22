@@ -6,6 +6,7 @@
 
 #include "crimson/os/seastore/onode.h"
 #include "crimson/os/seastore/object_data_handler.h"
+#include <random>
 
 using namespace crimson;
 using namespace crimson::os;
@@ -160,6 +161,26 @@ struct object_data_handler_test_t:
     onode.reset();
     size = 0;
     return tm_teardown();
+  }
+
+  void multiple_split() {
+    write(0, 128<<10, 'x');
+
+    auto t = create_mutate_transaction();
+    // normal split
+    write(*t, 120<<10, 4<<10, 'a');
+    // not aligned right
+    write(*t, 4<<10, 5<<10, 'b');
+    // split right extent of last split result
+    write(*t, 32<<10, 4<<10, 'c');
+    // non aligned overwrite
+    write(*t, 13<<10, 4<<10, 'd');
+
+    write(*t, 64<<10, 32<<10, 'e');
+    // not split right
+    write(*t, 60<<10, 8<<10, 'f');
+
+    submit_transaction(std::move(t));
   }
 };
 
@@ -386,24 +407,7 @@ TEST_P(object_data_handler_test_t, split_left_right) {
 }
 TEST_P(object_data_handler_test_t, multiple_split) {
   run_async([this] {
-    write(0, 128<<10, 'x');
-
-    auto t = create_mutate_transaction();
-    // normal split
-    write(*t, 120<<10, 4<<10, 'a');
-    // not aligned right
-    write(*t, 4<<10, 5<<10, 'b');
-    // split right extent of last split result
-    write(*t, 32<<10, 4<<10, 'c');
-    // non aligned overwrite
-    write(*t, 13<<10, 4<<10, 'd');
-
-    write(*t, 64<<10, 32<<10, 'e');
-    // not split right
-    write(*t, 60<<10, 8<<10, 'f');
-
-    submit_transaction(std::move(t));
-
+    multiple_split();
     auto pins = get_mappings(0, 128<<10);
     EXPECT_EQ(pins.size(), 10);
 
@@ -419,6 +423,80 @@ TEST_P(object_data_handler_test_t, multiple_split) {
   });
 }
 
+struct object_data_handler_rbm_overwrite_test_t :
+  object_data_handler_test_t {
+  
+  object_data_handler_rbm_overwrite_test_t() : gen(rd()) {}
+
+  void set_overwrite() {
+    crimson::common::local_conf().set_val("seastore_partial_overwrite", "true").get();
+  }
+
+  laddr_t get_random_laddr(size_t block_size, laddr_t limit) {
+    return block_size *
+      std::uniform_int_distribution<>(0, (limit / block_size) - 1)(gen);
+  }
+
+  TransactionRef create_transaction() {
+    return create_mutate_transaction();
+  }
+  std::random_device rd;
+  std::mt19937 gen;
+};
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, test_overwrite)
+{
+  constexpr size_t TOTAL = 4<<20;
+  constexpr size_t BSIZE = 4<<10;
+  constexpr size_t BLOCKS = TOTAL / BSIZE;
+  run_async([this] {
+    set_overwrite();
+    for (unsigned i = 0; i < BLOCKS; ++i) {
+      auto t = create_transaction();
+      auto extent = with_trans_intr(*t, [&](auto& trans) {
+	return tm->alloc_extent<ObjectDataBlock>(*t, i * BSIZE, BSIZE, placement_hint_t::HOT);
+      }).unsafe_get0();
+      submit_transaction(std::move(t));
+    }
+
+    for (unsigned i = 0; i < 4; ++i) {
+      for (unsigned j = 0; j < 65; ++j) {
+	auto t = create_transaction();
+	for (unsigned k = 0; k < 2; ++k) {
+	  auto extent = with_trans_intr(*t, [&](auto& trans) {
+	    return tm->get_mutable_extent_by_laddr<ObjectDataBlock>(
+	      *t,
+	      get_random_laddr(BSIZE, TOTAL),
+	      BSIZE);
+	  }).unsafe_get0();
+	  extent->set_user_hint(placement_hint_t::OVERWRITE);
+	  bufferlist bl;
+	  bufferptr bp(ceph::buffer::create_page_aligned(extent->get_length()));
+	  memset(
+	    bp.c_str(),
+	    (char)(j*k),
+	    extent->get_length() / (2*(k+1)));
+	  bl.append(bp);
+	  extent->add_contents(bl, 0);
+	}
+	submit_transaction(std::move(t));
+      }
+      restart();
+      logger().info("random_writes: {} done replaying/checking", i);
+    }
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, multiple_split) {
+  run_async([this] {
+    set_overwrite();
+    multiple_split();
+    auto pins = get_mappings(0, 128<<10);
+    EXPECT_EQ(pins.size(), 1);
+    read(0, 128<<10);
+  });
+}
+
 INSTANTIATE_TEST_SUITE_P(
   object_data_handler_test,
   object_data_handler_test_t,
@@ -428,4 +506,11 @@ INSTANTIATE_TEST_SUITE_P(
   )
 );
 
+INSTANTIATE_TEST_SUITE_P(
+  object_data_handler_test,
+  object_data_handler_rbm_overwrite_test_t,
+  ::testing::Values (
+    "circularbounded"
+  )
+);
 
