@@ -6,6 +6,7 @@
 
 #include "crimson/os/seastore/onode.h"
 #include "crimson/os/seastore/object_data_handler.h"
+#include <random>
 
 using namespace crimson;
 using namespace crimson::os;
@@ -161,21 +162,8 @@ struct object_data_handler_test_t:
     size = 0;
     return tm_teardown();
   }
-};
 
-TEST_P(object_data_handler_test_t, single_write)
-{
-  run_async([this] {
-    write(1<<20, 8<<10, 'c');
-
-    read_near(1<<20, 8<<10, 1);
-    read_near(1<<20, 8<<10, 512);
-  });
-}
-
-TEST_P(object_data_handler_test_t, multi_write)
-{
-  run_async([this] {
+  void test_multi_write() {
     write((1<<20) - (4<<10), 4<<10, 'a');
     write(1<<20, 4<<10, 'b');
     write((1<<20) + (4<<10), 4<<10, 'c');
@@ -185,12 +173,9 @@ TEST_P(object_data_handler_test_t, multi_write)
 
     read_near((1<<20)-(4<<10), 12<<10, 1);
     read_near((1<<20)-(4<<10), 12<<10, 512);
-  });
-}
+  }
 
-TEST_P(object_data_handler_test_t, write_hole)
-{
-  run_async([this] {
+  void test_write_hole() {
     write((1<<20) - (4<<10), 4<<10, 'a');
     // hole at 1<<20
     write((1<<20) + (4<<10), 4<<10, 'c');
@@ -200,23 +185,17 @@ TEST_P(object_data_handler_test_t, write_hole)
 
     read_near((1<<20)-(4<<10), 12<<10, 1);
     read_near((1<<20)-(4<<10), 12<<10, 512);
-  });
-}
+  }
 
-TEST_P(object_data_handler_test_t, overwrite_single)
-{
-  run_async([this] {
+  void test_overwrite_single() {
     write((1<<20), 4<<10, 'a');
     write((1<<20), 4<<10, 'c');
 
     read_near(1<<20, 4<<10, 1);
     read_near(1<<20, 4<<10, 512);
-  });
-}
+  }
 
-TEST_P(object_data_handler_test_t, overwrite_double)
-{
-  run_async([this] {
+  void test_overwrite_double() {
     write((1<<20), 4<<10, 'a');
     write((1<<20)+(4<<10), 4<<10, 'c');
     write((1<<20), 8<<10, 'b');
@@ -229,12 +208,9 @@ TEST_P(object_data_handler_test_t, overwrite_double)
 
     read_near((1<<20) + (4<<10), 4<<10, 1);
     read_near((1<<20) + (4<<10), 4<<10, 512);
-  });
-}
+  }
 
-TEST_P(object_data_handler_test_t, overwrite_partial)
-{
-  run_async([this] {
+  void test_overwrite_partial() {
     write((1<<20), 12<<10, 'a');
     read_near(1<<20, 12<<10, 1);
 
@@ -254,12 +230,9 @@ TEST_P(object_data_handler_test_t, overwrite_partial)
 
     read_near((1<<20) + (4<<10), 4<<10, 1);
     read_near((1<<20) + (4<<10), 4<<10, 512);
-  });
-}
+  }
 
-TEST_P(object_data_handler_test_t, unaligned_write)
-{
-  run_async([this] {
+  void test_unaligned_write() {
     objaddr_t base = 1<<20;
     write(base, (4<<10)+(1<<10), 'a');
     read_near(base-(4<<10), 12<<10, 512);
@@ -271,12 +244,9 @@ TEST_P(object_data_handler_test_t, unaligned_write)
     base = (1<<20) + (128<<10);
     write(base-(1<<10), (4<<10)+(2<<20), 'c');
     read_near(base-(4<<10), 12<<10, 512);
-  });
-}
+  }
 
-TEST_P(object_data_handler_test_t, unaligned_overwrite)
-{
-  run_async([this] {
+  void test_unaligned_overwrite() {
     objaddr_t base = 1<<20;
     write(base, (128<<10) + (16<<10), 'x');
 
@@ -292,12 +262,9 @@ TEST_P(object_data_handler_test_t, unaligned_overwrite)
     read_near(base-(4<<10), 12<<10, 2<<10);
 
     read(base, (128<<10) + (16<<10));
-  });
-}
+  }
 
-TEST_P(object_data_handler_test_t, truncate)
-{
-  run_async([this] {
+  void test_truncate() {
     objaddr_t base = 1<<20;
     write(base, 8<<10, 'a');
     write(base+(8<<10), 8<<10, 'b');
@@ -314,78 +281,29 @@ TEST_P(object_data_handler_test_t, truncate)
 
     truncate(base - (12<<10));
     read(base, 64<<10);
-  });
-}
+  }
 
-TEST_P(object_data_handler_test_t, no_split) {
-  run_async([this] {
+  void test_no_split() {
     write(0, 8<<10, 'x');
     write(0, 8<<10, 'a');
+  }
 
-    auto pins = get_mappings(0, 8<<10);
-    EXPECT_EQ(pins.size(), 1);
-
-    read(0, 8<<10);
-  });
-}
-
-TEST_P(object_data_handler_test_t, split_left) {
-  run_async([this] {
+  void test_split_left() {
     write(0, 128<<10, 'x');
-
     write(64<<10, 60<<10, 'a');
+  }
 
-    auto pins = get_mappings(0, 128<<10);
-    EXPECT_EQ(pins.size(), 2);
-
-    size_t res[2] = {0, 64<<10};
-    auto base = pins.front()->get_key();
-    int i = 0;
-    for (auto &pin : pins) {
-      EXPECT_EQ(pin->get_key() - base, res[i]);
-      i++;
-    }
-    read(0, 128<<10);
-  });
-}
-
-TEST_P(object_data_handler_test_t, split_right) {
-  run_async([this] {
+  void test_split_right() {
     write(0, 128<<10, 'x');
     write(4<<10, 60<<10, 'a');
+  }
 
-    auto pins = get_mappings(0, 128<<10);
-    EXPECT_EQ(pins.size(), 2);
-
-    size_t res[2] = {0, 64<<10};
-    auto base = pins.front()->get_key();
-    int i = 0;
-    for (auto &pin : pins) {
-      EXPECT_EQ(pin->get_key() - base, res[i]);
-      i++;
-    }
-    read(0, 128<<10);
-  });
-}
-TEST_P(object_data_handler_test_t, split_left_right) {
-  run_async([this] {
+  void test_split_left_right() {
     write(0, 128<<10, 'x');
     write(48<<10, 32<<10, 'a');
+  }
 
-    auto pins = get_mappings(0, 128<<10);
-    EXPECT_EQ(pins.size(), 3);
-
-    size_t res[3] = {0, 48<<10, 80<<10};
-    auto base = pins.front()->get_key();
-    int i = 0;
-    for (auto &pin : pins) {
-      EXPECT_EQ(pin->get_key() - base, res[i]);
-      i++;
-    }
-  });
-}
-TEST_P(object_data_handler_test_t, multiple_split) {
-  run_async([this] {
+  void multiple_split() {
     write(0, 128<<10, 'x');
 
     auto t = create_mutate_transaction();
@@ -403,7 +321,140 @@ TEST_P(object_data_handler_test_t, multiple_split) {
     write(*t, 60<<10, 8<<10, 'f');
 
     submit_transaction(std::move(t));
+  }
+};
 
+TEST_P(object_data_handler_test_t, single_write)
+{
+  run_async([this] {
+    write(1<<20, 8<<10, 'c');
+
+    read_near(1<<20, 8<<10, 1);
+    read_near(1<<20, 8<<10, 512);
+  });
+}
+
+TEST_P(object_data_handler_test_t, multi_write)
+{
+  run_async([this] {
+    test_multi_write();
+  });
+}
+
+TEST_P(object_data_handler_test_t, write_hole)
+{
+  run_async([this] {
+    test_write_hole();
+  });
+}
+
+TEST_P(object_data_handler_test_t, overwrite_single)
+{
+  run_async([this] {
+    test_overwrite_single();
+  });
+}
+
+TEST_P(object_data_handler_test_t, overwrite_double)
+{
+  run_async([this] {
+    test_overwrite_double();
+  });
+}
+
+TEST_P(object_data_handler_test_t, overwrite_partial)
+{
+  run_async([this] {
+    test_overwrite_partial();
+  });
+}
+
+TEST_P(object_data_handler_test_t, unaligned_write)
+{
+  run_async([this] {
+    test_unaligned_write();
+  });
+}
+
+TEST_P(object_data_handler_test_t, unaligned_overwrite)
+{
+  run_async([this] {
+    test_unaligned_overwrite();
+  });
+}
+
+TEST_P(object_data_handler_test_t, truncate)
+{
+  run_async([this] {
+    test_truncate();
+  });
+}
+
+TEST_P(object_data_handler_test_t, no_split) {
+  run_async([this] {
+    test_no_split();
+
+    auto pins = get_mappings(0, 8<<10);
+    EXPECT_EQ(pins.size(), 1);
+
+    read(0, 8<<10);
+  });
+}
+
+TEST_P(object_data_handler_test_t, split_left) {
+  run_async([this] {
+    test_split_left();
+
+    auto pins = get_mappings(0, 128<<10);
+    EXPECT_EQ(pins.size(), 2);
+
+    size_t res[2] = {0, 64<<10};
+    auto base = pins.front()->get_key();
+    int i = 0;
+    for (auto &pin : pins) {
+      EXPECT_EQ(pin->get_key() - base, res[i]);
+      i++;
+    }
+    read(0, 128<<10);
+  });
+}
+
+TEST_P(object_data_handler_test_t, split_right) {
+  run_async([this] {
+    test_split_right();
+
+    auto pins = get_mappings(0, 128<<10);
+    EXPECT_EQ(pins.size(), 2);
+
+    size_t res[2] = {0, 64<<10};
+    auto base = pins.front()->get_key();
+    int i = 0;
+    for (auto &pin : pins) {
+      EXPECT_EQ(pin->get_key() - base, res[i]);
+      i++;
+    }
+    read(0, 128<<10);
+  });
+}
+TEST_P(object_data_handler_test_t, split_left_right) {
+  run_async([this] {
+    test_split_left_right();
+
+    auto pins = get_mappings(0, 128<<10);
+    EXPECT_EQ(pins.size(), 3);
+
+    size_t res[3] = {0, 48<<10, 80<<10};
+    auto base = pins.front()->get_key();
+    int i = 0;
+    for (auto &pin : pins) {
+      EXPECT_EQ(pin->get_key() - base, res[i]);
+      i++;
+    }
+  });
+}
+TEST_P(object_data_handler_test_t, multiple_split) {
+  run_async([this] {
+    multiple_split();
     auto pins = get_mappings(0, 128<<10);
     EXPECT_EQ(pins.size(), 10);
 
@@ -419,6 +470,186 @@ TEST_P(object_data_handler_test_t, multiple_split) {
   });
 }
 
+struct object_data_handler_rbm_overwrite_test_t :
+  object_data_handler_test_t {
+  
+  object_data_handler_rbm_overwrite_test_t() : gen(rd()) {}
+
+  void set_overwrite() {
+    crimson::common::local_conf().set_val("seastore_partial_overwrite", "131072").get();
+  }
+
+  laddr_t get_random_laddr(size_t block_size, laddr_t limit) {
+    return block_size *
+      std::uniform_int_distribution<>(0, (limit / block_size) - 1)(gen);
+  }
+
+  TransactionRef create_transaction() {
+    return create_mutate_transaction();
+  }
+  std::random_device rd;
+  std::mt19937 gen;
+};
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, random_overwrite)
+{
+  constexpr size_t TOTAL = 4<<20;
+  constexpr size_t BSIZE = 4<<10;
+  constexpr size_t BLOCKS = TOTAL / BSIZE;
+  run_async([this] {
+    set_overwrite();
+    for (unsigned i = 0; i < BLOCKS; ++i) {
+      auto t = create_transaction();
+      auto extent = with_trans_intr(*t, [&](auto& trans) {
+	return tm->alloc_extent<ObjectDataBlock>(*t, i * BSIZE, BSIZE, placement_hint_t::HOT);
+      }).unsafe_get0();
+      submit_transaction(std::move(t));
+    }
+
+    for (unsigned i = 0; i < 4; ++i) {
+      for (unsigned j = 0; j < 65; ++j) {
+	auto t = create_transaction();
+	for (unsigned k = 0; k < 2; ++k) {
+	  auto extent = with_trans_intr(*t, [&](auto& trans) {
+	    return tm->get_mutable_extent_by_laddr<ObjectDataBlock>(
+	      *t,
+	      get_random_laddr(BSIZE, TOTAL),
+	      BSIZE);
+	  }).unsafe_get0();
+	  extent->set_user_hint(placement_hint_t::OVERWRITE);
+	  bufferlist bl;
+	  bufferptr bp(ceph::buffer::create_page_aligned(extent->get_length()));
+	  memset(
+	    bp.c_str(),
+	    (char)(j*k),
+	    extent->get_length() / (2*(k+1)));
+	  bl.append(bp);
+	  extent->add_contents(bl, 0);
+	}
+	submit_transaction(std::move(t));
+      }
+      restart();
+      epm->check_usage();
+      logger().info("random_writes: {} done replaying/checking", i);
+    }
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, multi_write)
+{
+  run_async([this] {
+    set_overwrite();
+    test_multi_write();
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, write_hole)
+{
+  run_async([this] {
+    set_overwrite();
+    test_write_hole();
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, overwrite_single)
+{
+  run_async([this] {
+    set_overwrite();
+    test_overwrite_single();
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, overwrite_double)
+{
+  run_async([this] {
+    set_overwrite();
+    test_overwrite_double();
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, overwrite_partial)
+{
+  run_async([this] {
+    set_overwrite();
+    test_overwrite_partial();
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, unaligned_write)
+{
+  run_async([this] {
+    set_overwrite();
+    test_unaligned_write();
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, unaligned_overwrite)
+{
+  run_async([this] {
+    set_overwrite();
+    test_unaligned_overwrite();
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, truncate)
+{
+  run_async([this] {
+    set_overwrite();
+    test_truncate();
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, no_split) {
+  run_async([this] {
+    set_overwrite();
+    test_no_split();
+    auto pins = get_mappings(0, 8<<10);
+    EXPECT_EQ(pins.size(), 1);
+    read(0, 8<<10);
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, split_left) {
+  run_async([this] {
+    set_overwrite();
+    test_split_left();
+
+    auto pins = get_mappings(0, 128<<10);
+    EXPECT_EQ(pins.size(), 1);
+    read(0, 128<<10);
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, split_right) {
+  run_async([this] {
+    set_overwrite();
+    test_split_right();
+    auto pins = get_mappings(0, 128<<10);
+    EXPECT_EQ(pins.size(), 1);
+    read(0, 128<<10);
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, split_left_right) {
+  run_async([this] {
+    set_overwrite();
+    test_split_left_right();
+    auto pins = get_mappings(0, 128<<10);
+    EXPECT_EQ(pins.size(), 1);
+    read(0, 128<<10);
+  });
+}
+
+TEST_P(object_data_handler_rbm_overwrite_test_t, multiple_split) {
+  run_async([this] {
+    set_overwrite();
+    multiple_split();
+    auto pins = get_mappings(0, 128<<10);
+    EXPECT_EQ(pins.size(), 1);
+    read(0, 128<<10);
+  });
+}
+
 INSTANTIATE_TEST_SUITE_P(
   object_data_handler_test,
   object_data_handler_test_t,
@@ -428,4 +659,11 @@ INSTANTIATE_TEST_SUITE_P(
   )
 );
 
+INSTANTIATE_TEST_SUITE_P(
+  object_data_handler_test,
+  object_data_handler_rbm_overwrite_test_t,
+  ::testing::Values (
+    "circularbounded"
+  )
+);
 
