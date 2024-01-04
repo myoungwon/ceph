@@ -2957,15 +2957,13 @@ struct C_ProxyChunkRead : public Context {
       return;
     }
     if (last_peering_reset == pg->get_last_peering_reset()) {
-      if (r >= 0 && obc->obs.oi.size >=
-	  prdop->ops[op_index].op.extent.offset + req_total_len &&
+      if (r >= 0 && obj_op->ops[0].op.extent.length < req_total_len &&
 	  prdop->ops[op_index].outdata.length() == 0) {
-	// read other parts of data in the object other than the chunks
-	// then, overwrite the chunks to the bufferlist
+	// read the object data then, overwrite the chunks to the right position
 	r = pg->pgbackend->objects_read_sync(
 	  obc->obs.oi.soid,
-	  prdop->ops[op_index].op.extent.offset,
-	  req_total_len,
+	  prdop->ops[op_index].op.extent.offset, // the original op's offset
+	  req_total_len, // total length we need to read to handle the read op
 	  prdop->ops[op_index].op.flags,
 	  &prdop->ops[op_index].outdata);
       }
@@ -3268,66 +3266,65 @@ void PrimaryLogPG::do_proxy_chunked_op(OpRequestRef op, const hobject_t& missing
 				       ObjectContextRef obc, bool write_ordered)
 {
   MOSDOp *m = static_cast<MOSDOp*>(op->get_nonconst_req());
-  OSDOp *osd_op = NULL;
+  int op_index = -1;
   for (unsigned int i = 0; i < m->ops.size(); i++) {
-    osd_op = &m->ops[i];
-    uint64_t cursor = osd_op->op.extent.offset;
-    uint64_t op_length = osd_op->op.extent.offset + osd_op->op.extent.length;
-    uint64_t chunk_length = 0, chunk_index = 0, req_len = 0;
-    object_manifest_t *manifest = &obc->obs.oi.manifest;
-    map <uint64_t, map<uint64_t, uint64_t>> chunk_read;
+    if (m->ops[i].op.op == CEPH_OSD_OP_READ ||
+	m->ops[i].op.op == CEPH_OSD_OP_SYNC_READ) {
+      op_index = i;
+      break;
+    }	
+  }
+  ceph_assert(op_index != -1);
+  OSDOp *osd_op = &m->ops[op_index];
+  uint64_t cursor = osd_op->op.extent.offset;
+  uint64_t op_length = osd_op->op.extent.offset + osd_op->op.extent.length;
+  uint64_t chunk_length = 0, chunk_index = 0, req_len = 0;
+  map <uint64_t, map<uint64_t, uint64_t>> chunk_read;
 
-    while (cursor < op_length) {
-      chunk_index = 0;
-      chunk_length = 0;
-      /* find the right chunk position for cursor */
-      for (auto &p : manifest->chunk_map) {
-	if (p.first >= cursor && p.first + p.second.length > cursor) {
-	  chunk_length = p.second.length;
-	  chunk_index = p.first;
-	  cursor = chunk_index;
-	  break;
-	}
-      }
-      if (chunk_index > op_length) {
-	cursor = op_length;
+  while (cursor < op_length) {
+    /* find the right chunk position for cursor */
+    for (auto &p : obc->obs.oi.manifest.chunk_map) {
+      if (p.first >= cursor && p.first + p.second.length > cursor) {
+	chunk_length = p.second.length;
+	chunk_index = p.first;
+	cursor = chunk_index;
 	break;
       }
-      /* no index */
-      if (!chunk_index && !chunk_length) {
-	if (cursor == osd_op->op.extent.offset) {
-	  OpContext *ctx = new OpContext(op, m->get_reqid(), &m->ops, this);
-	  ctx->reply = new MOSDOpReply(m, 0, get_osdmap_epoch(), 0, false);
-	  ctx->data_off = osd_op->op.extent.offset;
-	  ctx->ignore_log_op_stats = true;
-	  complete_read_ctx(0, ctx);
-	}
-	break;
-      }
-      uint64_t next_length = chunk_length;
-      /* the size to read -> | op length | */
-      /*		     | 	 a chunk   | */
-      if (cursor + next_length > op_length) {
-	next_length = op_length - cursor;
-      }
-      /* the size to read -> |   op length   | */
-      /*		     | 	 a chunk | */
-      if (cursor + next_length > chunk_index + chunk_length) {
-	next_length = chunk_index + chunk_length - cursor;
-      }
-
-      chunk_read[cursor] = {{chunk_index, next_length}};
-      cursor += next_length;
+    }
+    if (chunk_index > op_length) {
+      cursor = op_length;
+      break;
+    }
+    /* no index */
+    if (!chunk_index && !chunk_length) {
+      break;
+    }
+    uint64_t next_length = chunk_length;
+    /* the size to read -> | op length | */
+    /*		     | 	 a chunk   | */
+    if (cursor + next_length > op_length) {
+      next_length = op_length - cursor;
+    }
+    /* the size to read -> |   op length   | */
+    /*		     | 	 a chunk | */
+    if (cursor + next_length > chunk_index + chunk_length) {
+      next_length = chunk_index + chunk_length - cursor;
     }
 
-    req_len = cursor - osd_op->op.extent.offset;
-    for (auto &p : chunk_read) {
-      auto chunks = p.second.begin();
-      dout(20) << __func__ << " chunk_index: " << chunks->first
-	      << " next_length: " << chunks->second << " cursor: "
-	      << p.first << dendl;
-      do_proxy_chunked_read(op, obc, i, chunks->first, p.first, chunks->second, req_len, write_ordered);
-    }
+    chunk_read[cursor] = {{chunk_index, next_length}};
+    cursor += next_length;
+    chunk_index = 0;
+    chunk_length = 0;
+  }
+
+  req_len = cursor - osd_op->op.extent.offset;
+  for (auto &p : chunk_read) {
+    auto chunks = p.second.begin();
+    dout(20) << __func__ << " chunk_index: " << chunks->first
+	    << " next_length: " << chunks->second << " cursor: "
+	    << p.first << dendl;
+    do_proxy_chunked_read(op, obc, op_index , chunks->first, p.first, 
+      chunks->second, req_len, write_ordered);
   }
 }
 
