@@ -65,6 +65,11 @@ class CircularJournalSpace : public JournalAllocator {
 
   open_ret open(bool is_mkfs) final;
 
+  bool is_checksum_offloaded_to_device() final {
+    assert(device);
+    return device->is_end_to_end_data_protection();
+  }
+
  public:
   CircularJournalSpace(RBMDevice * device);
 

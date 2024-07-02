@@ -75,6 +75,10 @@ protected:
 
   virtual void initialize_cursor(scan_valid_records_cursor &cursor) = 0;
 
+  virtual bool is_checksum_offloaded_to_device() {
+    return false;
+  }
+
   virtual ~RecordScanner() {}
 
 };

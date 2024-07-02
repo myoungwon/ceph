@@ -512,19 +512,22 @@ ceph::bufferlist encode_record(
   record_t&& record,
   extent_len_t block_size,
   const journal_seq_t& committed_to,
-  segment_nonce_t current_segment_nonce)
+  segment_nonce_t current_segment_nonce,
+  bool checksum_offloaded_to_device)
 {
   record_group_t record_group(std::move(record), block_size);
   return encode_records(
       record_group,
       committed_to,
-      current_segment_nonce);
+      current_segment_nonce,
+      checksum_offloaded_to_device);
 }
 
 ceph::bufferlist encode_records(
   record_group_t& record_group,
   const journal_seq_t& committed_to,
-  segment_nonce_t current_segment_nonce)
+  segment_nonce_t current_segment_nonce,
+  bool checksum_offloaded_to_device)
 {
   assert(record_group.size.block_size > 0);
   assert(record_group.records.size() > 0);
@@ -544,7 +547,7 @@ ceph::bufferlist encode_records(
     record_group.size.dlength,
     current_segment_nonce,
     committed_to,
-    data_bl.crc32c(-1)
+    checksum_offloaded_to_device ? 0 : data_bl.crc32c(-1)
   };
   encode(header, bl);
 
@@ -577,19 +580,21 @@ ceph::bufferlist encode_records(
     bl.append_zero(aligned_mdlength - bl.length());
   }
 
-  auto bliter = bl.cbegin();
-  auto metadata_crc = bliter.crc32c(
-    ceph::encoded_sizeof_bounded<record_group_header_t>(),
-    -1);
-  bliter += sizeof(checksum_t); /* metadata crc hole */
-  metadata_crc = bliter.crc32c(
-    bliter.get_remaining(),
-    metadata_crc);
-  ceph_le32 metadata_crc_le;
-  metadata_crc_le = metadata_crc;
-  metadata_crc_filler.copy_in(
-    sizeof(checksum_t),
-    reinterpret_cast<const char *>(&metadata_crc_le));
+  if (!checksum_offloaded_to_device) {
+    auto bliter = bl.cbegin();
+    auto metadata_crc = bliter.crc32c(
+      ceph::encoded_sizeof_bounded<record_group_header_t>(),
+      -1);
+    bliter += sizeof(checksum_t); /* metadata crc hole */
+    metadata_crc = bliter.crc32c(
+      bliter.get_remaining(),
+      metadata_crc);
+    ceph_le32 metadata_crc_le;
+    metadata_crc_le = metadata_crc;
+    metadata_crc_filler.copy_in(
+      sizeof(checksum_t),
+      reinterpret_cast<const char *>(&metadata_crc_le));
+  }
 
   bl.claim_append(data_bl);
   ceph_assert(bl.length() == record_group.size.get_encoded_length());

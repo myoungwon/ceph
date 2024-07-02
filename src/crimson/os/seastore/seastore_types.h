@@ -2101,12 +2101,14 @@ ceph::bufferlist encode_record(
   record_t&& record,
   extent_len_t block_size,
   const journal_seq_t& committed_to,
-  segment_nonce_t current_segment_nonce);
+  segment_nonce_t current_segment_nonce,
+  bool checksum_offloaded_to_device);
 
 ceph::bufferlist encode_records(
   record_group_t& record_group,
   const journal_seq_t& committed_to,
-  segment_nonce_t current_segment_nonce);
+  segment_nonce_t current_segment_nonce,
+  bool checksum_offloaded_to_device);
 
 std::optional<record_group_header_t>
 try_decode_records_header(

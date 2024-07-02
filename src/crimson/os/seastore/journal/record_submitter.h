@@ -51,6 +51,9 @@ public:
   using open_ret = open_ertr::future<journal_seq_t>;
   virtual open_ret open(bool is_mkfs) = 0;
 
+  virtual bool is_checksum_offloaded_to_device() {
+    return false;
+  }
 };
 
 /**
@@ -133,12 +136,14 @@ public:
 
   void initialize(std::size_t i,
                   std::size_t _batch_capacity,
-                  std::size_t _batch_flush_size) {
+                  std::size_t _batch_flush_size,
+		  bool _is_checksum_offloaded_to_device) {
     ceph_assert(_batch_capacity > 0);
     index = i;
     batch_capacity = _batch_capacity;
     batch_flush_size = _batch_flush_size;
     pending.reserve(batch_capacity);
+    checksum_offloaded_to_device = _is_checksum_offloaded_to_device;
   }
 
   // Add to the batch, the future will be resolved after the batch is
@@ -199,6 +204,8 @@ private:
   };
   using maybe_promise_result_t = std::optional<promise_result_t>;
   std::optional<seastar::shared_promise<maybe_promise_result_t> > io_promise;
+
+  bool checksum_offloaded_to_device = false;
 };
 
 /**

@@ -186,6 +186,10 @@ public:
     return get_journal_end();
   }
 
+  bool is_checksum_offloaded_to_device() final {
+    return cjs.is_checksum_offloaded_to_device();
+  }
+
   // Test interfaces
   
   CircularJournalSpace& get_cjs() {

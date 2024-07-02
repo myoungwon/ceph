@@ -73,7 +73,8 @@ ceph::bufferlist RecordBatch::encode_batch(
   submitting_size = pending.get_size();
   submitting_length = pending.size.get_encoded_length();
   submitting_mdlength = pending.size.get_mdlength();
-  auto bl = encode_records(pending, committed_to, segment_nonce);
+  auto bl = encode_records(pending, committed_to, segment_nonce,
+    checksum_offloaded_to_device);
   // Note: pending is cleared here
   assert(bl.length() == submitting_length);
   return bl;
@@ -115,7 +116,8 @@ RecordBatch::submit_pending_fast(
   assert(state == state_t::EMPTY);
   assert(evaluate_submit(record.size, block_size).submit_size == new_size);
   assert(group.size == new_size);
-  auto bl = encode_records(group, committed_to, segment_nonce);
+  auto bl = encode_records(group, committed_to, segment_nonce,
+    checksum_offloaded_to_device);
   // Note: group is cleared here
   assert(bl.length() == new_size.get_encoded_length());
   return bl;
@@ -143,7 +145,8 @@ RecordSubmitter::RecordSubmitter(
               preferred_fullness <= 1);
   free_batch_ptrs.reserve(io_depth + 1);
   for (std::size_t i = 0; i <= io_depth; ++i) {
-    batches[i].initialize(i, batch_capacity, batch_flush_size);
+    batches[i].initialize(i, batch_capacity, batch_flush_size,
+      ja.is_checksum_offloaded_to_device());
     free_batch_ptrs.push_back(&batches[i]);
   }
   pop_free_batch();

@@ -168,8 +168,9 @@ RecordScanner::read_validate_record_metadata(
         read_validate_record_metadata_ertr::ready_future_marker{},
         std::make_pair(std::move(header), std::move(bl)));
     });
-  }).safe_then([](auto p) {
-    if (p && validate_records_metadata(p->second)) {
+  }).safe_then([this](auto p) {
+    if ((p && validate_records_metadata(p->second)) ||
+	(p && is_checksum_offloaded_to_device())) {
       return read_validate_record_metadata_ret(
         read_validate_record_metadata_ertr::ready_future_marker{},
         std::move(*p)
@@ -193,9 +194,12 @@ RecordScanner::read_validate_data_ret RecordScanner::read_validate_data(
   return read(
     data_addr,
     header.dlength
-  ).safe_then([=, &header](auto bptr) {
+  ).safe_then([=, &header, this](auto bptr) {
     bufferlist bl;
     bl.append(bptr);
+    if (is_checksum_offloaded_to_device()) {
+      return true;
+    }
     return validate_records_data(header, bl);
   });
 }
