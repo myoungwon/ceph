@@ -46,7 +46,7 @@ enum class rbm_feature_t : uint64_t {
 struct rbm_superblock_t {
   size_t size = 0;
   size_t block_size = 0;
-  uint64_t feature = 0;
+  uint64_t feature = 1;
   uint64_t journal_size = 0;
   checksum_t crc = 0;
   device_config_t config;

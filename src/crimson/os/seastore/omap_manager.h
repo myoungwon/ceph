@@ -17,7 +17,8 @@
 //TODO: calculate the max key and value sizes the current layout supports,
 //	and return errors during insert if the max is exceeded.
 #define OMAP_INNER_BLOCK_SIZE 8192
-#define OMAP_LEAF_BLOCK_SIZE 65536
+//#define OMAP_LEAF_BLOCK_SIZE 65536
+#define OMAP_LEAF_BLOCK_SIZE 16384
 
 namespace crimson::os::seastore {
 

@@ -87,6 +87,7 @@ NVMeBlockDevice::mount_ret NVMeBlockDevice::mount()
 	"Invalid error in NVMeBlockDevice::do_shard_mount"
     });
   }).then([this] () {
+#if 0
     if (is_end_to_end_data_protection()) {
       return identify_namespace(device
       ).safe_then([] (auto id_namespace_data) {
@@ -106,6 +107,7 @@ NVMeBlockDevice::mount_ret NVMeBlockDevice::mount()
 	return mount_ertr::now();
       });
     }
+#endif
     return mount_ertr::now();
   });
 }
@@ -125,6 +127,7 @@ write_ertr::future<> NVMeBlockDevice::write(
   if (stream >= stream_id_count) {
     supported_stream = WRITE_LIFE_NOT_SET;
   }
+#if 0
   if (is_end_to_end_data_protection()) {
     return seastar::do_with(
       std::move(bptr),
@@ -132,6 +135,7 @@ write_ertr::future<> NVMeBlockDevice::write(
       return nvme_write(offset, bptr.length(), bptr.c_str());
     });
   }
+#endif
   return seastar::do_with(
     std::move(bptr),
     [this, offset, length, supported_stream] (auto& bptr) {
@@ -163,9 +167,11 @@ read_ertr::future<> NVMeBlockDevice::read(
   }
   assert((length % super.block_size) == 0);
 
+#if 0
   if (is_end_to_end_data_protection()) {
     return nvme_read(offset, length, bptr.c_str());
   }
+#endif
 
   return device.dma_read(offset, bptr.c_str(), length).handle_exception(
     [](auto e) -> read_ertr::future<size_t> {
@@ -193,6 +199,7 @@ write_ertr::future<> NVMeBlockDevice::writev(
   if (stream >= stream_id_count) {
     supported_stream = WRITE_LIFE_NOT_SET;
   }
+#if 0
   if (is_end_to_end_data_protection()) {
     return seastar::do_with(
       std::move(bl),
@@ -200,6 +207,7 @@ write_ertr::future<> NVMeBlockDevice::writev(
       return nvme_write(offset, bl.length(), bl.c_str());
     });
   }
+#endif
   bl.rebuild_aligned(super.block_size);
 
   return seastar::do_with(
@@ -374,9 +382,11 @@ nvme_command_ertr::future<> NVMeBlockDevice::try_enable_end_to_end_protection() 
 }
 
 nvme_command_ertr::future<> NVMeBlockDevice::initialize_nvme_features() {
+#if 0
   if (!crimson::common::get_conf<bool>("seastore_disable_end_to_end_data_protection")) {
     return try_enable_end_to_end_protection();
   }
+#endif
   return nvme_command_ertr::now();
 }
 
