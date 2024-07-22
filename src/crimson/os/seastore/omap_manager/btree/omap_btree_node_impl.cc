@@ -553,6 +553,9 @@ OMapLeafNode::insert(
            interruptible::ready_future_marker{},
            mutation_result_t(mutation_status_t::SUCCESS, std::nullopt, std::nullopt));
   } else {
+
+    INFOT("insert overflow {}", oc.t, key);
+
     return make_split_children(oc).si_then([this, oc, &key, &value] (auto tuple) {
       auto [left, right, pivot] = tuple;
       auto replace_pt = find_string_key(key);

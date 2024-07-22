@@ -160,4 +160,4 @@ options:
   desc: When false, upon mkfs, try to discover whether the nvme device supports
         internal checksum feature without using sever CPU then enable if available,
         set to true to disable unconditionally.
-  default: false
+  default: true

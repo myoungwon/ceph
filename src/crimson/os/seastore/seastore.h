@@ -491,6 +491,7 @@ public:
     Device* device;
     const uint32_t max_object_size;
     bool is_test;
+    uint64_t test_op_count = 0;
 
     std::vector<Device*> secondaries;
     TransactionManagerRef transaction_manager;

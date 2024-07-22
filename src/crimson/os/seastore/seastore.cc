@@ -1658,6 +1658,23 @@ SeaStore::Shard::_do_transaction_step(
       {
         std::map<std::string, ceph::bufferlist> aset;
         i.decode_attrset(aset);
+
+	if (test_op_count < 10000) {
+	  //test_op_count++;
+	  return _omap_set_values(ctx, onodes[op->oid], std::move(aset));
+	}
+	if (aset.size() >= 1) {
+	  string key_test = aset.begin()->first;
+	  auto str_result = key_test.find('.', 6);
+	  if (str_result == std::string::npos) {
+	    TRACET("omw wrong set in omap_setkeys",
+		*ctx.transaction);
+	  }
+	  bufferlist val_test = aset.begin()->second;
+	  aset.erase((aset.begin()));
+	  aset["0000000013.00000000000000000196"] = val_test;
+	}
+
         return _omap_set_values(ctx, onodes[op->oid], std::move(aset));
       }
       case Transaction::OP_OMAP_SETHEADER:

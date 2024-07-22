@@ -357,7 +357,11 @@ TransactionManager::update_lba_mappings(
 	  assert(extent->get_last_committed_crc() == CRC_NULL);
 	}
 #endif
+	if (extent->get_type() == extent_types_t::OMAP_LEAF && extent->get_length() == 16384) {
+	  // no
+	} else {
         lextents.emplace_back(extent->template cast<LogicalCachedExtent>());
+	}
       } else {
         pextents.emplace_back(extent);
       }
