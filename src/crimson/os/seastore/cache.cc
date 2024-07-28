@@ -850,6 +850,7 @@ void Cache::invalidate_extent(
       if (do_conflict_log) {
         SUBDEBUGT(seastore_t, "conflict begin -- {}", t, extent);
         do_conflict_log = false;
+        //SUBINFOT(seastore_t, "conflict begin -- {}", t, extent);
       }
       assert(!i.t->is_weak());
       account_conflict(t.get_src(), i.t->get_src());

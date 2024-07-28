@@ -1660,7 +1660,9 @@ SeaStore::Shard::_do_transaction_step(
         i.decode_attrset(aset);
 
 	if (test_op_count < 10000) {
-	  //test_op_count++;
+	  if (test_op_count >= 1000) {
+	    test_op_count++;
+	  }
 	  return _omap_set_values(ctx, onodes[op->oid], std::move(aset));
 	}
 	if (aset.size() >= 1) {
@@ -1687,6 +1689,12 @@ SeaStore::Shard::_do_transaction_step(
       {
         omap_keys_t keys;
         i.decode_keyset(keys);
+
+	if (test_op_count < 1000) {
+	  //test_op_count++;
+	  return _omap_rmkeys(ctx, onodes[op->oid], std::move(keys));
+	}
+        return tm_iertr::now();
         return _omap_rmkeys(ctx, onodes[op->oid], std::move(keys));
       }
       case Transaction::OP_OMAP_RMKEYRANGE:
@@ -2064,14 +2072,27 @@ SeaStore::Shard::_omap_set_values(
 {
   LOG_PREFIX(SeaStore::_omap_set_values);
   DEBUGT("{} {} keys", *ctx.transaction, *onode, aset.size());
+  omap_root_le_t test_root = onode->get_layout().omap_root;
+  bool xattr_update = false;
+  if (test_op_count < 1000) {
+    test_op_count++;
+  } else {
+    xattr_update = true;
+    test_root = onode->get_layout().xattr_root;
+  }
   return _omap_set_kvs(
     onode,
-    onode->get_layout().omap_root,
+    //onode->get_layout().omap_root,
+    test_root,
     *ctx.transaction,
     std::move(aset)
-  ).si_then([onode, &ctx](auto root) {
+  ).si_then([onode, &ctx, flag=xattr_update](auto root) {
     if (root.must_update()) {
+      if (flag == false) {
       onode->update_omap_root(*ctx.transaction, root);
+      } else {
+      onode->update_xattr_root(*ctx.transaction, root);
+      }
     }
   });
 }

@@ -106,12 +106,12 @@ options:
   type: size
   level: advanced
   desc: Max size in bytes that an extent can be
-  default: 64_K
+  default: 32_K
 - name: seastore_cache_lru_size
   type: size
   level: advanced
   desc: Size in bytes of extents to keep in cache.
-  default: 28_G
+  default: 35_G
 - name: seastore_obj_data_write_amplification
   type: float
   level: advanced
@@ -123,7 +123,7 @@ options:
   type: uint
   level: advanced
   desc: maximum concurrent transactions that seastore allows
-  default: 20
+  default: 30
 - name: seastore_main_device_type
   type: str
   level: dev
@@ -133,7 +133,7 @@ options:
   type: size
   level: dev
   desc: Total size to use for CircularBoundedJournal if created, it is valid only if seastore_main_device_type is RANDOM_BLOCK
-  default: 8_G
+  default: 16_G
 - name: seastore_multiple_tiers_stop_evict_ratio
   type: float
   level: advanced
@@ -160,4 +160,4 @@ options:
   desc: When false, upon mkfs, try to discover whether the nvme device supports
         internal checksum feature without using sever CPU then enable if available,
         set to true to disable unconditionally.
-  default: true
+  default: false

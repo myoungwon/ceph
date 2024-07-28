@@ -51,6 +51,8 @@ struct OMapNode : LogicalCachedExtent {
   OMapNode(ceph::bufferptr &&ptr) : LogicalCachedExtent(std::move(ptr)) {}
   OMapNode(const OMapNode &other)
   : LogicalCachedExtent(other) {}
+  OMapNode(const OMapNode &other, share_buffer_t s)
+  : LogicalCachedExtent(other, s) {}
 
   using get_value_iertr = base_iertr;
   using get_value_ret = OMapManager::omap_get_value_ret;

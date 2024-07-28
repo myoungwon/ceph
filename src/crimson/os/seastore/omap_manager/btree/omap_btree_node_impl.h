@@ -166,7 +166,7 @@ struct OMapLeafNode
 
   CachedExtentRef duplicate_for_write(Transaction&) final {
     assert(delta_buffer.empty());
-    return CachedExtentRef(new OMapLeafNode(*this));
+    return CachedExtentRef(new OMapLeafNode(*this, share_buffer_t{}));
   }
 
   delta_leaf_buffer_t delta_buffer;

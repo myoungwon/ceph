@@ -103,6 +103,7 @@ OMapInnerNode::handle_split(
            interruptible::ready_future_marker{},
            mutation_result_t(mutation_status_t::SUCCESS, std::nullopt, std::nullopt));
   } else {
+    TRACET(" omw handle_split overflow !!! ", oc.t);
     return make_split_insert(oc, iter + 1, pivot, right->get_laddr())
       .si_then([this, oc] (auto m_result) {
        return dec_ref(oc, get_laddr())
@@ -533,6 +534,10 @@ OMapLeafNode::insert(
   LOG_PREFIX(OMapLeafNode::insert);
   DEBUGT("{} -> {}, this: {}", oc.t, key, value, *this);
   bool overflow = extent_will_overflow(key.size(), value.length());
+  auto replace_pt = find_string_key(key);
+  if (replace_pt != iter_end()) {
+    overflow = false;
+  }
   if (!overflow) {
     if (!is_mutable()) {
       auto mut = oc.tm.get_mutable_extent(oc.t, this)->cast<OMapLeafNode>();
@@ -554,7 +559,7 @@ OMapLeafNode::insert(
            mutation_result_t(mutation_status_t::SUCCESS, std::nullopt, std::nullopt));
   } else {
 
-    INFOT("insert overflow {}", oc.t, key);
+    //INFOT("insert overflow {} laddr hint {}", oc.t, key, oc.hint);
 
     return make_split_children(oc).si_then([this, oc, &key, &value] (auto tuple) {
       auto [left, right, pivot] = tuple;
@@ -571,12 +576,18 @@ OMapLeafNode::insert(
       } else {
         ++(oc.t.get_omap_tree_stats().num_inserts);
         auto insert_pt = string_lower_bound(key);
+	LOG_PREFIX(OMapLeafNode::insert);
+	//INFOT("insert overflow {} size {}", oc.t, key, value.length());
         if (key < pivot) {  //left
+	INFOT("omw insert overflow {} size {} insert_pt->idx {} left node size {} get size {}", oc.t, key, value.length(), insert_pt->get_index(), left->get_node_size(), right->get_size());
           auto mut_iter = left->iter_idx(insert_pt->get_index());
           left->journal_leaf_insert(mut_iter, key, value, left->maybe_get_delta_buffer());
         } else {
+	//INFOT("insert overflow {} size {} insert_pt->idx {} left node size {} get size {}", oc.t, key, value.length(), insert_pt->get_index(), left->get_node_size(), right->get_size());
           auto mut_iter = right->iter_idx(insert_pt->get_index() - left->get_node_size());
           right->journal_leaf_insert(mut_iter, key, value, right->maybe_get_delta_buffer());
+	  //auto mut = oc.tm.get_mutable_extent(oc.t, this)->cast<OMapLeafNode>();
+	  //return mut->insert(oc, key, value);
         }
       }
       ++(oc.t.get_omap_tree_stats().extents_num_delta);
