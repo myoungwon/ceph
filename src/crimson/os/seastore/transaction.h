@@ -80,6 +80,11 @@ struct rewrite_stats_t {
   }
 };
 
+struct rbm_pending_ool_t {
+  bool is_conflicted = false;
+  std::list<CachedExtentRef> pending_extents;
+};
+
 /**
  * Transaction
  *
@@ -554,6 +559,14 @@ public:
     return static_cast<T&>(*view);
   }
 
+  void set_pending_ool(std::shared_ptr<rbm_pending_ool_t> ptr) {
+    pending_ool = ptr;
+  }
+
+  std::shared_ptr<rbm_pending_ool_t> get_pending_ool() {
+    return pending_ool;
+  }
+
 private:
   friend class Cache;
   friend Ref make_test_transaction();
@@ -650,6 +663,8 @@ private:
   const src_t src;
 
   transaction_id_t trans_id = TRANS_ID_NULL;
+
+  std::shared_ptr<rbm_pending_ool_t> pending_ool;
 };
 using TransactionRef = Transaction::Ref;
 

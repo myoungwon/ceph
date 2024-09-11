@@ -990,8 +990,8 @@ void Cache::mark_transaction_conflicted(
     }
     efforts.mutate_delta_bytes += delta_stat.bytes;
 
-    for (auto &i: t.pre_alloc_list) {
-      epm.mark_space_free(i->get_paddr(), i->get_length());
+    if (t.get_pending_ool()) {
+      t.get_pending_ool()->is_conflicted = true;
     }
 
     auto& ool_stats = t.get_ool_write_stats();

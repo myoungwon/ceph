@@ -987,7 +987,16 @@ RandomBlockOolWriter::alloc_write_ool_extents(
     return alloc_write_iertr::now();
   }
   return seastar::with_gate(write_guard, [this, &t, &extents] {
-    return do_write(t, extents);
+    std::shared_ptr<rbm_pending_ool_t> ptr = std::make_shared<rbm_pending_ool_t>();
+    t.set_pending_ool(ptr);
+    return do_write(t, extents
+    ).finally([&t, this, ptr=ptr] {
+      if (ptr->is_conflicted) {
+	for (auto &e : ptr->pending_extents) {
+	  rb_cleaner->mark_space_free(e->get_paddr(), e->get_length());
+	}
+      }
+    });
   });
 }
 
@@ -1060,7 +1069,11 @@ RandomBlockOolWriter::do_write(
     TRACE("current extent: base off {} len {},\
       maybe-merged current extent: base off {} len {}",
       paddr, ex->get_length(), writes.back().offset, writes.back().bp.length());
+    assert(t.get_pending_ool());
+    t.get_pending_ool()->pending_extents.push_back(ex);
   }
+  
+  assert(t.get_valid_pre_alloc_list().size() == t.get_pending_ool().size());
 
   for (auto &w : writes) {
     if (w.mergeable_bps.size() > 0) {
