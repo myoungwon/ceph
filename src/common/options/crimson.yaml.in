@@ -128,7 +128,7 @@ options:
   type: str
   level: dev
   desc: The main device type seastore uses (SSD or RANDOM_BLOCK_SSD)
-  default: SSD
+  default: RANDOM_BLOCK_SSD
 - name: seastore_cbjournal_size
   type: size
   level: dev
