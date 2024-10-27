@@ -463,8 +463,26 @@ void PG::prepare_write(pg_info_t &info,
     t, &km, coll_ref->get_cid(), pgmeta_oid,
     peering_state.get_pgpool().info.require_rollback());
   if (!km.empty()) {
-    t.omap_setkeys(coll_ref->get_cid(), pgmeta_oid, km);
+    if (shard_services.get_store().has_log_store()) {
+      t.log_setkeys(coll_ref->get_cid(), pgmeta_oid, km);
+    } else {
+      t.omap_setkeys(coll_ref->get_cid(), pgmeta_oid, km);
+    }
   }
+
+  auto num_ops = t.get_num_ops();
+  ObjectStore::Transaction::iterator i = t.begin();
+  for (int pos = 0; i.have_op(); ++pos) {
+    if (pos >= num_ops && shard_services.get_store().has_log_store()) {
+      ObjectStore::Transaction::Op *op = i.decode_op();
+      if (op->op == ObjectStore::Transaction::OP_OMAP_RMKEYS) {
+	op->op = ObjectStore::Transaction::OP_LOG_RMKEYS;
+      } else if (op->op == ObjectStore::Transaction::OP_OMAP_RMKEYRANGE) {
+	op->op = ObjectStore::Transaction::OP_LOG_RMKEYRANGE;
+      }
+    }
+  }
+
   if (!key_to_remove.empty()) {
     t.omap_rmkey(coll_ref->get_cid(), pgmeta_oid, key_to_remove);
   }

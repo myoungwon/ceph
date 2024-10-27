@@ -66,6 +66,14 @@ public:
     const ghobject_t &oid,     ///< [in] oid
     const std::optional<std::string> &start ///< [in] start, empty for begin
     ) final; ///< @return <done, values> values.empty() iff done
+  
+  read_errorator::future<std::tuple<bool, omap_values_t>> log_get_values(
+    CollectionRef c,           ///< [in] collection
+    const ghobject_t &oid,     ///< [in] oid
+    const std::optional<std::string> &start ///< [in] start, empty for begin
+    ) final {
+    return omap_get_values(c, oid, start);
+  }
 
   seastar::future<std::tuple<std::vector<ghobject_t>, ghobject_t>> list_objects(
     CollectionRef c,

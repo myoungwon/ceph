@@ -89,6 +89,12 @@ public:
       const std::optional<std::string> &start ///< [in] start, empty for begin
       ) = 0; ///< @return <done, values> values.empty() only if done
 
+    virtual read_errorator::future<std::tuple<bool, omap_values_t>> log_get_values(
+      CollectionRef c,           ///< [in] collection
+      const ghobject_t &oid,     ///< [in] oid
+      const std::optional<std::string> &start ///< [in] start, empty for begin
+      ) = 0; ///< @return <done, values> values.empty() only if done
+
     virtual get_attr_errorator::future<bufferlist> omap_get_header(
       CollectionRef c,
       const ghobject_t& oid) = 0;
@@ -156,6 +162,10 @@ public:
       uint64_t len) = 0;
 
     virtual unsigned get_max_attr_name_length() const = 0;
+
+    virtual bool has_log_store() {
+      return false;
+    }
   };
 
 public:
