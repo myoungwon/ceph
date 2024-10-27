@@ -1326,7 +1326,9 @@ public:
     std::map<std::string,ceph::buffer::list> *km,
     const coll_t& coll,
     const ghobject_t &log_oid,
-    bool require_rollback);
+    bool require_rollback,
+    std::set<std::string> *log_to_remove,
+    std::set<std::pair<std::string, std::string>> *log_to_rmkeyrange);
 
   static void write_log_and_missing_wo_missing(
     ObjectStore::Transaction& t,
@@ -1346,6 +1348,8 @@ public:
     const pg_missing_tracker_t &missing,
     bool require_rollback,
     bool *rebuilt_missing_set_with_deletes,
+    std::set<std::string> *log_to_remove,
+    std::set<std::pair<std::string, std::string>> *log_to_rmkeyrange,
     const DoutPrefixProvider *dpp = nullptr);
 
   static void _write_log_and_missing_wo_missing(
@@ -1386,6 +1390,8 @@ public:
     eversion_t write_from_dups,
     bool *may_include_deletes_in_missing_dirty,
     std::set<std::string> *log_keys_debug,
+    std::set<std::string> *log_to_remove,
+    std::set<std::pair<std::string, std::string>> *log_to_rmkeyrange,
     const DoutPrefixProvider *dpp = nullptr
     );
 

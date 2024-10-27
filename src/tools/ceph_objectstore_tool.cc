@@ -619,6 +619,8 @@ int write_pg(ObjectStore::Transaction &t, epoch_t epoch, pg_info_t &info,
 
   coll_t coll(info.pgid);
   map<string,bufferlist> km;
+  set<string> log_to_remove;
+  set<std::pair<string, string>> log_to_rmkeyrange;
   const bool require_rollback = !info.pgid.is_no_shard();
   if (!divergent.empty()) {
     ceph_assert(missing.get_items().empty());
@@ -631,8 +633,20 @@ int write_pg(ObjectStore::Transaction &t, epoch_t epoch, pg_info_t &info,
     PGLog::write_log_and_missing(
       t, &km, log, coll, info.pgid.make_pgmeta_oid(), tmissing,
       require_rollback,
-      &rebuilt_missing_set_with_deletes);
+      &rebuilt_missing_set_with_deletes,
+      &log_to_remove,
+      &log_to_rmkeyrange);
   }
+  if (!log_to_remove.empty()) {
+    t.omap_rmkeys(coll, info.pgid.make_pgmeta_oid(), log_to_remove);
+  }
+  if (!log_to_rmkeyrange.empty()) {
+    for (auto &p : log_to_rmkeyrange) {
+      t.omap_rmkeyrange(coll, info.pgid.make_pgmeta_oid(),
+	  p.first, p.second);
+    }
+  }
+
   t.omap_setkeys(coll, info.pgid.make_pgmeta_oid(), km);
   return 0;
 }
@@ -1169,6 +1183,8 @@ int expand_log(
     info.last_user_version = target_version.version + 1;
 
     std::map<string, bufferlist> km;
+    std::set<string> log_to_remove;
+    std::set<std::pair<string, string>> log_to_rmkeyrange;
     ObjectStore::Transaction t;
 
     pg_fast_info_t fast;
@@ -1180,12 +1196,23 @@ int expand_log(
       &km,
       coll_t(pgid),
       pgid.make_pgmeta_oid(),
-      pool_info->require_rollback());
+      pool_info->require_rollback(),
+      &log_to_remove,
+      &log_to_rmkeyrange);
 
     for (auto &ent : km) {
       std::cout << "km key: " << ent.first << std::endl;
     }
 
+    if (!log_to_remove.empty()) {
+      t.omap_rmkeys(coll_t(pgid), pgid.make_pgmeta_oid(), log_to_remove);
+    }
+    if (!log_to_rmkeyrange.empty()) {
+      for (auto &p : log_to_rmkeyrange) {
+	t.omap_rmkeyrange(coll_t(pgid), pgid.make_pgmeta_oid(),
+	    p.first, p.second);
+      }
+    }
     t.omap_setkeys(coll_t(pgid), pgid.make_pgmeta_oid(), km);
     fs->queue_transaction(ch, std::move(t));
     return 0;

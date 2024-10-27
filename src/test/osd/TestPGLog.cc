@@ -2466,7 +2466,19 @@ public:
     hoid.oid = "log";
     ghobject_t log_oid(hoid);
     map<string, bufferlist> km;
-    write_log_and_missing(t, &km, test_coll, log_oid, false);
+    set<string> log_to_remove;
+    set<std::pair<string, string>> log_to_rmkeyrange;
+    write_log_and_missing(t, &km, test_coll, log_oid, false,
+      &log_to_remove, &log_to_rmkeyrange);
+    if (!log_to_remove.empty()) {
+      t.omap_rmkeys(test_coll, log_oid, log_to_remove);
+    }
+    if (!log_to_rmkeyrange.empty()) {
+      for (auto &p : log_to_rmkeyrange) {
+	t.omap_rmkeyrange(test_coll, log_oid,
+	  p.first, p.second);
+      }
+    }
     if (!km.empty()) {
       t.omap_setkeys(test_coll, log_oid, km);
     }

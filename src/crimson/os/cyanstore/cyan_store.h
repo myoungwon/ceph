@@ -73,6 +73,15 @@ public:
       const std::optional<std::string> &start ///< [in] start, empty for begin
       ) final;
 
+    read_errorator::future<std::tuple<bool, omap_values_t>> log_get_values(
+      CollectionRef c,           ///< [in] collection
+      const ghobject_t &oid,     ///< [in] oid
+      const std::optional<std::string> &start ///< [in] start, empty for begin
+      ) final {
+      ceph_assert(0 == "log_get_values is unsupported");
+      return read_errorator::make_ready_future<omap_values_paged_t>();
+    }
+
     get_attr_errorator::future<ceph::bufferlist> omap_get_header(
       CollectionRef c,
       const ghobject_t& oid) final;

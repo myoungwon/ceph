@@ -929,8 +929,20 @@ void PG::prepare_write(
       this);
     ceph_assert(ret == 0);
   }
+  set<string> to_remove;
+  set<std::pair<string, string>> to_rmkeyrange;
   pglog.write_log_and_missing(
-    t, &km, coll, pgmeta_oid, pool.info.require_rollback());
+    t, &km, coll, pgmeta_oid, pool.info.require_rollback(),
+    &to_remove, &to_rmkeyrange);
+  if (!to_remove.empty()) {
+    t.omap_rmkeys(coll, pgmeta_oid, to_remove);
+  }
+  if (!to_rmkeyrange.empty()) {
+    for (auto &p : to_rmkeyrange) {
+      t.omap_rmkeyrange(coll, pgmeta_oid,
+	p.first, p.second);
+    }
+  }
   if (!km.empty())
     t.omap_setkeys(coll, pgmeta_oid, km);
   if (!key_to_remove.empty())
