@@ -134,19 +134,29 @@ public:
       const ghobject_t& oid,
       const omap_keys_t& keys) final;
 
+    read_errorator::future<omap_values_paged_t> omap_get_values(
+      CollectionRef c,           ///< [in] collection
+      const ghobject_t &oid,     ///< [in] oid
+      const std::optional<std::string> &start, ///< [in] start, empty for begin
+      omap_type_t omap_type
+    );  ///< @return <done, values> values.empty() iff done
+
     /// Retrieves paged set of values > start (if present)
     read_errorator::future<omap_values_paged_t> omap_get_values(
       CollectionRef c,           ///< [in] collection
       const ghobject_t &oid,     ///< [in] oid
       const std::optional<std::string> &start ///< [in] start, empty for begin
-      ) final; ///< @return <done, values> values.empty() iff done
+      ) final ///< @return <done, values> values.empty() iff done
+    {
+      return omap_get_values(c, oid, start, omap_type_t::OMAP_LARGE_LEAF);
+    }
 
     read_errorator::future<omap_values_paged_t> log_get_values(
       CollectionRef c,           ///< [in] collection
       const ghobject_t &oid,     ///< [in] oid
       const std::optional<std::string> &start ///< [in] start, empty for begin
       ) final {
-      return omap_get_values(c, oid, start);
+      return omap_get_values(c, oid, start, omap_type_t::OMAP_SMALL_LEAF);
     }
 
     bool support_log_interfaces() {
@@ -398,7 +408,8 @@ public:
     base_iertr::future<omap_values_paged_t> do_omap_get_values(
       Transaction& t,
       Onode& onode,
-      const std::optional<std::string>& start);
+      const std::optional<std::string>& start,
+      omap_root_le_t& omap_root);
 
     base_iertr::future<fiemap_ret_t> _fiemap(
       Transaction &t,
@@ -451,7 +462,8 @@ public:
     tm_ret _omap_set_values(
       internal_context_t &ctx,
       OnodeRef &onode,
-      std::map<std::string, ceph::bufferlist> &&aset);
+      std::map<std::string, ceph::bufferlist> &&aset,
+      omap_root_le_t &omap_root);
     tm_ret _omap_set_header(
       internal_context_t &ctx,
       OnodeRef &onode,
@@ -462,12 +474,14 @@ public:
     tm_ret _omap_rmkeys(
       internal_context_t &ctx,
       OnodeRef &onode,
-      omap_keys_t &&aset);
+      omap_keys_t &&aset,
+      omap_root_le_t &omap_root);
     tm_ret _omap_rmkeyrange(
       internal_context_t &ctx,
       OnodeRef &onode,
       std::string first,
-      std::string last);
+      std::string last,
+      omap_root_le_t &omap_root);
     tm_ret _truncate(
       internal_context_t &ctx,
       OnodeRef &onode, uint64_t size);
