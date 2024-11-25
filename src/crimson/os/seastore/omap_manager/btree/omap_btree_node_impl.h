@@ -34,7 +34,7 @@ struct OMapInnerNode
   template <typename... T>
   OMapInnerNode(T&&... t) :
     OMapNode(std::forward<T>(t)...),
-    StringKVInnerNodeLayout(get_bptr().c_str()) {}
+    StringKVLeafNodeLayout(get_bptr().c_str(), get_bptr().length()) {}
 
   omap_node_meta_t get_node_meta() const final { return get_meta(); }
   bool extent_will_overflow(size_t ksize, std::optional<size_t> vsize) const {

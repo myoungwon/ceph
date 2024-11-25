@@ -26,8 +26,11 @@ class BtreeOMapManager : public OMapManager {
   TransactionManager &tm;
 
   omap_context_t get_omap_context(
-    Transaction &t, laddr_t addr_min) {
-    return omap_context_t{tm, t, addr_min};
+    Transaction &t, laddr_t addr_min, omap_type_t type) {
+    ceph_assert(type == omap_type_t::OMAP_LARGE_LEAF || 
+		type == omap_type_t::OMAP_SMALL_LEAF ||
+		type == omap_type_t::XATTR);
+    return omap_context_t{tm, t, addr_min, get_leaf_size(type)};
   }
 
   /* get_omap_root
@@ -105,6 +108,15 @@ public:
     omap_root_t &omap_root,
     Transaction &t) final;
 
+  extent_len_t get_leaf_size(omap_type_t type) {
+    if (type == omap_type_t::OMAP_SMALL_LEAF) {
+      return OMAP_SMALL_LEAF_BLOCK_SIZE;
+    }
+    ceph_assert(type != omap_type_t::NONE);
+    ceph_assert(type == omap_type_t::OMAP_LARGE_LEAF ||
+		type == omap_type_t::XATTR);
+    return OMAP_LARGE_LEAF_BLOCK_SIZE;
+  }
 };
 using BtreeOMapManagerRef = std::unique_ptr<BtreeOMapManager>;
 
