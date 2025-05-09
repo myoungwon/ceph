@@ -6,7 +6,7 @@ options:
   type: uint
   level: advanced
   desc: Number of obcs to cache
-  default: 512
+  default: 51200
 - name: crimson_osd_scheduler_concurrency
   type: uint
   level: advanced
@@ -111,7 +111,7 @@ options:
   type: size
   level: advanced
   desc: Size in bytes of extents to keep in cache.
-  default: 64_M
+  default: 40_G
 - name: seastore_obj_data_write_amplification
   type: float
   level: advanced
@@ -123,17 +123,17 @@ options:
   type: uint
   level: advanced
   desc: maximum concurrent transactions that seastore allows
-  default: 8
+  default: 20
 - name: seastore_main_device_type
   type: str
   level: dev
   desc: The main device type seastore uses (SSD or RANDOM_BLOCK_SSD)
-  default: SSD
+  default: RANDOM_BLOCK_SSD
 - name: seastore_cbjournal_size
   type: size
   level: dev
   desc: Total size to use for CircularBoundedJournal if created, it is valid only if seastore_main_device_type is RANDOM_BLOCK
-  default: 5_G
+  default: 20_G
 - name: seastore_multiple_tiers_stop_evict_ratio
   type: float
   level: advanced
@@ -153,7 +153,7 @@ options:
   type: size
   level: dev
   desc: overwrite the existing data block based on delta if the overwrite size is equal to or less than the value, otherwise do overwrite based on remapping, set to 0 to enforce the remap-based overwrite.
-  default: 0
+  default: 4096
 - name: seastore_disable_end_to_end_data_protection 
   type: bool
   level: dev
