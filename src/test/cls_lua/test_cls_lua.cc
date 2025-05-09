@@ -1,5 +1,5 @@
 #include <errno.h>
-#include <lua.hpp>
+#include <lua5.4/lua.hpp>
 #include "include/types.h"
 #include "include/rados/librados.hpp"
 #include "gtest/gtest.h"

@@ -5,7 +5,7 @@
 #include <setjmp.h>
 #include <string>
 #include <sstream>
-#include <lua.hpp>
+#include <lua5.4/lua.hpp>
 #include "include/types.h"
 #include "objclass/objclass.h"
 #include "json_spirit/json_spirit.h"

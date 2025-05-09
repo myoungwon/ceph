@@ -5,7 +5,7 @@
 #include <string>
 #include <sstream>
 #include <math.h>
-#include <lua.hpp>
+#include <lua5.4/lua.hpp>
 #include "include/types.h"
 #include "include/buffer.h"
 #include "objclass/objclass.h"

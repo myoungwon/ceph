@@ -1,7 +1,7 @@
 #ifndef CEPH_CLS_LUA_H
 #define CEPH_CLS_LUA_H
 
-#include <lua.hpp>
+#include <lua5.4/lua.hpp>
 #include "include/types.h"
 
 #define LOG_LEVEL_DEFAULT 10
