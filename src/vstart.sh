@@ -1005,6 +1005,8 @@ $DAEMONOPTS
         bluestore block create = true
         bluestore allocator = bitmap
         bluestore alloc favor spatial locality = false
+
+	read_lease_interval = 2
         
 $BLUESTORE_OPTS
 

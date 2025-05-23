@@ -143,8 +143,10 @@ class PerShardState {
       throw crimson::common::system_shutdown_exception();
     }
     auto op = registry.create_operation<T>(std::forward<Args>(args)...);
+#if 0
     crimson::get_logger(ceph_subsys_osd).info(
       "PerShardState::{}, {}", __func__, *op);
+#endif
     auto fut = seastar::yield().then([op] {
       return op->start().finally([op /* by copy */] {
 	// ensure the op's lifetime is appropriate. It is not enough to

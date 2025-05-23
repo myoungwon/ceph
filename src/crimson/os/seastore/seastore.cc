@@ -1755,6 +1755,10 @@ SeaStore::Shard::_do_transaction_step(
         i.decode_bl(bl);
         DEBUGT("op SETATTR, oid={}, attr name={}, value length=0x{:x} ...",
                *ctx.transaction, oid, name, bl.length());
+#if 0
+        INFOT("op SETATTR, oid={}, attr name={}, value length=0x{:x} ...",
+               *ctx.transaction, oid, name, bl.length());
+#endif
         return _setattrs(ctx, *onode, std::move(to_set));
       }
       case Transaction::OP_SETATTRS:
@@ -1763,6 +1767,13 @@ SeaStore::Shard::_do_transaction_step(
         i.decode_attrset(to_set);
         DEBUGT("op SETATTRS, oid={}, attrs size={} ...",
                *ctx.transaction, oid, to_set.size());
+#if 0
+        INFOT("op SETATTRS, oid={}, attrs size={} ...",
+               *ctx.transaction, oid, to_set.size());
+       for (auto aa : to_set) {
+             INFOT("omw setattrs {} size {}", *ctx.transaction, aa.first, aa.second.length());
+	}
+#endif
         return _setattrs(ctx, *onode, std::move(to_set));
       }
       case Transaction::OP_RMATTR:
@@ -1784,6 +1795,35 @@ SeaStore::Shard::_do_transaction_step(
 	auto root = select_log_omap_root(*onode);
         DEBUGT("op OMAP_SETKEYS, oid={}, omap size={}, type={} ...",
                *ctx.transaction, oid, aset.size(), root.get_type());
+#if 0
+        INFOT("op OMAP_SETKEYS, oid={}, omap size={}, type={} ...",
+               *ctx.transaction, oid, aset.size(), root.get_type());
+#endif
+
+#if 0
+       std::string target;
+       for (auto aa : aset) {
+        //INFOT("omw {} size {}", *ctx.transaction, aa.first, aa.second.length());
+         if (aa.first.length() > 11 && aa.first[10] == '.') {
+           if (stored_key.empty()) {
+             stored_key = aa.first;
+           }
+           if (omw_count < 2000) {
+             omw_count++;
+           } else {
+             //INFOT("omw {} size {}", *ctx.transaction, aa.first, aa.second.length());
+             target = aa.first;
+             //INFOT("omw {} size {}", *ctx.transaction, target, aa.second.length());
+           }
+         }
+       }
+       if (!target.empty()) {
+         aset.insert(make_pair(stored_key, aset[target]));
+         aset.erase(target);
+       }
+#endif
+
+
         return omaptree_set_keys(
           *ctx.transaction,
           std::move(root),
@@ -1796,6 +1836,10 @@ SeaStore::Shard::_do_transaction_step(
         i.decode_bl(bl);
         DEBUGT("op OMAP_SETHEADER, oid={}, length=0x{:x} ...",
                *ctx.transaction, oid, bl.length());
+#if 0
+        INFOT("op OMAP_SETHEADER, oid={}, length=0x{:x} ...",
+               *ctx.transaction, oid, bl.length());
+#endif
         return _omap_set_header(ctx, *onode, std::move(bl));
       }
       case Transaction::OP_OMAP_RMKEYS:

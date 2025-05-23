@@ -257,7 +257,8 @@ public:
   void schedule_event_after(
     PGPeeringEventRef event,
     float delay) final {
-    start_peering_event_operation(std::move(*event), delay);
+    //start_peering_event_operation(std::move(*event), delay);
+    start_peering_event_operation(std::move(*event), 1);
   }
   std::vector<pg_shard_t> get_replica_recovery_order() const final {
     return peering_state.get_replica_recovery_order();

@@ -560,6 +560,8 @@ public:
     common::Throttle throttler;
 
     seastar::metrics::metric_group metrics;
+    std::string stored_key;
+    int omw_count = 0;
     void register_metrics();
 
     mutable shard_stats_t shard_stats;

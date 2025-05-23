@@ -440,6 +440,7 @@ omap_load_extent(
 {
   LOG_PREFIX(omap_load_extent);
   assert(end <= END_KEY);
+  SUBDEBUGT(seastore_omap, " omw root type {} string begin {}", oc.t, oc.type, begin);
   auto size = std::is_same_v<OMapInnerNode, T>
     ? OMAP_INNER_BLOCK_SIZE : get_leaf_size(oc.type);
   return oc.tm.read_extent<T>(

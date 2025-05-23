@@ -17,7 +17,7 @@ options:
   type: uint
   level: advanced
   desc: Number of obcs to cache
-  default: 56000
+  default: 28000
 - name: crimson_osd_scheduler_concurrency
   type: uint
   level: advanced
@@ -116,7 +116,7 @@ options:
   type: uint
   level: dev
   desc: The io depth limit to submit journal records
-  default: 5
+  default: 8
 - name: seastore_journal_batch_preferred_fullness
   type: float
   level: dev
@@ -146,12 +146,12 @@ options:
   type: size
   level: advanced
   desc: Max size in bytes that an extent can be, 0 to disable
-  default: 0
+  default: 32_K
 - name: seastore_cache_lru_size
   type: size
   level: advanced
   desc: Size in bytes of extents to keep in cache.
-  default: 40_G
+  default: 30_G
 - name: seastore_obj_data_write_amplification
   type: float
   level: advanced
@@ -193,7 +193,7 @@ options:
   type: size
   level: dev
   desc: overwrite the existing data block based on delta if the overwrite size is equal to or less than the value, otherwise do overwrite based on remapping, set to 0 to enforce the remap-based overwrite.
-  default: 4096
+  default: 8192
 - name: seastore_disable_end_to_end_data_protection 
   type: bool
   level: dev
