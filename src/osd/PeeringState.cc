@@ -4806,6 +4806,7 @@ void PeeringState::calc_trim_to_aggressive()
     auto rit = pg_log.get_log().log.rbegin();
     eversion_t by_n_to_keep; // start from tail
     eversion_t by_n_to_trim = eversion_t::max(); // start from head
+    #if 0
     for (size_t i = 0; it != pg_log.get_log().log.end(); ++it, ++rit) {
       i++;
       if (i > target && by_n_to_keep == eversion_t()) {
@@ -4825,6 +4826,8 @@ void PeeringState::calc_trim_to_aggressive()
     }
 
     pg_trim_to = std::min({by_n_to_keep, by_n_to_trim, limit});
+#endif
+    pg_trim_to = limit;
     psdout(10) << "pg_trim_to now " << pg_trim_to << dendl;
     ceph_assert(pg_trim_to <= pg_log.get_head());
   }
