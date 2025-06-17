@@ -275,6 +275,10 @@ public:
     }
   }
 
+  void add_logs(log_delta_t &l) {
+    logs.push_back(l);
+  }
+
   void replace_placeholder(CachedExtent& placeholder, CachedExtent& extent) {
     ceph_assert(!is_weak());
 
@@ -693,6 +697,8 @@ private:
   existing_block_stats_t existing_block_stats;
 
   std::list<view_ref> views;
+
+  std::list<log_delta_t> logs;
 
   /**
    * retire_set

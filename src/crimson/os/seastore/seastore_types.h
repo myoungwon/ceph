@@ -1445,8 +1445,9 @@ enum class extent_types_t : uint8_t {
   TEST_BLOCK_PHYSICAL = 14,
   BACKREF_INTERNAL = 15,
   BACKREF_LEAF = 16,
+  LOG_NODE = 17,
   // None and the number of valid extent_types_t
-  NONE = 17,
+  NONE = 18,
 };
 using extent_types_le_t = uint8_t;
 constexpr auto EXTENT_TYPES_MAX = static_cast<uint8_t>(extent_types_t::NONE);
@@ -1461,8 +1462,9 @@ constexpr bool is_data_type(extent_types_t type) {
 }
 
 constexpr bool is_logical_metadata_type(extent_types_t type) {
-  return type >= extent_types_t::ROOT_META &&
-         type <= extent_types_t::COLL_BLOCK;
+  return (type >= extent_types_t::ROOT_META &&
+         type <= extent_types_t::COLL_BLOCK) ||
+	 type == extent_types_t::LOG_NODE;
 }
 
 constexpr bool is_logical_type(extent_types_t type) {
@@ -2093,6 +2095,23 @@ struct alloc_delta_t {
     DENC_START(1, 1, p);
     denc(v.alloc_blk_ranges, p);
     denc(v.op, p);
+    DENC_FINISH(p);
+  }
+};
+
+struct log_delta_t {
+  enum class op_types_t : uint8_t {
+    NONE = 0,
+    SET = 1,
+    SEALED = 2
+  };
+  std::map<std::string, ceph::bufferlist> kv;
+  laddr_t prev;
+  log_delta_t() = default;
+  DENC(log_delta_t, v, p) {
+    DENC_START(1, 1, p);
+    denc(v.kv, p);
+    denc(v.prev, p);
     DENC_FINISH(p);
   }
 };
@@ -3080,6 +3099,7 @@ WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::extent_info_t)
 WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::segment_header_t)
 WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::alloc_blk_t)
 WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::alloc_delta_t)
+WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::log_delta_t)
 WRITE_CLASS_DENC_BOUNDED(crimson::os::seastore::segment_tail_t)
 
 #if FMT_VERSION >= 90000

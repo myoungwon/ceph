@@ -920,6 +920,14 @@ void Cache::commit_replace_extent(
   }
 
   next->on_replace_prior();
+  for (auto &&i: prev->read_transactions) {
+    LOG_PREFIX(Cache::invalidate_extent);
+    if (!i.t->conflicted && is_lba_node(prev->get_type())) {
+      SUBINFOT(seastore_t, "omw conflict ***prev -- {} ***next {}", t, *prev, *next);
+    }
+    for (auto &aa: t.read_set) {
+    }
+  }
   invalidate_extent(t, *prev);
 }
 
@@ -941,6 +949,7 @@ void Cache::invalidate_extent(
         SUBDEBUGT(seastore_t, "conflict begin -- {}", t, extent);
         do_conflict_log = false;
       }
+      //SUBINFOT(seastore_t, "conflict begin -- {}", t, extent);
       assert(!i.t->is_weak());
       account_conflict(t.get_src(), i.t->get_src());
       mark_transaction_conflicted(*i.t, extent);
@@ -1579,6 +1588,19 @@ record_t Cache::prepare_record(
     delta.type = extent_types_t::ALLOC_INFO;
     delta.bl = bl;
     record.push_back(std::move(delta));
+  }
+
+  for (auto &b : t.logs) {
+    bufferlist bl;
+    encode(b, bl);
+    delta_info_t delta;
+    delta.type = extent_types_t::LOG_NODE;
+    delta.bl = bl;
+    record.push_back(std::move(delta));
+    SUBDEBUGT(seastore_t, "omw delta size {} record md size {} d size {}",
+	     t, bl.length(),
+	    record.size.get_raw_mdlength(),
+	    record.size.dlength);
   }
 
   if (is_background_transaction(trans_src)) {
