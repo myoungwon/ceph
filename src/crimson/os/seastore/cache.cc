@@ -21,6 +21,7 @@
 #include "crimson/os/seastore/onode_manager/staged-fltree/node_extent_manager/seastore.h"
 #include "crimson/os/seastore/backref/backref_tree_node.h"
 #include "test/crimson/seastore/test_block.h"
+#include "crimson/os/seastore/logstore/log_node.h"
 
 using std::string_view;
 
@@ -925,6 +926,9 @@ void Cache::commit_replace_extent(
     if (!i.t->conflicted && is_lba_node(prev->get_type())) {
       SUBINFOT(seastore_t, "omw conflict ***prev -- {} ***next {}", t, *prev, *next);
     }
+    if (!i.t->conflicted && (prev->get_type() == extent_types_t::LOG_NODE || prev->get_type() == extent_types_t::LOG_LEAF)) {
+      SUBINFOT(seastore_t, "omw conflict ***prev -- {} ***next {}", t, *prev, *next);
+    }
     for (auto &aa: t.read_set) {
     }
   }
@@ -1123,6 +1127,12 @@ CachedExtentRef Cache::alloc_new_non_data_extent_by_type(
     return CachedExtentRef();
   case extent_types_t::TEST_BLOCK_PHYSICAL:
     return alloc_new_non_data_extent<TestBlockPhysical>(t, length, hint, gen);
+  case extent_types_t::LOG_NODE:
+    return alloc_new_non_data_extent<logstore_manager::LogNode>(
+      t, length, hint, gen);
+  case extent_types_t::LOG_LEAF:
+    return alloc_new_non_data_extent<logstore_manager::LogLeafNode>(
+      t, length, hint, gen);
   case extent_types_t::NONE: {
     ceph_assert(0 == "NONE is an invalid extent type");
     return CachedExtentRef();
@@ -1850,6 +1860,19 @@ void Cache::complete_commit(
       ERRORT("{}", t, *i);
       ceph_abort("not possible");
     }
+
+#if 0
+    if (i->get_type() == extent_types_t::LOG_LEAF) {
+      //i->parent->tail_addr = i->get_laddr();
+      i->cast<seastore::logstore_manager::LogLeafNode>()->set_parent_addrs(
+	i->cast<seastore::logstore_manager::LogLeafNode>()->get_laddr(),
+	i->cast<seastore::logstore_manager::LogLeafNode>()->get_paddr());
+#if 0
+      i->cast<seastore::logstore_manager::LogLeafNode>()->parent->tail_addr = //i->get_laddr();
+	i->cast<seastore::logstore_manager::LogLeafNode>()->get_laddr();
+#endif
+    }
+#endif
   });
 
   // Add new copy of mutated blocks, set_io_wait to block until written
@@ -1861,6 +1884,17 @@ void Cache::complete_commit(
 	   i->prior_instance);
     i->on_delta_write(final_block_start);
     i->pending_for_transaction = TRANS_ID_NULL;
+#if 0
+    if (i->get_type() == extent_types_t::LOG_LEAF) {
+      //i->parent->tail_addr = i->get_laddr();
+      DEBUGT("complete commit log leaf omw", t);
+      assert(i->cast<seastore::logstore_manager::LogLeafNode>()->parent);
+      DEBUGT("complete commit log leaf omw {}", t, *i->cast<seastore::logstore_manager::LogLeafNode>()->parent);
+      i->cast<seastore::logstore_manager::LogLeafNode>()->parent->tail_addr = //i->get_laddr();
+	i->cast<seastore::logstore_manager::LogLeafNode>()->get_laddr();
+      DEBUGT("after complete commit log leaf omw", t);
+    }
+#endif
     i->prior_instance = CachedExtentRef();
     i->state = CachedExtent::extent_state_t::DIRTY;
     assert(i->version > 0);
@@ -2336,6 +2370,18 @@ Cache::do_get_caching_extent_by_type(
         offset, length, std::move(extent_init_func), std::move(on_cache), p_src
       ).safe_then([](auto extent) {
 	return CachedExtentRef(extent.detach(), false /* add_ref */);
+      });
+    case extent_types_t::LOG_NODE:
+      return do_get_caching_extent<logstore_manager::LogNode>(
+        offset, length, std::move(extent_init_func), std::move(on_cache), p_src
+      ).safe_then([](auto extent) {
+        return CachedExtentRef(extent.detach(), false /* add_ref */);
+      });
+    case extent_types_t::LOG_LEAF:
+      return do_get_caching_extent<logstore_manager::LogLeafNode>(
+        offset, length, std::move(extent_init_func), std::move(on_cache), p_src
+      ).safe_then([](auto extent) {
+        return CachedExtentRef(extent.detach(), false /* add_ref */);
       });
     case extent_types_t::NONE: {
       ceph_assert(0 == "NONE is an invalid extent type");

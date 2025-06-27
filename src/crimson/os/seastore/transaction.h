@@ -275,7 +275,7 @@ public:
     }
   }
 
-  void add_logs(log_delta_t &l) {
+  void add_logs(CachedExtentRef ref, log_delta_t &l) {
     logs.push_back(l);
   }
 

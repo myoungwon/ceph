@@ -1016,16 +1016,30 @@ public:
 #else
     auto result = epm.alloc_new_non_data_extent(t, T::TYPE, length, hint, gen);
 #endif
+    SUBDEBUGT(seastore_cache,
+	      "reserererse", t);
     if (!result) {
       SUBERRORT(seastore_cache, "insufficient space", t);
       std::rethrow_exception(crimson::ct_error::enospc::exception_ptr());
     }
+    SUBDEBUGT(seastore_cache,
+              "2 allocated {} 0x{:x}B extent at {}, hint={}, gen={} ",
+              t, T::TYPE, length, result->paddr,
+              hint, rewrite_gen_printer_t{result->gen});
     auto ret = CachedExtent::make_cached_extent_ref<T>(std::move(result->bp));
+    SUBDEBUGT(seastore_cache,
+              "2.5 allocated {} 0x{:x}B extent at {}, hint={}, gen={} ",
+              t, T::TYPE, length, result->paddr,
+              hint, rewrite_gen_printer_t{result->gen});
     ret->init(CachedExtent::extent_state_t::INITIAL_WRITE_PENDING,
               result->paddr,
               hint,
               result->gen,
 	      t.get_trans_id());
+    SUBDEBUGT(seastore_cache,
+              "3 allocated {} 0x{:x}B extent at {}, hint={}, gen={} ",
+              t, T::TYPE, length, result->paddr,
+              hint, rewrite_gen_printer_t{result->gen});
     t.add_fresh_extent(ret);
     SUBDEBUGT(seastore_cache,
               "allocated {} 0x{:x}B extent at {}, hint={}, gen={} -- {}",
@@ -1939,9 +1953,20 @@ private:
       });
     }).safe_then(
       [this, FNAME, extent=std::move(extent), offset, length]() mutable {
+        SUBDEBUG(seastore_cache, "omwomwomw!!! state{}", *extent);
+        SUBDEBUG(seastore_cache, "omwomwomw!!! state{}", *extent);
+        SUBDEBUG(seastore_cache, "omwomwomw!!!");
         if (likely(extent->state == CachedExtent::extent_state_t::CLEAN_PENDING)) {
+        SUBDEBUG(seastore_cache, "www omwomwomw!!! state{}", *extent);
+	ceph_assert(extent);
           extent->state = CachedExtent::extent_state_t::CLEAN;
+        SUBDEBUG(seastore_cache, "wwweeee omwomwomw!!! state{}", *extent);
+        SUBDEBUG(seastore_cache, "wwweeee omwomwomw!!! state{}", *extent);
+        SUBDEBUG(seastore_cache, "wwweeee omwomwomw!!! state{}", *extent);
+        SUBDEBUG(seastore_cache, "wwweeee omwomwomw!!! state{}", *extent);
+        SUBDEBUG(seastore_cache, "wwweeee omwomwomw!!! state{}", *extent);
         }
+        SUBDEBUG(seastore_cache, "www omwomwomw!!! state{}", *extent);
         ceph_assert(extent->state == CachedExtent::extent_state_t::EXIST_CLEAN
           || extent->state == CachedExtent::extent_state_t::CLEAN
           || !extent->is_valid());

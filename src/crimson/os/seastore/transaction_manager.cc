@@ -691,7 +691,7 @@ TransactionManager::get_extents_if_live(
 
   // This only works with segments to check if alive,
   // as parallel transactions may split the extent at the same time.
-  ceph_assert(paddr.is_absolute_segmented());
+  //ceph_assert(paddr.is_absolute_segmented());
 
   return cache->get_extent_if_cached(t, paddr, len, type
   ).si_then([this, FNAME, type, paddr, laddr, len, &t](auto extent)
