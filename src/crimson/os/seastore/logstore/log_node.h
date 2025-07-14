@@ -84,6 +84,16 @@ public:
     buffer.clear();
   }
 
+  laddr_t get_latest_head_leaf() {
+    laddr_t l;
+    for (auto &i: buffer) {
+      if (i.op == delta_t::op_t::ADD_HEAD) {
+	l = i.next;
+      }
+    }
+    return l;
+  }
+
   DENC(delta_buffer_t, v, p) {
     DENC_START(1, 1, p);
     denc(v.buffer, p);
@@ -158,6 +168,16 @@ public:
 
   void clear() {
     buffer.clear();
+  }
+
+  laddr_t get_latest_next_leaf() {
+    laddr_t l;
+    for (auto &i: buffer) {
+      if (i.op == delta_leaf_t::op_t::ADD_NEXT) {
+	l = i.next;
+      }
+    }
+    return l;
   }
 
   DENC(delta_leaf_buffer_t, v, p) {
@@ -281,7 +301,8 @@ public:
     Transaction &t, laddr_t dst);
 
   bool can_handle_by_lognode(std::string s) {
-    return s[0] == '_';
+    // TODO: handle may_
+    return (s[0] == '_' || s.substr(0, 4) == std::string("may_"));
   }
 
   bool can_handle_by_logleaf(std::string s) {
@@ -778,8 +799,8 @@ struct LogNode : LogicalChildNode, LogKVNodeLayout {
 
   ~LogNode() {}
   
-  laddr_t tail_laddr;
-  paddr_t tail_paddr;
+  laddr_t tail_laddr = L_ADDR_NULL;
+  paddr_t tail_paddr = P_ADDR_NULL;
 
   LogNode(const LogNode &rhs)
     : LogicalChildNode(rhs, share_buffer_t()) {
@@ -928,6 +949,11 @@ struct LogNode : LogicalChildNode, LogKVNodeLayout {
   }
 
   laddr_t get_head_leaf_laddr() const {
+    if (is_mutation_pending() || is_exist_mutation_pending()) {
+      if (!delta_buffer.empty()) {
+	return delta_buffer.get_latest_head_leaf();
+      }
+    }
     return get_head_addr();
   }
 
@@ -938,6 +964,12 @@ struct LogNode : LogicalChildNode, LogKVNodeLayout {
       return;
     }
     set_head_leaf(l);
+  }
+
+  // TODO: This must be called under mutation
+  void set_tail_addrs(paddr_t _p, laddr_t _l) {
+    tail_paddr = _p;
+    tail_laddr = _l;
   }
 
 };
@@ -1224,6 +1256,10 @@ public:
     return (sizeof(log_leaf_key_le_t) + ksize + vsize);
   }
 
+  static uint16_t test_get_entry_size(size_t ksize, size_t vsize) {
+    return (sizeof(log_leaf_key_le_t) + ksize + vsize);
+  }
+
   uint32_t free_space() const {
     assert(capacity() >= used_space());
     return capacity() - used_space();
@@ -1310,18 +1346,14 @@ struct LogLeafNode
   }
   explicit LogLeafNode(extent_len_t length) : LogicalChildNode(length) {}
 
-  LogNodeRef parent;
   LogLeafNode(const LogLeafNode &rhs)
     : LogicalChildNode(rhs, share_buffer_t()) {
     set_layout_buf(this->get_bptr().c_str(), this->get_bptr().length());
-    parent = rhs.parent;
     set_last_pos(*get_last_pos_ptr()); // shared buf
     set_size(get_size());
     set_reserved_len(rhs.get_reserved_len());
   }
-  ~LogLeafNode() {
-    parent = nullptr;
-  }
+  ~LogLeafNode() {}
 
   CachedExtentRef duplicate_for_write(Transaction&) final {
     assert(delta_buffer.empty());
@@ -1419,9 +1451,38 @@ struct LogLeafNode
     };
   }
 
+  bool last_is_less_than(const std::optional<std::string> &str) {
+    if (get_size() == 0) {
+      return false;
+    }
+    ceph_assert(str);
+    std::string_view s(*str);
+    if (s > get_last_key()) {
+      return true;
+    }
+    return false;
+  }
+
+  bool first_is_larger_than(const std::optional<std::string> &str) {
+    if (get_size() == 0) {
+      return false;
+    }
+    assert(str);
+    std::string_view s = *str;
+    if (s < iter_begin()->get_key()) {
+      return true;
+    }
+    return false;
+  }
+
   std::ostream &print_detail_l(std::ostream &out) const final;
 
   laddr_t get_next_leaf_addr() const {
+    if (is_mutation_pending() || is_exist_mutation_pending()) {
+      if (!delta_buffer.empty()) {
+	return delta_buffer.get_latest_next_leaf();
+      }
+    }
     return this->get_next();
   }
 

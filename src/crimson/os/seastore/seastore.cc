@@ -2942,14 +2942,23 @@ SeaStore::Shard::omaptree_rm_keys(
       [&t, &onode, FNAME, type]
       (auto &omap_manager, auto &root, auto &keys)
     {
+      // TODO: deletion for log is done by rm_keys. For instance,
+      // omaptree_rm_keys is invoked with from 0011.0001 to 0011.0010
+      // one by one 
+      // Fix me
+      if (keys.size() > 10) {
+	return omap_manager.log_rm_key(root, t, *keys.rbegin()
+	).si_then([&t, &root, &onode] {
+	  if (root.must_update()) {
+	    omaptree_update_root(t, root, onode);
+	  }
+	});
+      }
       return trans_intr::do_for_each(
 	keys.begin(),
 	keys.end(),
 	[&omap_manager, &t, &root, FNAME, type](auto &p)
       {
-	if (p == "_fastinfo") {
-	  return OMapManager::omap_rm_key_iertr::now();
-	}
 	DEBUGT("{} remove key={} ...", t, type, p);
 	return omap_manager.log_rm_key(root, t, p);
       }).si_then([&t, &root, &onode] {

@@ -114,6 +114,9 @@ LogStoreManager::log_set_keys(omap_root_t &log_root,
 	  auto mut = tm.get_mutable_extent(t, log_node)->template cast<LogNode>();
 	  mut->insert_kv(p.first, p.second);
 	  return log_set_key_iertr::now();
+	} else if (p.first.substr(0, 4) == std::string("dup_")) {
+	  // TODO: handle dup_
+	  return log_set_key_iertr::now();
 	}
 	return log_set_key(log_root, t, log_node, p.first, p.second);
       });
@@ -185,20 +188,21 @@ LogStoreManager::log_set_key(omap_root_t &log_root,
     return tm.alloc_non_data_extent<LogLeafNode>(
       t, log_root.hint, LOG_LEAF_NODE_BLOCK_SIZE
     ).si_then([&t, r=std::move(r), &key, &value, this, tail](auto&& extent) {
-      extent->parent = r;
+      //extent->parent = r;
       if (r->get_head_leaf_laddr() == L_ADDR_NULL) {
-	r->tail_laddr = extent->get_laddr();
 	extent->append_kv(t, key, value);
-	r->tail_paddr = extent->get_paddr();
 	auto mut = tm.get_mutable_extent(t, r)->cast<LogNode>();
+	mut->set_tail_addrs(extent->get_paddr(), extent->get_laddr());
 	mut->append_head_laddr(extent->get_laddr());
       } else {
-	assert(r->tail_laddr);
-	assert(tail);
+	ceph_assert(tail);
 	auto mut = tm.get_mutable_extent(t, tail)->cast<LogLeafNode>();
 	mut->append_next_addr(extent->get_laddr());
 	extent->append_kv(t, key, value);
-	r->tail_paddr = extent->get_paddr(); 
+	auto mut_lognode = tm.get_mutable_extent(t, r)->cast<LogNode>();
+	mut_lognode->set_tail_addrs(extent->get_paddr(), extent->get_laddr());
+	// TODO: this is not necessary, just to update tail address correctly
+	mut_lognode->append_head_laddr(r->get_head_leaf_laddr());
       }
       return log_set_key_iertr::now();
     }).handle_error_interruptible(
@@ -240,8 +244,7 @@ LogStoreManager::log_set_key(omap_root_t &log_root,
       return find_tail<LogLeafNode>(t, r->get_head_leaf_laddr()
       ).si_then([&t, r=std::move(r), add_func=std::move(add_func),
 	&key, &value](auto ext) {
-	r->tail_laddr = ext->get_laddr();
-	r->tail_paddr = ext->get_paddr();
+	// TODO: update tail addrs
 	return add_func(r, std::move(ext), key, value);
       });
     }
@@ -255,6 +258,7 @@ std::ostream &LogNode::print_detail_l(std::ostream &out) const
   out << ", size=" << get_size();
   out << ", head_laddr=" << get_head_leaf_laddr();
   out << ", tail_laddr=" << tail_laddr;
+  out << ", tail_paddr=" << tail_paddr;
   if (get_size() > 0) {
     out << ", begin=" << get_begin()
 	<< ", end=" << get_end();
@@ -426,15 +430,15 @@ LogStoreManager::remove_kvs(Transaction &t, laddr_t dst,
       auto f = std::make_optional<std::string>(first);
       auto l = last.empty() ? std::nullopt : std::make_optional<std::string>(last);
       std::map<std::string, bufferlist> kvs;
+      if (extent->first_is_larger_than(l)) {
+	return log_rm_key_iertr::now();
+      }
       extent->list(f, l, kvs);
-      if (!kvs.empty() && kvs.rbegin()->first == extent->get_last_key()) {
+      if ((!kvs.empty() && kvs.rbegin()->first == extent->get_last_key()) ||
+	  extent->last_is_less_than(l)) {
 	laddr_t next = extent->get_next_leaf_addr();
-	// this can be retreived if needed
-	if (root->tail_laddr == extent->get_laddr()) {
-	  root->tail_laddr = L_ADDR_NULL;
-	}
 	return tm.remove(t, extent->get_laddr()
-	).si_then([&t, this, next=next, &first, &last, &root](auto &&ret) 
+	).si_then([&t, this, next=next, &first, &last, &root, &extent](auto &&ret) 
 	  -> log_rm_key_ret {
 	  CachedExtentRef node;
 	  Transaction::get_extent_ret r;
@@ -445,6 +449,10 @@ LogStoreManager::remove_kvs(Transaction &t, laddr_t dst,
 	  auto mut = tm.get_mutable_extent(t, log_node)->template cast<LogNode>();
 	  assert(mut);
 	  mut->append_head_laddr(next);
+	  if (mut->tail_laddr == extent->get_laddr()) {
+	    // this can be retreived if needed
+	    mut->set_tail_addrs(P_ADDR_NULL, next);
+	  }
 	  return remove_kvs(t, next, first, last, root);
 	}).handle_error_interruptible(
 	  log_rm_key_iertr::pass_further{},
