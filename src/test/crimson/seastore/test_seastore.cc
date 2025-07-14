@@ -1385,13 +1385,17 @@ TEST_P(seastore_test_t, log_writes)
     epoch_t epoch = 11;
     
     std::set<std::string> key_for_test_obj, key_for_test_obj2;
-    for (int i = 0; i < log_count; i++) {
-      version += i;
+    auto generate_key = [](epoch_t &e, version_t &v) {
       char key[32] = {0};
       key[31] = 0;
-      ritoa<uint64_t, 10, 20>(version, key + 31);
+      ritoa<uint64_t, 10, 20>(v, key + 31);
       key[10] = '.';
-      ritoa<uint32_t, 10, 10>(epoch, key + 10);
+      ritoa<uint32_t, 10, 10>(e, key + 10);
+      return std::string(key);
+    };
+    for (int i = 0; i < log_count; i++) {
+      version += i;
+      std::string key = generate_key(epoch, version);
       char c_array[238] = {(char)((i % 10) + '0')};
       bufferlist l;
       std::string ss(&c_array[0], sizeof(c_array));
@@ -1399,6 +1403,9 @@ TEST_P(seastore_test_t, log_writes)
       test_obj.set_omap(*sharded_seastore, key, l);
       key_for_test_obj.insert(key);
     }
+
+    version += 1;
+    std::string to_remove = generate_key(epoch, version);
     auto &test_obj2 = get_object(make_oid(100));
     test_obj2.touch(*sharded_seastore);
     test_obj2.set_log_object(*sharded_seastore);
@@ -1408,22 +1415,14 @@ TEST_P(seastore_test_t, log_writes)
     // 2 kv pair for leaf in the same transaction
     for (int i = 0; i < 100; i = i + 2) {
       version = i;
-      char key[32] = {0};
-      key[31] = 0;
-      ritoa<uint64_t, 10, 20>(version, key + 31);
-      key[10] = '.';
-      ritoa<uint32_t, 10, 10>(epoch, key + 10);
+      std::string key = generate_key(epoch, version);
       char c_array[238] = {(char)((i % 10) + '0')};
       bufferlist l;
       std::string ss(&c_array[0], sizeof(c_array));
       encode(ss, l);
 
       version += 1;
-      char key2[32] = {0};
-      key2[31] = 0;
-      ritoa<uint64_t, 10, 20>(version, key2 + 31);
-      key2[10] = '.';
-      ritoa<uint32_t, 10, 10>(epoch, key2 + 10);
+      std::string key2 = generate_key(epoch, version);
       bufferlist l2;
       char c_array2[238] = {(char)(((i + 1) % 10) + '0')};
       std::string ss2(&c_array2[0], sizeof(c_array2));
@@ -1441,11 +1440,7 @@ TEST_P(seastore_test_t, log_writes)
     // 1 kv pair for leaf and 4 kv pairs for node
     for (int i = 0; i < 50; i++) {
       version += i;
-      char key[32] = {0};
-      key[31] = 0;
-      ritoa<uint64_t, 10, 20>(version, key + 31);
-      key[10] = '.';
-      ritoa<uint32_t, 10, 10>(epoch, key + 10);
+      std::string key = generate_key(epoch, version);
       char c_array[238] = {(char)((i % 10) + '0')};
       bufferlist l;
       std::string ss(&c_array[0], sizeof(c_array));
@@ -1484,14 +1479,15 @@ TEST_P(seastore_test_t, log_writes)
       EXPECT_NE(p.first, "_biginfo");
     }
 
-    auto leaf_size = crimson::os::seastore::logstore_manager::LOG_NODE_BLOCK_SIZE;
+    auto leaf_size = crimson::os::seastore::logstore_manager::LOG_LEAF_NODE_BLOCK_SIZE;
     uint16_t entry_size =
       crimson::os::seastore::logstore_manager::LogKVLeafNodeLayout::test_get_entry_size(log_key, log_val);
     uint16_t leaf_entries = leaf_size / entry_size;
     test_obj.rm_omap_range(*sharded_seastore, std::string(), *key_for_test_obj.rbegin());
     kvs = test_obj.get_omaps(*sharded_seastore, std::string());
     EXPECT_EQ(kvs.size(), log_count % leaf_entries);
-    test_obj.rm_omap_range(*sharded_seastore, std::string(), std::string());
+    //test_obj.rm_omap_range(*sharded_seastore, std::string(), std::string());
+    test_obj.rm_omap_range(*sharded_seastore, std::string(), to_remove);
     kvs = test_obj.get_omaps(*sharded_seastore, std::string());
     EXPECT_EQ(kvs.size(), test_obj.omap.size());
 

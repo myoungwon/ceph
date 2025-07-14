@@ -188,7 +188,6 @@ LogStoreManager::log_set_key(omap_root_t &log_root,
     return tm.alloc_non_data_extent<LogLeafNode>(
       t, log_root.hint, LOG_LEAF_NODE_BLOCK_SIZE
     ).si_then([&t, r=std::move(r), &key, &value, this, tail](auto&& extent) {
-      //extent->parent = r;
       if (r->get_head_leaf_laddr() == L_ADDR_NULL) {
 	extent->append_kv(t, key, value);
 	auto mut = tm.get_mutable_extent(t, r)->cast<LogNode>();
