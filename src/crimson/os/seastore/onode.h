@@ -11,6 +11,8 @@
 #include "common/hobject.h"
 #include "include/byteorder.h"
 #include "seastore_types.h"
+#include "crimson/os/seastore/omap_manager/btree/btree_omap_manager.h"
+#include "crimson/os/seastore/omap_manager.h"
 
 namespace crimson::os::seastore {
 
@@ -108,6 +110,17 @@ public:
   }
   const omap_root_le_t& get_root(omap_type_t type) const {
     return get_layout().get_root(type);
+  }
+  OMapManagerRef get_manager(TransactionManager& tm) {
+    /* 
+     * if LOG is set, root should be initialized by set_alloc_hint
+     * before accessing object, otherwise BtreeOMapManager is used
+     */
+    auto log_root = get_root(omap_type_t::LOG);
+    if (log_root.is_null()) {
+      return std::make_unique<crimson::os::seastore::omap_manager::BtreeOMapManager>(tm);
+    } 
+    return std::make_unique<crimson::os::seastore::omap_manager::BtreeOMapManager>(tm);
   }
   friend std::ostream& operator<<(std::ostream &out, const Onode &rhs);
 };
