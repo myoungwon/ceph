@@ -47,10 +47,10 @@ open_ertr::future<> NVMeBlockDevice::open(
           return identify_namespace(device).safe_then([this, in_path, mode] (
             auto id_namespace_data) {
             atomic_write_unit = awupf * super.block_size;
-            if (id_namespace_data.nsfeat.opterf == 1){
+            if ((*id_namespace_data).nsfeat.opterf == 1){
               // NPWG and NPWA is 0'based value
-              write_granularity = super.block_size * (id_namespace_data.npwg + 1);
-              write_alignment = super.block_size * (id_namespace_data.npwa + 1);
+              write_granularity = super.block_size * ((*id_namespace_data).npwg + 1);
+              write_alignment = super.block_size * ((*id_namespace_data).npwa + 1);
             }
             return open_for_io(in_path, mode);
           });
@@ -90,14 +90,14 @@ NVMeBlockDevice::mount_ret NVMeBlockDevice::mount()
     if (is_end_to_end_data_protection()) {
       return identify_namespace(device
       ).safe_then([] (auto id_namespace_data) {
-	if (id_namespace_data.dps.protection_type !=
+	if ((*id_namespace_data).dps.protection_type !=
 	    nvme_format_nvm_command_t::PROTECT_INFORMATION_TYPE_2) {
 	  logger().error("seastore was formated with end-to-end-data-protection \
 	    but the device being mounted to use seastore does not support \
 	    the functionality. Please check the device.");
 	  ceph_abort();
 	}
-	if (id_namespace_data.lbaf[id_namespace_data.flbas.lba_index].ms != 
+	if ((*id_namespace_data).lbaf[(*id_namespace_data).flbas.lba_index].ms != 
 	    nvme_identify_namespace_data_t::METASIZE_FOR_CHECKSUM_OFFLOAD) {
 	  logger().error("seastore was formated with end-to-end-data-protection \
 	    but the formatted device meta size is wrong. Please check the device.");
@@ -265,7 +265,7 @@ discard_ertr::future<> NVMeBlockDevice::discard(uint64_t offset, uint64_t len) {
   return device.discard(offset, len);
 }
 
-nvme_command_ertr::future<nvme_identify_namespace_data_t>
+nvme_command_ertr::future<std::optional<nvme_identify_namespace_data_t>>
 NVMeBlockDevice::identify_namespace(seastar::file f) {
   return get_nsid(f).safe_then([this, f](auto nsid) {
     namespace_id = nsid;
@@ -280,7 +280,7 @@ NVMeBlockDevice::identify_namespace(seastar::file f) {
       admin_command.identify.cns = nvme_identify_command_t::CNS_NAMESPACE;
 
       return pass_admin(admin_command, f).safe_then([&data](auto status){
-        return seastar::make_ready_future<nvme_identify_namespace_data_t>(
+        return seastar::make_ready_future<std::optional<nvme_identify_namespace_data_t>>(
           std::move(data));
       });
     });
@@ -316,22 +316,22 @@ nvme_command_ertr::future<int> NVMeBlockDevice::pass_through_io(
 nvme_command_ertr::future<> NVMeBlockDevice::try_enable_end_to_end_protection() {
   return identify_namespace(device
   ).safe_then([this] (auto id_namespace_data) -> nvme_command_ertr::future<> {
-    if (!id_namespace_data.nlbaf) {
+    if (!(*id_namespace_data).nlbaf) {
       logger().info("the device does not support end to end data protection,\
 	mkfs() will be done without this functionality.");
       return nvme_command_ertr::now();
     }
     int lba_format_index = -1;
-    for (int i = 0; i < id_namespace_data.nlbaf; i++) {
+    for (int i = 0; i < (*id_namespace_data).nlbaf; i++) {
       // TODO: enable other types of end to end data protection 
       // Note that the nvme device will generate crc if the namespace
       // is formatted with meta size 8
       // The nvme device can provide other types of data protections.
       // But, for now, we only consider the checksum offload in the device side.
-      if (id_namespace_data.lbaf[i].ms ==
+      if ((*id_namespace_data).lbaf[i].ms ==
 	  nvme_identify_namespace_data_t::METASIZE_FOR_CHECKSUM_OFFLOAD) {
 	lba_format_index = i;
-	super.nvme_block_size = (1 << id_namespace_data.lbaf[i].lbads);
+	super.nvme_block_size = (1 << (*id_namespace_data).lbaf[i].lbads);
 	break;
       }
     }
@@ -359,7 +359,7 @@ nvme_command_ertr::future<> NVMeBlockDevice::try_enable_end_to_end_protection() 
 	  }
 	  return identify_namespace(device
 	  ).safe_then([this] (auto id_namespace_data) -> nvme_command_ertr::future<> {
-	    ceph_assert(id_namespace_data.dps.protection_type ==
+	    ceph_assert((*id_namespace_data).dps.protection_type ==
 	       nvme_format_nvm_command_t::PROTECT_INFORMATION_TYPE_2);
 	    super.set_end_to_end_data_protection();
 	    return nvme_command_ertr::now();

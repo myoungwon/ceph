@@ -379,7 +379,7 @@ private:
   // as supported features, NPWG and NPWA
   nvme_command_ertr::future<nvme_identify_controller_data_t> 
     identify_controller(seastar::file f);
-  nvme_command_ertr::future<nvme_identify_namespace_data_t>
+  nvme_command_ertr::future<std::optional<nvme_identify_namespace_data_t>>
     identify_namespace(seastar::file f);
   nvme_command_ertr::future<int> get_nsid(seastar::file f);
   open_ertr::future<> open_for_io(
