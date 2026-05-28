@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -39,14 +40,17 @@ struct librados::IoCtxImpl {
   uint64_t assert_ver = 0;
   version_t last_objver = 0;
   uint32_t notify_timeout = 30;
+  bool no_version_on_read = false;
   object_locator_t oloc;
+  int extra_op_flags = 0;
+  int objclass_flags_mask = -1;
 
   ceph::mutex aio_write_list_lock =
     ceph::make_mutex("librados::IoCtxImpl::aio_write_list_lock");
   ceph_tid_t aio_write_seq = 0;
   ceph::condition_variable aio_write_cond;
   xlist<AioCompletionImpl*> aio_write_list;
-  map<ceph_tid_t, std::list<AioCompletionImpl*> > aio_write_waiters;
+  std::map<ceph_tid_t, std::list<AioCompletionImpl*> > aio_write_waiters;
 
   Objecter *objecter = nullptr;
 
@@ -64,11 +68,12 @@ struct librados::IoCtxImpl {
     last_objver = rhs.last_objver;
     notify_timeout = rhs.notify_timeout;
     oloc = rhs.oloc;
+    extra_op_flags = rhs.extra_op_flags;
     objecter = rhs.objecter;
   }
 
   void set_snap_read(snapid_t s);
-  int set_snap_write_context(snapid_t seq, vector<snapid_t>& snaps);
+  int set_snap_write_context(snapid_t seq, std::vector<snapid_t>& snaps);
 
   void get() {
     ref_cnt++;
@@ -88,7 +93,7 @@ struct librados::IoCtxImpl {
     return poolid;
   }
 
-  string get_cached_pool_name();
+  std::string get_cached_pool_name();
 
   int get_object_hash_position(const std::string& oid, uint32_t *hash_position);
   int get_object_pg_hash_position(const std::string& oid, uint32_t *pg_hash_position);
@@ -96,7 +101,7 @@ struct librados::IoCtxImpl {
   ::ObjectOperation *prepare_assert_ops(::ObjectOperation *op);
 
   // snaps
-  int snap_list(vector<uint64_t> *snaps);
+  int snap_list(std::vector<uint64_t> *snaps);
   int snap_lookup(const char *name, uint64_t *snapid);
   int snap_get_name(uint64_t snapid, std::string *s);
   int snap_get_stamp(uint64_t snapid, time_t *t);
@@ -149,14 +154,15 @@ struct librados::IoCtxImpl {
 
   int getxattr(const object_t& oid, const char *name, bufferlist& bl);
   int setxattr(const object_t& oid, const char *name, bufferlist& bl);
-  int getxattrs(const object_t& oid, map<string, bufferlist>& attrset);
+  int getxattrs(const object_t& oid, std::map<std::string, bufferlist>& attrset);
   int rmxattr(const object_t& oid, const char *name);
 
-  int operate(const object_t& oid, ::ObjectOperation *o, ceph::real_time *pmtime, int flags=0);
-  int operate_read(const object_t& oid, ::ObjectOperation *o, bufferlist *pbl, int flags=0);
+  int operate(const object_t& oid, ::ObjectOperation *o, ceph::real_time *pmtime, int flags=0, const jspan_context *otel_trace = nullptr);
+  int operate_read(const object_t& oid, ::ObjectOperation *o, bufferlist *pbl, int flags=0, int flags_mask=-1);
   int aio_operate(const object_t& oid, ::ObjectOperation *o,
 		  AioCompletionImpl *c, const SnapContext& snap_context,
-		  int flags, const blkin_trace_info *trace_info = nullptr);
+		  const ceph::real_time *pmtime, int flags,
+		  const blkin_trace_info *trace_info = nullptr, const jspan_context *otel_trace = nullptr);
   int aio_operate_read(const object_t& oid, ::ObjectOperation *o,
 		       AioCompletionImpl *c, int flags, bufferlist *pbl, const blkin_trace_info *trace_info = nullptr);
 
@@ -177,7 +183,7 @@ struct librados::IoCtxImpl {
   };
 
   struct C_aio_Complete : public Context {
-#if defined(WITH_LTTNG) && defined(WITH_EVENTTRACE)
+#if defined(WITH_EVENTTRACE)
     object_t oid;
 #endif
     AioCompletionImpl *c;
@@ -219,7 +225,7 @@ struct librados::IoCtxImpl {
   int aio_setxattr(const object_t& oid, AioCompletionImpl *c,
 		   const char *name, bufferlist& bl);
   int aio_getxattrs(const object_t& oid, AioCompletionImpl *c,
-		    map<string, bufferlist>& attrset);
+		    std::map<std::string, bufferlist>& attrset);
   int aio_rmxattr(const object_t& oid, AioCompletionImpl *c,
 		  const char *name);
   int aio_cancel(AioCompletionImpl *c);
@@ -292,6 +298,9 @@ struct librados::IoCtxImpl {
   int application_metadata_list(const std::string& app_name,
                                 std::map<std::string, std::string> *values);
 
+  void set_no_version_on_read(bool _val);
+ private:
+  version_t *get_objver_for_read(version_t *objver_p) const;
 };
 
 #endif

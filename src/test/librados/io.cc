@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <climits>
 
@@ -12,6 +12,7 @@
 
 #include <errno.h>
 #include "gtest/gtest.h"
+#include "crimson_utils.h"
 
 using std::string;
 
@@ -27,7 +28,7 @@ TEST_F(LibRadosIo, SimpleWrite) {
 }
 
 TEST_F(LibRadosIo, TooBig) {
-  char buf[1];
+  char buf[1] = { 0 };
   ASSERT_EQ(-E2BIG, rados_write(ioctx, "A", buf, UINT_MAX, 0));
   ASSERT_EQ(-E2BIG, rados_append(ioctx, "A", buf, UINT_MAX));
   ASSERT_EQ(-E2BIG, rados_write_full(ioctx, "A", buf, UINT_MAX));
@@ -46,7 +47,8 @@ TEST_F(LibRadosIo, ReadTimeout) {
     ASSERT_EQ(0, rados_create(&cluster, "admin"));
     ASSERT_EQ(0, rados_conf_read_file(cluster, NULL));
     ASSERT_EQ(0, rados_conf_parse_env(cluster, NULL));
-    ASSERT_EQ(0, rados_conf_set(cluster, "rados_osd_op_timeout", "0.00001")); // use any small value that will result in a timeout
+    ASSERT_EQ(0, rados_conf_set(cluster, "rados_osd_op_timeout", "1")); // use any small value that will result in a timeout
+    ASSERT_EQ(0, rados_conf_set(cluster, "ms_inject_internal_delays", "2")); // create a 2 second delay
     ASSERT_EQ(0, rados_connect(cluster));
     ASSERT_EQ(0, rados_ioctx_create(cluster, pool_name.c_str(), &ioctx));
     rados_ioctx_set_namespace(ioctx, nspace.c_str());
@@ -111,8 +113,8 @@ TEST_F(LibRadosIo, Checksum) {
 
   uint32_t expected_crc = ceph_crc32c(-1, reinterpret_cast<const uint8_t*>(buf),
                                       sizeof(buf));
-  uint32_t init_value = -1;
-  uint32_t crc[2];
+  ceph_le32 init_value(-1);
+  ceph_le32 crc[2];
   ASSERT_EQ(0, rados_checksum(ioctx, "foo", LIBRADOS_CHECKSUM_TYPE_CRC32C,
 			      reinterpret_cast<char*>(&init_value),
 			      sizeof(init_value), sizeof(buf), 0, 0,
@@ -160,6 +162,14 @@ TEST_F(LibRadosIo, AppendRoundTrip) {
   ASSERT_EQ((int)sizeof(buf3), rados_read(ioctx, "foo", buf3, sizeof(buf3), 0));
   ASSERT_EQ(0, memcmp(buf3, buf, sizeof(buf)));
   ASSERT_EQ(0, memcmp(buf3 + sizeof(buf), buf2, sizeof(buf2)));
+}
+
+TEST_F(LibRadosIo, ZeroLenZero) {
+  rados_write_op_t op = rados_create_write_op();
+  ASSERT_TRUE(op);
+  rados_write_op_zero(op, 0, 0);
+  ASSERT_EQ(0, rados_write_op_operate(op, ioctx, "foo", NULL, 0));
+  rados_release_write_op(op);
 }
 
 TEST_F(LibRadosIo, TruncTest) {
@@ -260,6 +270,7 @@ TEST_F(LibRadosIo, XattrIter) {
 }
 
 TEST_F(LibRadosIoEC, SimpleWrite) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   memset(buf, 0xcc, sizeof(buf));
   ASSERT_EQ(0, rados_write(ioctx, "foo", buf, sizeof(buf), 0));
@@ -268,6 +279,7 @@ TEST_F(LibRadosIoEC, SimpleWrite) {
 }
 
 TEST_F(LibRadosIoEC, RoundTrip) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   char buf2[128];
   memset(buf, 0xcc, sizeof(buf));
@@ -281,6 +293,7 @@ TEST_F(LibRadosIoEC, RoundTrip) {
 }
 
 TEST_F(LibRadosIoEC, OverlappingWriteRoundTrip) {
+  SKIP_IF_CRIMSON();
   int bsize = alignment;
   int dbsize = bsize * 2;
   char *buf = (char *)new char[dbsize];
@@ -303,6 +316,7 @@ TEST_F(LibRadosIoEC, OverlappingWriteRoundTrip) {
 }
 
 TEST_F(LibRadosIoEC, WriteFullRoundTrip) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   char buf2[64];
   char buf3[128];
@@ -316,6 +330,7 @@ TEST_F(LibRadosIoEC, WriteFullRoundTrip) {
 }
 
 TEST_F(LibRadosIoEC, AppendRoundTrip) {
+  SKIP_IF_CRIMSON();
   char *buf = (char *)new char[alignment];
   char *buf2 = (char *)new char[alignment];
   char *buf3 = (char *)new char[alignment *2];
@@ -342,6 +357,7 @@ TEST_F(LibRadosIoEC, AppendRoundTrip) {
 }
 
 TEST_F(LibRadosIoEC, TruncTest) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   char buf2[sizeof(buf)];
   memset(buf, 0xaa, sizeof(buf));
@@ -355,6 +371,7 @@ TEST_F(LibRadosIoEC, TruncTest) {
 }
 
 TEST_F(LibRadosIoEC, RemoveTest) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   char buf2[sizeof(buf)];
   memset(buf, 0xaa, sizeof(buf));
@@ -365,6 +382,7 @@ TEST_F(LibRadosIoEC, RemoveTest) {
 }
 
 TEST_F(LibRadosIoEC, XattrsRoundTrip) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   char attr1[] = "attr1";
   char attr1_buf[] = "foo bar baz";
@@ -378,6 +396,7 @@ TEST_F(LibRadosIoEC, XattrsRoundTrip) {
 }
 
 TEST_F(LibRadosIoEC, RmXattr) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   char attr1[] = "attr1";
   char attr1_buf[] = "foo bar baz";
@@ -401,6 +420,7 @@ TEST_F(LibRadosIoEC, RmXattr) {
 }
 
 TEST_F(LibRadosIoEC, XattrIter) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   char attr1[] = "attr1";
   char attr1_buf[] = "foo bar baz";

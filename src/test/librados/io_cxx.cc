@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <climits>
 #include <errno.h>
@@ -12,6 +12,8 @@
 #include "include/scope_guard.h"
 #include "test/librados/test_cxx.h"
 #include "test/librados/testcase_cxx.h"
+
+#include "crimson_utils.h"
 
 using namespace librados;
 using std::string;
@@ -201,6 +203,52 @@ TEST_F(LibRadosIoPP, SparseReadOpPP) {
     ASSERT_EQ(0, rval);
     assert_eq_sparse(bl, extents, read_bl);
   }
+  {
+    bufferlist bl;
+    bl.append(buf, sizeof(buf) / 2);
+
+    std::map<uint64_t, uint64_t> extents;
+    bufferlist read_bl;
+    int rval = -1;
+    ObjectReadOperation op;
+    op.sparse_read(0, sizeof(buf), &extents, &read_bl, &rval, sizeof(buf) / 2, 1);
+    ASSERT_EQ(0, ioctx.operate("foo", &op, nullptr));
+    ASSERT_EQ(0, rval);
+    assert_eq_sparse(bl, extents, read_bl);
+  }
+}
+
+TEST_F(LibRadosIoPP, SparseReadExtentArrayOpPP) {
+  int buf_len = 32;
+  char buf[buf_len], zbuf[buf_len];
+  memset(buf, 0xcc, buf_len);
+  memset(zbuf, 0, buf_len);
+  bufferlist bl;
+  int i, len = 1024, skip = 5;
+  bl.append(buf, buf_len);
+  for (i = 0; i < len; i++) {
+    if (!(i % skip) || i == (len - 1)) {
+      ASSERT_EQ(0, ioctx.write("sparse-read", bl, bl.length(), i * buf_len));
+    }
+  }
+
+  bufferlist expect_bl;
+  for (i = 0; i < len; i++) {
+    if (!(i % skip) || i == (len - 1)) {
+      expect_bl.append(buf, buf_len);
+    } else {
+      expect_bl.append(zbuf, buf_len);
+    }
+  }
+
+  std::map<uint64_t, uint64_t> extents;
+  bufferlist read_bl;
+  int rval = -1;
+  ObjectReadOperation op;
+  op.sparse_read(0, len * buf_len, &extents, &read_bl, &rval);
+  ASSERT_EQ(0, ioctx.operate("sparse-read", &op, nullptr));
+  ASSERT_EQ(0, rval);
+  assert_eq_sparse(expect_bl, extents, read_bl);
 }
 
 TEST_F(LibRadosIoPP, RoundTripPP) {
@@ -447,7 +495,20 @@ TEST_F(LibRadosIoPP, XattrListPP) {
   }
 }
 
+TEST_F(LibRadosIoPP, CrcZeroWrite) {
+  char buf[128];
+  bufferlist bl;
+
+  ASSERT_EQ(0, ioctx.write("foo", bl, 0, 0));
+  ASSERT_EQ(0, ioctx.write("foo", bl, 0, sizeof(buf)));
+
+  ObjectReadOperation read;
+  read.read(0, bl.length(), NULL, NULL);
+  ASSERT_EQ(0, ioctx.operate("foo", &read, &bl));
+}
+
 TEST_F(LibRadosIoECPP, SimpleWritePP) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   memset(buf, 0xcc, sizeof(buf));
   bufferlist bl;
@@ -458,6 +519,7 @@ TEST_F(LibRadosIoECPP, SimpleWritePP) {
 }
 
 TEST_F(LibRadosIoECPP, ReadOpPP) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   memset(buf, 0xcc, sizeof(buf));
   bufferlist bl;
@@ -604,6 +666,7 @@ TEST_F(LibRadosIoECPP, ReadOpPP) {
 }
 
 TEST_F(LibRadosIoECPP, SparseReadOpPP) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   memset(buf, 0xcc, sizeof(buf));
   bufferlist bl;
@@ -623,6 +686,7 @@ TEST_F(LibRadosIoECPP, SparseReadOpPP) {
 }
 
 TEST_F(LibRadosIoECPP, RoundTripPP) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   Rados cluster;
   memset(buf, 0xcc, sizeof(buf));
@@ -636,6 +700,7 @@ TEST_F(LibRadosIoECPP, RoundTripPP) {
 
 TEST_F(LibRadosIoECPP, RoundTripPP2)
 {
+  SKIP_IF_CRIMSON();
   bufferlist bl;
   bl.append("ceph");
   ObjectWriteOperation write;
@@ -651,6 +716,7 @@ TEST_F(LibRadosIoECPP, RoundTripPP2)
 }
 
 TEST_F(LibRadosIoECPP, OverlappingWriteRoundTripPP) {
+  SKIP_IF_CRIMSON();
   int bsize = alignment;
   int dbsize = bsize * 2;
   char *buf = (char *)new char[dbsize];
@@ -675,6 +741,7 @@ TEST_F(LibRadosIoECPP, OverlappingWriteRoundTripPP) {
 }
 
 TEST_F(LibRadosIoECPP, WriteFullRoundTripPP) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   char buf2[64];
   memset(buf, 0xcc, sizeof(buf));
@@ -692,6 +759,7 @@ TEST_F(LibRadosIoECPP, WriteFullRoundTripPP) {
 
 TEST_F(LibRadosIoECPP, WriteFullRoundTripPP2)
 {
+  SKIP_IF_CRIMSON();
   bufferlist bl;
   bl.append("ceph");
   ObjectWriteOperation write;
@@ -707,6 +775,7 @@ TEST_F(LibRadosIoECPP, WriteFullRoundTripPP2)
 }
 
 TEST_F(LibRadosIoECPP, AppendRoundTripPP) {
+  SKIP_IF_CRIMSON();
   char *buf = (char *)new char[alignment];
   char *buf2 = (char *)new char[alignment];
   auto cleanup = [&] {
@@ -731,6 +800,7 @@ TEST_F(LibRadosIoECPP, AppendRoundTripPP) {
 }
 
 TEST_F(LibRadosIoECPP, TruncTestPP) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   memset(buf, 0xaa, sizeof(buf));
   bufferlist bl;
@@ -745,6 +815,7 @@ TEST_F(LibRadosIoECPP, TruncTestPP) {
 }
 
 TEST_F(LibRadosIoECPP, RemoveTestPP) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   memset(buf, 0xaa, sizeof(buf));
   bufferlist bl1;
@@ -756,6 +827,7 @@ TEST_F(LibRadosIoECPP, RemoveTestPP) {
 }
 
 TEST_F(LibRadosIoECPP, XattrsRoundTripPP) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   char attr1[] = "attr1";
   char attr1_buf[] = "foo bar baz";
@@ -775,6 +847,7 @@ TEST_F(LibRadosIoECPP, XattrsRoundTripPP) {
 }
 
 TEST_F(LibRadosIoECPP, RmXattrPP) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   char attr1[] = "attr1";
   char attr1_buf[] = "foo bar baz";
@@ -804,7 +877,24 @@ TEST_F(LibRadosIoECPP, RmXattrPP) {
   ASSERT_EQ(-ENOENT, ioctx.rmxattr("foo_rmxattr", attr2));
 }
 
+TEST_F(LibRadosIoECPP, CrcZeroWrite) {
+  SKIP_IF_CRIMSON();
+  set_allow_ec_overwrites();
+  char buf[128];
+  memset(buf, 0xcc, sizeof(buf));
+  bufferlist bl;
+  bl.append(buf, sizeof(buf));
+
+  ASSERT_EQ(0, ioctx.write("foo", bl, 0, 0));
+  ASSERT_EQ(0, ioctx.write("foo", bl, 0, sizeof(buf)));
+
+  ObjectReadOperation read;
+  read.read(0, bl.length(), NULL, NULL);
+  ASSERT_EQ(0, ioctx.operate("foo", &read, &bl));
+}
+
 TEST_F(LibRadosIoECPP, XattrListPP) {
+  SKIP_IF_CRIMSON();
   char buf[128];
   char attr1[] = "attr1";
   char attr1_buf[] = "foo bar baz";
@@ -897,6 +987,7 @@ TEST_F(LibRadosIoPP, CmpExtMismatchPP) {
 }
 
 TEST_F(LibRadosIoECPP, CmpExtPP) {
+  SKIP_IF_CRIMSON();
   bufferlist bl;
   bl.append("ceph");
   ObjectWriteOperation write1;
@@ -917,6 +1008,7 @@ TEST_F(LibRadosIoECPP, CmpExtPP) {
 }
 
 TEST_F(LibRadosIoECPP, CmpExtDNEPP) {
+  SKIP_IF_CRIMSON();
   bufferlist bl;
   bl.append(std::string(4, '\0'));
 
@@ -934,6 +1026,7 @@ TEST_F(LibRadosIoECPP, CmpExtDNEPP) {
 }
 
 TEST_F(LibRadosIoECPP, CmpExtMismatchPP) {
+  SKIP_IF_CRIMSON();
   bufferlist bl;
   bl.append("ceph");
   ObjectWriteOperation write1;
