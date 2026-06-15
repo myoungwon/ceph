@@ -74,6 +74,24 @@ public:
       const omap_keys_t& keys,
       uint32_t op_flags = 0) override final;
 
+    // for vector-native implementation
+    read_errorator::future<omap_values_t> omap_get_vectors(
+      CollectionRef c,
+      const ghobject_t& oid,
+      const omap_keys_t& keys,
+      uint32_t op_flags = 0) override final {
+      return read_errorator::make_ready_future<omap_values_t>(omap_values_t{});
+    }
+
+    // for vector-native implementation
+    read_errorator::future<omap_values_t> omap_query_vectors(
+      CollectionRef c,
+      const ghobject_t& oid,
+      const omap_keys_t& keys,
+      uint32_t op_flags = 0) override final {
+      return read_errorator::make_ready_future<omap_values_t>(omap_values_t{});
+    }
+
     read_errorator::future<ObjectStore::omap_iter_ret_t> omap_iterate(
       CollectionRef c,
       const ghobject_t &oid,

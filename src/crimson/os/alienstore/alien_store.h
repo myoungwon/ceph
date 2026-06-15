@@ -65,6 +65,24 @@ public:
     const omap_keys_t& keys,
     uint32_t op_flags = 0) override;
 
+  // for vector-native implementation
+  read_errorator::future<omap_values_t> omap_get_vectors(
+    CollectionRef c,
+    const ghobject_t& oid,
+    const omap_keys_t& keys,
+    uint32_t op_flags = 0) override {
+    return read_errorator::make_ready_future<omap_values_t>(omap_values_t{});
+  }
+
+  // for vector-native implementation
+  read_errorator::future<omap_values_t> omap_query_vectors(
+    CollectionRef c,
+    const ghobject_t& oid,
+    const omap_keys_t& keys,
+    uint32_t op_flags = 0) override {
+    return read_errorator::make_ready_future<omap_values_t>(omap_values_t{});
+  }
+
   seastar::future<std::tuple<std::vector<ghobject_t>, ghobject_t>> list_objects(
     CollectionRef c,
     const ghobject_t& start,
