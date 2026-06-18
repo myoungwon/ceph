@@ -2,14 +2,17 @@
 // vim: ts=8 sw=2 sts=2 expandtab
 
 #include "pg_backend.h"
+#include "include/rados/vector_ops.h"
 
 #include <charconv>
+#include <cstdio>
 #include <optional>
 #include <boost/range/adaptor/filtered.hpp>
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/algorithm/copy.hpp>
 #include <fmt/format.h>
 #include <fmt/ostream.h>
+#include "include/ceph_hash.h"
 #include "include/err.h" // for MAX_ERRNO
 #include "include/utime_fmt.h"
 #include <seastar/core/print.hh>
@@ -48,6 +51,65 @@ using std::string_view;
 using crimson::common::local_conf;
 
 namespace crimson::osd {
+
+static string vector_hex_u32(uint32_t value)
+{
+  char buf[9];
+  snprintf(buf, sizeof(buf), "%08x", value);
+  return string(buf);
+}
+
+static string vector_entry_id(const ceph::rados::put_vector_request_t& req)
+{
+  string value;
+  value.reserve(req.bucket_name.length() + req.index_name.length() +
+                req.key.length() + 2);
+  value.append(req.bucket_name);
+  value.push_back('\0');
+  value.append(req.index_name);
+  value.push_back('\0');
+  value.append(req.key);
+  return vector_hex_u32(ceph_str_hash_rjenkins(
+      value.c_str(), static_cast<unsigned>(value.length())));
+}
+
+template <typename T>
+static void vector_omap_set(std::map<std::string, ceph::bufferlist> *omap,
+                            const string& key,
+                            const T& value)
+{
+  ceph::bufferlist bl;
+  encode(value, bl);
+  (*omap)[key] = bl;
+}
+
+static std::map<std::string, ceph::bufferlist> put_vector_omap(
+    const ceph::rados::put_vector_request_t& req,
+    const string& entry_id)
+{
+  const string prefix = "vector." + entry_id + ".";
+  std::map<std::string, ceph::bufferlist> omap;
+
+  vector_omap_set(&omap, "vector.entry." + entry_id, req.key);
+  vector_omap_set(&omap, prefix + "bucket_name", req.bucket_name);
+  vector_omap_set(&omap, prefix + "index_name", req.index_name);
+  vector_omap_set(&omap, prefix + "key", req.key);
+  vector_omap_set(&omap, prefix + "data_type", req.data_type);
+  vector_omap_set(&omap, prefix + "distance_metric", req.distance_metric);
+  vector_omap_set(&omap, prefix + "dimension", req.dimension);
+  vector_omap_set(&omap, prefix + "layout_version",
+                  ceph::rados::vector_layout_version);
+  vector_omap_set(&omap, prefix + "placement_algorithm",
+                  req.placement_algorithm);
+  vector_omap_set(&omap, prefix + "placement_key", req.placement_key);
+  vector_omap_set(&omap, prefix + "vector_hash", req.vector_hash);
+  omap[prefix + "data"] = req.vector_data;
+  if (req.metadata.length() > 0) {
+    omap[prefix + "metadata"] = req.metadata;
+  }
+
+  return omap;
+}
 
 std::unique_ptr<PGBackend>
 PGBackend::create(pg_t pgid,
@@ -1682,6 +1744,67 @@ PGBackend::omap_get_vals_by_keys(
       }),
       ll_read_errorator::pass_further{}
     );
+}
+
+PGBackend::interruptible_future<>
+PGBackend::put_vector(
+  ObjectState& os,
+  const OSDOp& osd_op,
+  ceph::os::Transaction& txn,
+  osd_op_params_t& osd_op_params,
+  object_stat_sum_t& delta_stats)
+{
+  ceph::rados::put_vector_request_t req;
+
+  try {
+    auto p = osd_op.indata.cbegin();
+    decode(req, p);
+    if (!p.end()) {
+      throw crimson::osd::invalid_argument{};
+    }
+  } catch (const ceph::buffer::error&) {
+    throw crimson::osd::invalid_argument{};
+  }
+
+  if (req.bucket_name.empty() ||
+      req.index_name.empty() ||
+      req.key.empty() ||
+      req.vector_hash.empty() ||
+      req.dimension == 0 ||
+      req.dimension > ceph::rados::vector_max_dimension) {
+    throw crimson::osd::invalid_argument{};
+  }
+
+  size_t element_size = 0;
+  int r = ceph::rados::vector_data_type_size(req.data_type, &element_size);
+  if (r < 0) {
+    throw crimson::osd::invalid_argument{};
+  }
+
+  if (!ceph::rados::vector_distance_metric_supported(req.distance_metric)) {
+    throw crimson::osd::invalid_argument{};
+  }
+
+  const size_t expected_len =
+    static_cast<size_t>(req.dimension) * element_size;
+
+  if (req.vector_data.length() != expected_len) {
+    throw crimson::osd::invalid_argument{};
+  }
+
+  const string entry_id = vector_entry_id(req);
+  std::map<std::string, ceph::bufferlist> omap =
+    put_vector_omap(req, entry_id);
+
+  OSDOp omap_op{CEPH_OSD_OP_OMAPSETVALS};
+  encode(omap, omap_op.indata);
+
+  return omap_set_vals(
+    os,
+    omap_op,
+    txn,
+    osd_op_params,
+    delta_stats);
 }
 
 PGBackend::interruptible_future<>
