@@ -2,11 +2,13 @@
 // vim: ts=8 sw=2 sts=2 expandtab
 
 #include <climits>
+#include <cstdio>
 #include <errno.h>
 
 #include "gtest/gtest.h"
 
 #include "include/rados/librados.hpp"
+#include "include/ceph_hash.h"
 #include "include/encoding.h"
 #include "include/err.h"
 #include "include/scope_guard.h"
@@ -20,6 +22,45 @@ using std::string;
 
 typedef RadosTestPP LibRadosIoPP;
 typedef RadosTestECPP LibRadosIoECPP;
+
+static string vector_hex_u32(uint32_t value)
+{
+  char buf[9];
+  snprintf(buf, sizeof(buf), "%08x", value);
+  return string(buf);
+}
+
+static string vector_hash_string(const string& value)
+{
+  return vector_hex_u32(ceph_str_hash_rjenkins(
+      value.c_str(), static_cast<unsigned>(value.length())));
+}
+
+static string vector_test_oid(const string& bucket, const string& index,
+                              const string& key,
+                              const bufferlist& vector_data)
+{
+  (void)key;
+  const string vector_hash =
+    vector_hex_u32(vector_data.crc32c(static_cast<uint32_t>(-1)));
+  const string placement_key = vector_hash.substr(0, 4);
+  return ".rados.vector/v1/hash-v0/" + vector_hash_string(bucket) + "/" +
+    vector_hash_string(index) + "/" + placement_key;
+}
+
+static string vector_entry_id(const string& bucket, const string& index,
+                              const string& key)
+{
+  string value;
+  value.reserve(bucket.length() + index.length() + key.length() + 2);
+  value.append(bucket);
+  value.push_back('\0');
+  value.append(index);
+  value.push_back('\0');
+  value.append(key);
+  return vector_hex_u32(ceph_str_hash_rjenkins(
+      value.c_str(), static_cast<unsigned>(value.length())));
+}
 
 TEST_F(LibRadosIoPP, TooBigPP) {
   IoCtx ioctx;
@@ -38,6 +79,122 @@ TEST_F(LibRadosIoPP, SimpleWritePP) {
   ASSERT_EQ(0, ioctx.write("foo", bl, sizeof(buf), 0));
   ioctx.set_namespace("nspace");
   ASSERT_EQ(0, ioctx.write("foo", bl, sizeof(buf), 0));
+}
+
+TEST_F(LibRadosIoPP, PutVectorPP) {
+  float vector[] = {1.0, 2.0, 3.0, 4.0};
+  bufferlist vector_bl;
+  vector_bl.append(reinterpret_cast<const char *>(vector), sizeof(vector));
+  bufferlist metadata;
+  metadata.append("related-object", sizeof("related-object"));
+  bufferlist updated_metadata;
+  updated_metadata.append("updated-object", sizeof("updated-object"));
+
+  ASSERT_EQ(0, ioctx.put_vector(
+      "bucket", "index", "vec-pp",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata));
+  ASSERT_EQ(0, ioctx.put_vector(
+      "bucket", "index", "vec-pp",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), updated_metadata));
+  ASSERT_EQ(0, ioctx.put_vector(
+      "bucket", "index", "vec-pp-2",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata));
+
+  const string oid = vector_test_oid("bucket", "index", "vec-pp", vector_bl);
+  const string entry_id = vector_entry_id("bucket", "index", "vec-pp");
+  const string entry_id2 = vector_entry_id("bucket", "index", "vec-pp-2");
+  const string prefix = "vector." + entry_id + ".";
+  const string prefix2 = "vector." + entry_id2 + ".";
+  std::set<string> keys = {
+    "vector.entry." + entry_id,
+    "vector.entry." + entry_id2,
+    prefix + "data",
+    prefix + "dimension",
+    prefix + "key",
+    prefix + "metadata",
+    prefix + "vector_hash",
+    prefix2 + "key",
+  };
+  std::map<string, bufferlist> vals;
+  ASSERT_EQ(0, ioctx.omap_get_vals_by_keys(oid, keys, &vals));
+  ASSERT_EQ(keys.size(), vals.size());
+
+  auto key_iter = vals[prefix + "key"].cbegin();
+  string stored_key;
+  decode(stored_key, key_iter);
+  ASSERT_EQ("vec-pp", stored_key);
+
+  auto entry_iter = vals["vector.entry." + entry_id].cbegin();
+  string indexed_key;
+  decode(indexed_key, entry_iter);
+  ASSERT_EQ("vec-pp", indexed_key);
+
+  auto key2_iter = vals[prefix2 + "key"].cbegin();
+  string stored_key2;
+  decode(stored_key2, key2_iter);
+  ASSERT_EQ("vec-pp-2", stored_key2);
+
+  auto dimension_iter = vals[prefix + "dimension"].cbegin();
+  uint32_t stored_dimension = 0;
+  decode(stored_dimension, dimension_iter);
+  ASSERT_EQ(4u, stored_dimension);
+
+  auto vector_hash_iter = vals[prefix + "vector_hash"].cbegin();
+  string stored_vector_hash;
+  decode(stored_vector_hash, vector_hash_iter);
+  ASSERT_EQ(vector_hex_u32(vector_bl.crc32c(static_cast<uint32_t>(-1))),
+            stored_vector_hash);
+
+  ASSERT_EQ(vector_bl.length(), vals[prefix + "data"].length());
+  ASSERT_EQ(0, memcmp(vector_bl.c_str(), vals[prefix + "data"].c_str(),
+                      vector_bl.length()));
+
+  ASSERT_EQ(updated_metadata.length(), vals[prefix + "metadata"].length());
+  ASSERT_EQ(0, memcmp(updated_metadata.c_str(),
+                      vals[prefix + "metadata"].c_str(),
+                      updated_metadata.length()));
+
+  ASSERT_EQ(-EINVAL, ioctx.put_vector(
+      "bucket", "index", "bad-dim",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      0, vector, sizeof(vector), metadata));
+
+  ASSERT_EQ(-EINVAL, ioctx.put_vector(
+      "bucket", "index", "null-vector",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, nullptr, sizeof(vector), metadata));
+
+  ASSERT_EQ(-EINVAL, ioctx.put_vector(
+      "bucket", "", "empty-index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata));
+
+  ASSERT_EQ(-EINVAL, ioctx.put_vector(
+      "bucket", "index", "",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata));
+
+  ASSERT_EQ(-EOPNOTSUPP, ioctx.put_vector(
+      "bucket", "index", "bad-type",
+      static_cast<rados_vector_data_type_t>(999),
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata));
+
+  ASSERT_EQ(-EOPNOTSUPP, ioctx.put_vector(
+      "bucket", "index", "bad-metric",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      static_cast<rados_vector_distance_metric_t>(999),
+      4, vector, sizeof(vector), metadata));
 }
 
 TEST_F(LibRadosIoPP, ReadOpPP) {
