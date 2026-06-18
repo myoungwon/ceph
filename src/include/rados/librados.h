@@ -53,6 +53,18 @@ extern "C" {
 #define LIBRADOS_SUPPORTS_GETADDRS 1
 #define LIBRADOS_SUPPORTS_APP_METADATA 1
 
+#define LIBRADOS_VECTOR_MAX_DIMENSION 4096
+
+typedef enum {
+  LIBRADOS_VECTOR_DATA_TYPE_FLOAT32 = 1,
+} rados_vector_data_type_t;
+
+typedef enum {
+  LIBRADOS_VECTOR_DISTANCE_METRIC_EUCLIDEAN = 1,
+  LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE = 2,
+  LIBRADOS_VECTOR_DISTANCE_METRIC_DOT = 3,
+} rados_vector_distance_metric_t;
+
 /* RADOS lock flags
  * They are also defined in cls_lock_types.h. Keep them in sync!
  */
@@ -1517,6 +1529,32 @@ CEPH_RADOS_API uint64_t rados_get_last_version(rados_ioctx_t io);
  */
 CEPH_RADOS_API int rados_write(rados_ioctx_t io, const char *oid,
                                const char *buf, size_t len, uint64_t off);
+
+/**
+ * Store one vector entry in a vector bucket/index.
+ *
+ * Metadata is optional and may contain an application-defined related object
+ * id or serialized metadata document.
+ *
+ * @param io the io context in which the vector PUT will occur
+ * @param vector_bucket_name vector bucket name
+ * @param index_name vector index name
+ * @param key vector key
+ * @param data_type vector element data type
+ * @param distance_metric distance metric configured for this vector
+ * @param dimension number of vector dimensions
+ * @param vector_data vector data bytes
+ * @param vector_data_len length of vector_data, in bytes
+ * @param metadata optional metadata bytes
+ * @param metadata_len length of metadata, in bytes
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_put_vector(
+    rados_ioctx_t io, const char *vector_bucket_name, const char *index_name,
+    const char *key, rados_vector_data_type_t data_type,
+    rados_vector_distance_metric_t distance_metric, uint32_t dimension,
+    const void *vector_data, size_t vector_data_len, const char *metadata,
+    size_t metadata_len);
 
 /**
  * Write *len* bytes from *buf* into the *oid* object. The value of

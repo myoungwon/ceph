@@ -304,6 +304,9 @@ extern const char *ceph_osd_state_name(int s);
 	f(OMAPRMKEYRANGE, __CEPH_OSD_OP(WR, DATA, 44),	"omap-rm-key-range") \
 	f(OMAP_CMP,	__CEPH_OSD_OP(RD, DATA, 25),	"omap-cmp")	    \
 									    \
+	/* vector */							    \
+	f(PUT_VECTOR,	__CEPH_OSD_OP(WR, DATA, 46),	"put-vector")	    \
+									    \
 	/* tiering */							    \
 	f(COPY_FROM,	__CEPH_OSD_OP(WR, DATA, 26),	"copy-from")	    \
 	f(COPY_FROM2,	__CEPH_OSD_OP(WR, DATA, 45),	"copy-from2")	    \

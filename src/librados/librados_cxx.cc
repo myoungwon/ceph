@@ -1263,6 +1263,27 @@ int librados::IoCtx::write(const std::string& oid, bufferlist& bl, size_t len, u
   return io_ctx_impl->write(obj, bl, len, off);
 }
 
+int librados::IoCtx::put_vector(const std::string& vector_bucket_name,
+				const std::string& index_name,
+				const std::string& key,
+				rados_vector_data_type_t data_type,
+				rados_vector_distance_metric_t distance_metric,
+				uint32_t dimension,
+				const void *vector_data,
+				size_t vector_data_len,
+				const bufferlist& metadata)
+{
+  if (vector_data == nullptr) {
+    return -EINVAL;
+  }
+
+  bufferlist vector_bl;
+  vector_bl.append(static_cast<const char *>(vector_data), vector_data_len);
+  return io_ctx_impl->put_vector(vector_bucket_name, index_name, key,
+				 data_type, distance_metric, dimension,
+				 vector_bl, metadata);
+}
+
 int librados::IoCtx::append(const std::string& oid, bufferlist& bl, size_t len)
 {
   object_t obj(oid);

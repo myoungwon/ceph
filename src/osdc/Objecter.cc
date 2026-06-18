@@ -2467,6 +2467,7 @@ void Objecter::_send_op_account(Op *op)
     case CEPH_OSD_OP_OMAP_CMP: code = l_osdc_osdop_omap_rd; break;
 
     // OMAP write operations
+    case CEPH_OSD_OP_PUT_VECTOR:
     case CEPH_OSD_OP_OMAPSETVALS:
     case CEPH_OSD_OP_OMAPSETHEADER: code = l_osdc_osdop_omap_wr; break;
 

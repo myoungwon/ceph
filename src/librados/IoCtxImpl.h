@@ -130,6 +130,14 @@ struct librados::IoCtxImpl {
 
   int create(const object_t& oid, bool exclusive);
   int write(const object_t& oid, bufferlist& bl, size_t len, uint64_t off);
+  int put_vector(const std::string& vector_bucket_name,
+		 const std::string& index_name,
+		 const std::string& key,
+		 rados_vector_data_type_t data_type,
+		 rados_vector_distance_metric_t distance_metric,
+		 uint32_t dimension,
+		 const bufferlist& vector_data,
+		 const bufferlist& metadata);
   int append(const object_t& oid, bufferlist& bl, size_t len);
   int write_full(const object_t& oid, bufferlist& bl);
   int writesame(const object_t& oid, bufferlist& bl,

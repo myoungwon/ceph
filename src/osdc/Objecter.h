@@ -593,6 +593,12 @@ struct ObjectOperation {
   void write_full(ceph::buffer::list&& bl) {
     add_data(CEPH_OSD_OP_WRITEFULL, 0, bl.length(), bl);
   }
+  void put_vector(ceph::buffer::list& bl) {
+    add_data(CEPH_OSD_OP_PUT_VECTOR, 0, bl.length(), bl);
+  }
+  void put_vector(ceph::buffer::list&& bl) {
+    add_data(CEPH_OSD_OP_PUT_VECTOR, 0, bl.length(), bl);
+  }
   void writesame(uint64_t off, uint64_t write_len, ceph::buffer::list& bl) {
     add_writesame(CEPH_OSD_OP_WRITESAME, off, write_len, bl);
   }

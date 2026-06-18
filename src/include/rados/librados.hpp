@@ -910,6 +910,18 @@ inline namespace v14_2_0 {
      */
     int write(const std::string& oid, bufferlist& bl, size_t len, uint64_t off);
     /**
+     * store one vector entry in a vector bucket/index
+     */
+    int put_vector(const std::string& vector_bucket_name,
+		   const std::string& index_name,
+		   const std::string& key,
+		   rados_vector_data_type_t data_type,
+		   rados_vector_distance_metric_t distance_metric,
+		   uint32_t dimension,
+		   const void *vector_data,
+		   size_t vector_data_len,
+		   const bufferlist& metadata);
+    /**
      * append bytes to an object
      *
      * NOTE: this call steals the contents of @param bl.
@@ -1699,4 +1711,3 @@ inline namespace v14_2_0 {
 } // namespace librados
 
 #endif
-
