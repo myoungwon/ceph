@@ -22,6 +22,9 @@
 #include "librados/PoolAsyncCompletionImpl.h"
 #include "librados/RadosClient.h"
 #include "include/ceph_assert.h"
+#include "include/ceph_hash.h"
+#include "include/encoding.h"
+#include "include/rados/vector_ops.h"
 #include "common/valgrind.h"
 #include "common/EventTrace.h"
 
@@ -236,6 +239,63 @@ struct C_aio_selfmanaged_snap_create_Complete : public C_aio_selfmanaged_snap_op
 
 } // anonymous namespace
 } // namespace librados
+
+namespace {
+
+static constexpr const char *vector_placement_algorithm = "hash-v0";
+
+static_assert(LIBRADOS_VECTOR_MAX_DIMENSION ==
+              ceph::rados::vector_max_dimension);
+static_assert(LIBRADOS_VECTOR_DATA_TYPE_FLOAT32 ==
+              ceph::rados::vector_data_type_float32);
+static_assert(LIBRADOS_VECTOR_DISTANCE_METRIC_EUCLIDEAN ==
+              ceph::rados::vector_distance_metric_euclidean);
+static_assert(LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE ==
+              ceph::rados::vector_distance_metric_cosine);
+static_assert(LIBRADOS_VECTOR_DISTANCE_METRIC_DOT ==
+              ceph::rados::vector_distance_metric_dot);
+
+std::string vector_hex_u32(uint32_t value)
+{
+  char buf[9];
+  snprintf(buf, sizeof(buf), "%08x", value);
+  return std::string(buf);
+}
+
+std::string vector_hash_string(const std::string& value)
+{
+  return vector_hex_u32(ceph_str_hash_rjenkins(
+      value.c_str(), static_cast<unsigned>(value.length())));
+}
+
+struct vector_placement_result {
+  object_t oid;
+  std::string placement_key;
+  std::string vector_hash;
+};
+
+vector_placement_result vector_compute_hash_placement(
+    const std::string& vector_bucket_name,
+    const std::string& index_name,
+    const std::string& key,
+    const bufferlist& vector_data)
+{
+  (void)key;
+  // Provisional vector-derived placement. The final LSH/hybrid policy should
+  // replace this helper without changing the public API or storage op shape.
+  const std::string vector_hash =
+    vector_hex_u32(vector_data.crc32c(static_cast<uint32_t>(-1)));
+  const std::string placement_key = vector_hash.substr(0, 4);
+  const std::string oid =
+    ".rados.vector/v1/" + std::string(vector_placement_algorithm) + "/" +
+    vector_hash_string(vector_bucket_name) + "/" +
+    vector_hash_string(index_name) + "/" +
+    placement_key;
+
+  return {object_t(oid), placement_key, vector_hash};
+}
+
+} // anonymous namespace
 
 librados::IoCtxImpl::IoCtxImpl() = default;
 
@@ -605,6 +665,68 @@ int librados::IoCtxImpl::write(const object_t& oid, bufferlist& bl,
   mybl.substr_of(bl, 0, len);
   op.write(off, mybl);
   return operate(oid, &op, NULL);
+}
+
+int librados::IoCtxImpl::put_vector(const std::string& vector_bucket_name,
+				    const std::string& index_name,
+				    const std::string& key,
+				    rados_vector_data_type_t data_type,
+				    rados_vector_distance_metric_t distance_metric,
+				    uint32_t dimension,
+				    const bufferlist& vector_data,
+				    const bufferlist& metadata)
+{
+  if (vector_bucket_name.empty() || index_name.empty() || key.empty()) {
+    return -EINVAL;
+  }
+
+  if (dimension == 0 || dimension > LIBRADOS_VECTOR_MAX_DIMENSION) {
+    return -EINVAL;
+  }
+
+  size_t element_size = 0;
+  const uint32_t encoded_data_type = static_cast<uint32_t>(data_type);
+  int r = ceph::rados::vector_data_type_size(encoded_data_type, &element_size);
+  if (r < 0) {
+    return r;
+  }
+
+  const uint32_t encoded_distance_metric =
+    static_cast<uint32_t>(distance_metric);
+  if (!ceph::rados::vector_distance_metric_supported(
+        encoded_distance_metric)) {
+    return -EOPNOTSUPP;
+  }
+
+  const size_t expected_len = static_cast<size_t>(dimension) * element_size;
+  if (vector_data.length() != expected_len) {
+    return -EINVAL;
+  }
+
+  const auto placement = vector_compute_hash_placement(
+      vector_bucket_name, index_name, key, vector_data);
+
+  ::ObjectOperation op;
+  prepare_assert_ops(&op);
+
+  ceph::rados::put_vector_request_t req;
+  req.bucket_name = vector_bucket_name;
+  req.index_name = index_name;
+  req.key = key;
+  req.data_type = encoded_data_type;
+  req.distance_metric = encoded_distance_metric;
+  req.dimension = dimension;
+  req.vector_data = vector_data;
+  req.metadata = metadata;
+  req.placement_algorithm = vector_placement_algorithm;
+  req.placement_key = placement.placement_key;
+  req.vector_hash = placement.vector_hash;
+
+  bufferlist payload;
+  encode(req, payload);
+  op.put_vector(payload);
+
+  return operate(placement.oid, &op, NULL);
 }
 
 int librados::IoCtxImpl::append(const object_t& oid, bufferlist& bl, size_t len)
@@ -2258,4 +2380,3 @@ int librados::IoCtxImpl::application_metadata_list(const std::string& app_name,
     });
   return r;
 }
-

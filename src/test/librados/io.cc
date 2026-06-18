@@ -2,8 +2,10 @@
 // vim: ts=8 sw=2 sts=2 expandtab
 
 #include <climits>
+#include <cstdio>
 
 #include "include/rados/librados.h"
+#include "include/ceph_hash.h"
 #include "include/encoding.h"
 #include "include/err.h"
 #include "include/scope_guard.h"
@@ -19,12 +21,128 @@ using std::string;
 typedef RadosTest LibRadosIo;
 typedef RadosTestEC LibRadosIoEC;
 
+static string vector_hex_u32(uint32_t value)
+{
+  char buf[9];
+  snprintf(buf, sizeof(buf), "%08x", value);
+  return string(buf);
+}
+
+static string vector_hash_string(const string& value)
+{
+  return vector_hex_u32(ceph_str_hash_rjenkins(
+      value.c_str(), static_cast<unsigned>(value.length())));
+}
+
+static string vector_test_oid(const string& bucket, const string& index,
+                              const string& key, const void *vector_data,
+                              size_t vector_data_len)
+{
+  (void)key;
+  bufferlist bl;
+  bl.append(static_cast<const char *>(vector_data), vector_data_len);
+  const string vector_hash =
+    vector_hex_u32(bl.crc32c(static_cast<uint32_t>(-1)));
+  const string placement_key = vector_hash.substr(0, 4);
+  return ".rados.vector/v1/hash-v0/" + vector_hash_string(bucket) + "/" +
+    vector_hash_string(index) + "/" + placement_key;
+}
+
+static string vector_entry_id(const string& bucket, const string& index,
+                              const string& key)
+{
+  string value;
+  value.reserve(bucket.length() + index.length() + key.length() + 2);
+  value.append(bucket);
+  value.push_back('\0');
+  value.append(index);
+  value.push_back('\0');
+  value.append(key);
+  return vector_hex_u32(ceph_str_hash_rjenkins(
+      value.c_str(), static_cast<unsigned>(value.length())));
+}
+
 TEST_F(LibRadosIo, SimpleWrite) {
   char buf[128];
   memset(buf, 0xcc, sizeof(buf));
   ASSERT_EQ(0, rados_write(ioctx, "foo", buf, sizeof(buf), 0));
   rados_ioctx_set_namespace(ioctx, "nspace");
   ASSERT_EQ(0, rados_write(ioctx, "foo", buf, sizeof(buf), 0));
+}
+
+TEST_F(LibRadosIo, PutVector) {
+  float vector[] = {1.0, 2.0, 3.0, 4.0};
+  const char metadata[] = "related-object";
+
+  ASSERT_EQ(0, rados_put_vector(
+      ioctx, "bucket", "index", "vec-1",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata, sizeof(metadata)));
+
+  const string oid = vector_test_oid("bucket", "index", "vec-1",
+                                     vector, sizeof(vector));
+  const string entry_id = vector_entry_id("bucket", "index", "vec-1");
+  const string data_key = "vector." + entry_id + ".data";
+  const char *keys[] = {data_key.c_str()};
+  rados_omap_iter_t iter;
+  int prval = 0;
+  rados_read_op_t op = rados_create_read_op();
+  rados_read_op_omap_get_vals_by_keys(op, keys, 1, &iter, &prval);
+  ASSERT_EQ(0, rados_read_op_operate(op, ioctx, oid.c_str(), 0));
+  rados_release_read_op(op);
+  ASSERT_EQ(0, prval);
+  ASSERT_EQ(1u, rados_omap_iter_size(iter));
+  char *stored_key = nullptr;
+  char *stored_vector = nullptr;
+  size_t stored_vector_len = 0;
+  ASSERT_EQ(0, rados_omap_get_next(
+      iter, &stored_key, &stored_vector, &stored_vector_len));
+  ASSERT_STREQ(data_key.c_str(), stored_key);
+  ASSERT_EQ(sizeof(vector), stored_vector_len);
+  ASSERT_EQ(0, memcmp(stored_vector, vector, sizeof(vector)));
+  ASSERT_EQ(0, rados_omap_get_next(
+      iter, &stored_key, &stored_vector, &stored_vector_len));
+  ASSERT_EQ((char*)NULL, stored_key);
+  ASSERT_EQ((char*)NULL, stored_vector);
+  ASSERT_EQ(0u, stored_vector_len);
+  rados_omap_get_end(iter);
+
+  ASSERT_EQ(-EINVAL, rados_put_vector(
+      ioctx, "bucket", "index", "bad-dim",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      0, vector, sizeof(vector), metadata, sizeof(metadata)));
+
+  ASSERT_EQ(-EINVAL, rados_put_vector(
+      ioctx, "bucket", "index", "null-vector",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, nullptr, sizeof(vector), metadata, sizeof(metadata)));
+
+  ASSERT_EQ(-EINVAL, rados_put_vector(
+      ioctx, "bucket", "", "empty-index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata, sizeof(metadata)));
+
+  ASSERT_EQ(-EINVAL, rados_put_vector(
+      ioctx, "bucket", "index", "",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata, sizeof(metadata)));
+
+  ASSERT_EQ(-EOPNOTSUPP, rados_put_vector(
+      ioctx, "bucket", "index", "bad-type",
+      static_cast<rados_vector_data_type_t>(999),
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata, sizeof(metadata)));
+
+  ASSERT_EQ(-EOPNOTSUPP, rados_put_vector(
+      ioctx, "bucket", "index", "bad-metric",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      static_cast<rados_vector_distance_metric_t>(999),
+      4, vector, sizeof(vector), metadata, sizeof(metadata)));
 }
 
 TEST_F(LibRadosIo, TooBig) {

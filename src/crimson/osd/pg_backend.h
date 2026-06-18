@@ -380,6 +380,12 @@ public:
     ceph::os::Transaction& trans,
     osd_op_params_t& osd_op_params,
     object_stat_sum_t& delta_stats);
+  interruptible_future<> put_vector(
+    ObjectState& os,
+    const OSDOp& osd_op,
+    ceph::os::Transaction& txn,
+    osd_op_params_t& osd_op_params,
+    object_stat_sum_t& delta_stats);
   ll_read_ierrorator::future<ceph::bufferlist> omap_get_header(
     const crimson::os::CollectionRef& c,
     const ghobject_t& oid,

@@ -1317,6 +1317,38 @@ extern "C" int LIBRADOS_C_API_DEFAULT_F(rados_write)(
 }
 LIBRADOS_C_API_BASE_DEFAULT(rados_write);
 
+extern "C" int LIBRADOS_C_API_DEFAULT_F(rados_put_vector)(
+  rados_ioctx_t io,
+  const char *vector_bucket_name,
+  const char *index_name,
+  const char *key,
+  rados_vector_data_type_t data_type,
+  rados_vector_distance_metric_t distance_metric,
+  uint32_t dimension,
+  const void *vector_data,
+  size_t vector_data_len,
+  const char *metadata,
+  size_t metadata_len)
+{
+  if (io == nullptr || vector_bucket_name == nullptr ||
+      index_name == nullptr || key == nullptr || vector_data == nullptr ||
+      (metadata_len > 0 && metadata == nullptr)) {
+    return -EINVAL;
+  }
+
+  librados::IoCtxImpl *ctx = (librados::IoCtxImpl *)io;
+  bufferlist vector_bl;
+  vector_bl.append(static_cast<const char *>(vector_data), vector_data_len);
+  bufferlist metadata_bl;
+  if (metadata_len > 0) {
+    metadata_bl.append(metadata, metadata_len);
+  }
+  return ctx->put_vector(vector_bucket_name, index_name, key,
+			 data_type, distance_metric, dimension,
+			 vector_bl, metadata_bl);
+}
+LIBRADOS_C_API_BASE_DEFAULT(rados_put_vector);
+
 extern "C" int LIBRADOS_C_API_DEFAULT_F(rados_append)(
   rados_ioctx_t io,
   const char *o,
