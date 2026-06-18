@@ -18,6 +18,7 @@
 #include <errno.h>
 
 #include <charconv>
+#include <cstdio>
 #include <sstream>
 #include <utility>
 
@@ -30,12 +31,14 @@
 #include "common/CDC.h"
 #include "common/debug.h"
 #include "common/EventTrace.h"
+#include "include/ceph_hash.h"
 #include "common/ceph_crypto.h"
 #include "common/config.h"
 #include "common/errno.h"
 #include "common/perf_counters.h"
 #include "common/scrub_types.h"
 #include "include/compat.h"
+#include "include/rados/vector_ops.h"
 #include "json_spirit/json_spirit_reader.h"
 #include "json_spirit/json_spirit_value.h"
 #include "messages/MCommandReply.h"
@@ -112,6 +115,65 @@ using ceph::encode_destructively;
 using namespace ceph::osd::scheduler;
 using TOPNSPC::common::cmd_getval;
 using TOPNSPC::common::cmd_getval_or;
+
+static string vector_hex_u32(uint32_t value)
+{
+  char buf[9];
+  snprintf(buf, sizeof(buf), "%08x", value);
+  return string(buf);
+}
+
+static string vector_entry_id(const ceph::rados::put_vector_request_t& req)
+{
+  string value;
+  value.reserve(req.bucket_name.length() + req.index_name.length() +
+                req.key.length() + 2);
+  value.append(req.bucket_name);
+  value.push_back('\0');
+  value.append(req.index_name);
+  value.push_back('\0');
+  value.append(req.key);
+  return vector_hex_u32(ceph_str_hash_rjenkins(
+      value.c_str(), static_cast<unsigned>(value.length())));
+}
+
+template <typename T>
+static void vector_omap_set(map<string, bufferlist> *omap,
+                            const string& key,
+                            const T& value)
+{
+  bufferlist bl;
+  encode(value, bl);
+  (*omap)[key] = bl;
+}
+
+static map<string, bufferlist> put_vector_omap(
+    const ceph::rados::put_vector_request_t& req,
+    const string& entry_id)
+{
+  const string prefix = "vector." + entry_id + ".";
+  map<string, bufferlist> omap;
+
+  vector_omap_set(&omap, "vector.entry." + entry_id, req.key);
+  vector_omap_set(&omap, prefix + "bucket_name", req.bucket_name);
+  vector_omap_set(&omap, prefix + "index_name", req.index_name);
+  vector_omap_set(&omap, prefix + "key", req.key);
+  vector_omap_set(&omap, prefix + "data_type", req.data_type);
+  vector_omap_set(&omap, prefix + "distance_metric", req.distance_metric);
+  vector_omap_set(&omap, prefix + "dimension", req.dimension);
+  vector_omap_set(&omap, prefix + "layout_version",
+                  ceph::rados::vector_layout_version);
+  vector_omap_set(&omap, prefix + "placement_algorithm",
+                  req.placement_algorithm);
+  vector_omap_set(&omap, prefix + "placement_key", req.placement_key);
+  vector_omap_set(&omap, prefix + "vector_hash", req.vector_hash);
+  omap[prefix + "data"] = req.vector_data;
+  if (req.metadata.length() > 0) {
+    omap[prefix + "metadata"] = req.metadata;
+  }
+
+  return omap;
+}
 
 template <typename T>
 static ostream& _prefix(std::ostream *_dout, T *pg) {
@@ -6995,6 +7057,90 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
           std::max((uint64_t)op.extent.length, oi.size));
 	write_update_size_and_usage(ctx->delta_stats, oi, ctx->modified_ranges,
 	    0, op.extent.length, true);
+      }
+      break;
+
+    case CEPH_OSD_OP_PUT_VECTOR:
+      ++ctx->num_write;
+      result = 0;
+      {
+	if (!pool.info.supports_omap()) {
+	  result = -EOPNOTSUPP;
+	  break;
+	}
+	if (op.extent.length == 0 ||
+	    op.extent.length != osd_op.indata.length()) {
+	  result = -EINVAL;
+	  break;
+	}
+
+	ceph::rados::put_vector_request_t req;
+	try {
+	  auto reqp = osd_op.indata.cbegin();
+	  decode(req, reqp);
+	  if (!reqp.end()) {
+	    result = -EINVAL;
+	    break;
+	  }
+	} catch (const ceph::buffer::error&) {
+	  result = -EINVAL;
+	  break;
+	}
+
+	if (req.bucket_name.empty() || req.index_name.empty() ||
+	    req.key.empty()) {
+	  result = -EINVAL;
+	  break;
+	}
+	if (req.placement_algorithm.empty() || req.placement_key.empty() ||
+	    req.vector_hash.empty()) {
+	  result = -EINVAL;
+	  break;
+	}
+	if (req.dimension == 0 ||
+	    req.dimension > ceph::rados::vector_max_dimension) {
+	  result = -EINVAL;
+	  break;
+	}
+
+	size_t element_size = 0;
+	result = ceph::rados::vector_data_type_size(
+	  req.data_type, &element_size);
+	if (result < 0) {
+	  break;
+	}
+	if (!ceph::rados::vector_distance_metric_supported(
+	      req.distance_metric)) {
+	  result = -EOPNOTSUPP;
+	  break;
+	}
+
+	const size_t expected_len =
+	  static_cast<size_t>(req.dimension) * element_size;
+	if (req.vector_data.length() != expected_len) {
+	  result = -EINVAL;
+	  break;
+	}
+
+	maybe_create_new_object(ctx);
+
+	const string entry_id = vector_entry_id(req);
+	map<string, bufferlist> omap = put_vector_omap(req, entry_id);
+	bufferlist to_set_bl;
+	encode(omap, to_set_bl);
+	t->omap_setkeys(soid, to_set_bl);
+
+	if (req.metadata.length() == 0) {
+	  set<string> to_remove;
+	  to_remove.insert("vector." + entry_id + ".metadata");
+	  t->omap_rmkeys(soid, to_remove);
+	}
+
+	ctx->clean_regions.mark_omap_dirty();
+	ctx->delta_stats.num_wr++;
+	ctx->delta_stats.num_wr_kb += shift_round_up(to_set_bl.length(), 10);
+	obs.oi.set_flag(object_info_t::FLAG_OMAP);
+	obs.oi.clear_omap_digest();
       }
       break;
 

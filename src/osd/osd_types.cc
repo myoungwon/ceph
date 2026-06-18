@@ -7449,6 +7449,7 @@ ostream& operator<<(ostream& out, const OSDOp& op)
     case CEPH_OSD_OP_SYNC_READ:
     case CEPH_OSD_OP_WRITE:
     case CEPH_OSD_OP_WRITEFULL:
+    case CEPH_OSD_OP_PUT_VECTOR:
     case CEPH_OSD_OP_ZERO:
     case CEPH_OSD_OP_APPEND:
     case CEPH_OSD_OP_MAPEXT:
