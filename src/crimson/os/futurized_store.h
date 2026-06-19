@@ -104,6 +104,20 @@ public:
       const omap_keys_t& keys,
       uint32_t op_flags = 0) = 0;
 
+    // for vector-native implementation
+    virtual read_errorator::future<omap_values_t> omap_get_vectors(
+      CollectionRef c,
+      const ghobject_t& oid,
+      const omap_keys_t& keys,
+      uint32_t op_flags = 0) = 0;
+
+    // for vector-native implementation
+    virtual read_errorator::future<omap_values_t> omap_query_vectors(
+      CollectionRef c,
+      const ghobject_t& oid,
+      const omap_keys_t& keys,
+      uint32_t op_flags = 0) = 0;
+
     /**
      * Iterate over object map with user-provided callable
      *

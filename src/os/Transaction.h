@@ -156,6 +156,7 @@ public:
 #ifdef WITH_CRIMSON
     OP_TOUCH_TEMP = 44, // cid, temp_oid, target_oid
 #endif
+    OP_PUT_VECTOR = 45, // for vector-native implementation
   };
 
   // Transaction hint type

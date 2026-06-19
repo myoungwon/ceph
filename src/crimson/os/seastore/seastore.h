@@ -44,6 +44,9 @@ enum class op_type_t : uint8_t {
     STAT,
     OMAP_GET_VALUES,
     OMAP_ITERATE,
+    OMAP_PUT_VECTORS,
+    OMAP_GET_VECTORS,
+    OMAP_QUERY_VECTORS,
     MAX
 };
 
@@ -134,6 +137,18 @@ public:
       uint32_t op_flags = 0) override final;
 
     read_errorator::future<omap_values_t> omap_get_values(
+      CollectionRef c,
+      const ghobject_t& oid,
+      const omap_keys_t& keys,
+      uint32_t op_flags = 0) override final;
+
+    read_errorator::future<omap_values_t> omap_get_vectors(
+      CollectionRef c,
+      const ghobject_t& oid,
+      const omap_keys_t& keys,
+      uint32_t op_flags = 0) override final;
+
+    read_errorator::future<omap_values_t> omap_query_vectors(
       CollectionRef c,
       const ghobject_t& oid,
       const omap_keys_t& keys,
@@ -477,6 +492,18 @@ public:
       omap_root_t&& root,
       const omap_keys_t& keys) const;
 
+    // for vector-native implementation
+    base_iertr::future<omap_values_t> omaptree_get_vectors(
+      Transaction& t,
+      omap_root_t&& root,
+      const omap_keys_t& keys) const;
+
+    // for vector-native implementation
+    base_iertr::future<omap_values_t> omaptree_query_vectors(
+      Transaction& t,
+      omap_root_t&& root,
+      const omap_keys_t& keys) const;
+
     using omap_values_paged_t = std::tuple<bool, omap_values_t>;
     base_iertr::future<omap_values_paged_t> omaptree_get_values(
       Transaction& t,
@@ -486,6 +513,13 @@ public:
     using omaptree_set_keys_iertr = base_iertr::extend<
       crimson::ct_error::value_too_large>;
     omaptree_set_keys_iertr::future<> omaptree_set_keys(
+      Transaction& t,
+      omap_root_t&& root,
+      Onode& onode,
+      std::map<std::string, ceph::bufferlist>&& aset);
+
+    // for vector-native implementation
+    omaptree_set_keys_iertr::future<> omaptree_put_vectors(
       Transaction& t,
       omap_root_t&& root,
       Onode& onode,
