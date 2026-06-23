@@ -3143,7 +3143,7 @@ SeaStore::Shard::omaptree_query_vectors(
     co_return ret;
   }
 
-  // TODO: search neighbors 
+  // TODO: search neighbors
   ObjectStore::omap_iter_seek_t start_from = ObjectStore::omap_iter_seek_t::min_lower_bound();
   ceph::bufferlist result;
   BtreeOMapManager manager(*transaction_manager);
@@ -3453,13 +3453,11 @@ SeaStore::Shard::omaptree_put_vectors(
 	  root = new_root;
 	});
       }
-      // TODO
       for (auto &p : kvs) {
-	// This is optionally set by upper layer
-	assert(!p.first.stars_with("_CONTENT_"));
+	ceph_assert(!p.first.empty());
 #if 0
 	if (p.first.empty()) {
-	  p.first = "_CONTENT_" + 
+	  p.first = "_CONTENT_" +
 	    TOPNSPC::crypto::digest<TOPNSPC::crypto::SHA256>(
 	    p.second
 	    ).to_str();

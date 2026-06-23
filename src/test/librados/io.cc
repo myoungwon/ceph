@@ -48,20 +48,6 @@ static string vector_test_oid(const string& bucket, const string& index,
     vector_hash_string(index) + "/" + placement_key;
 }
 
-static string vector_entry_id(const string& bucket, const string& index,
-                              const string& key)
-{
-  string value;
-  value.reserve(bucket.length() + index.length() + key.length() + 2);
-  value.append(bucket);
-  value.push_back('\0');
-  value.append(index);
-  value.push_back('\0');
-  value.append(key);
-  return vector_hex_u32(ceph_str_hash_rjenkins(
-      value.c_str(), static_cast<unsigned>(value.length())));
-}
-
 TEST_F(LibRadosIo, SimpleWrite) {
   char buf[128];
   memset(buf, 0xcc, sizeof(buf));
@@ -82,8 +68,11 @@ TEST_F(LibRadosIo, PutVector) {
 
   const string oid = vector_test_oid("bucket", "index", "vec-1",
                                      vector, sizeof(vector));
-  const string entry_id = vector_entry_id("bucket", "index", "vec-1");
-  const string data_key = "vector." + entry_id + ".data";
+  bufferlist vector_bl;
+  vector_bl.append(reinterpret_cast<const char *>(vector), sizeof(vector));
+  const string vector_hash =
+    vector_hex_u32(vector_bl.crc32c(static_cast<uint32_t>(-1)));
+  const string data_key = "_CONTENT_" + vector_hash;
   const char *keys[] = {data_key.c_str()};
   rados_omap_iter_t iter;
   int prval = 0;
