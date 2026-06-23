@@ -1796,15 +1796,20 @@ PGBackend::put_vector(
   std::map<std::string, ceph::bufferlist> omap =
     put_vector_omap(req, entry_id);
 
-  OSDOp omap_op{CEPH_OSD_OP_OMAPSETVALS};
-  encode(omap, omap_op.indata);
+  ceph::bufferlist encoded_omap;
+  encode(omap, encoded_omap);
 
-  return omap_set_vals(
-    os,
-    omap_op,
-    txn,
-    osd_op_params,
-    delta_stats);
+  maybe_create_new_object(os, txn, delta_stats);
+  txn.put_vector(coll->get_cid(), ghobject_t{os.oi.soid}, omap);
+  osd_op_params.clean_regions.mark_omap_dirty();
+  delta_stats.num_wr++;
+  delta_stats.num_wr_kb += shift_round_up(encoded_omap.length(), 10);
+  if (!os.oi.is_omap()) {
+    os.oi.set_flag(object_info_t::FLAG_OMAP);
+    delta_stats.num_objects_omap++;
+  }
+  os.oi.clear_omap_digest();
+  return seastar::now();
 }
 
 PGBackend::interruptible_future<>

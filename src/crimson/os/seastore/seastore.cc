@@ -2166,6 +2166,7 @@ SeaStore::Shard::_do_transaction_step(
           op->op == Transaction::OP_SETATTRS ||
           op->op == Transaction::OP_RMATTR ||
           op->op == Transaction::OP_OMAP_SETKEYS ||
+          op->op == Transaction::OP_PUT_VECTOR ||
           op->op == Transaction::OP_OMAP_RMKEYS ||
           op->op == Transaction::OP_OMAP_RMKEYRANGE ||
           op->op == Transaction::OP_OMAP_SETHEADER) {
