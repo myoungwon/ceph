@@ -70,10 +70,10 @@ template <> struct fmt::formatter<crimson::os::seastore::op_type_t>
       name = "put_vectors";
       break;
     case op_type_t::OMAP_GET_VECTORS:
-      name = "put_vectors";
+      name = "get_vectors";
       break;
     case op_type_t::OMAP_QUERY_VECTORS:
-      name = "put_vectors";
+      name = "query_vectors";
       break;
     case op_type_t::MAX:
       name = "unknown";
