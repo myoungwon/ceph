@@ -197,6 +197,60 @@ TEST_F(LibRadosIoPP, PutVectorPP) {
       4, vector, sizeof(vector), metadata));
 }
 
+TEST_F(LibRadosIoPP, QueryVectorsValidationPP) {
+  float vector[] = {1.0, 2.0, 3.0, 4.0};
+  std::vector<query_vectors_result_entry> results;
+
+  ASSERT_EQ(-EOPNOTSUPP, ioctx.query_vectors(
+      "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 10, true, &results));
+  ASSERT_TRUE(results.empty());
+
+  ASSERT_EQ(-EINVAL, ioctx.query_vectors(
+      "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      0, vector, sizeof(vector), 10, true, &results));
+
+  ASSERT_EQ(-EINVAL, ioctx.query_vectors(
+      "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 0, true, &results));
+
+  ASSERT_EQ(-EINVAL, ioctx.query_vectors(
+      "", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 10, true, &results));
+
+  ASSERT_EQ(-EINVAL, ioctx.query_vectors(
+      "bucket", "",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 10, true, &results));
+
+  ASSERT_EQ(-EINVAL, ioctx.query_vectors(
+      "bucket", "index",
+      static_cast<rados_vector_data_type_t>(999),
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 10, true, &results));
+
+  ASSERT_EQ(-EINVAL, ioctx.query_vectors(
+      "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      static_cast<rados_vector_distance_metric_t>(999),
+      4, vector, sizeof(vector), 10, true, &results));
+
+  ASSERT_EQ(-EINVAL, ioctx.query_vectors(
+      "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector) - 1, 10, true, &results));
+}
+
 TEST_F(LibRadosIoPP, ReadOpPP) {
   char buf[128];
   memset(buf, 0xcc, sizeof(buf));
