@@ -20,6 +20,7 @@
 #include "librados/ListObjectImpl.h"
 #include "librados/librados_util.h"
 
+#include <cstdlib>
 #include <string>
 #include <map>
 #include <set>
@@ -1348,6 +1349,56 @@ extern "C" int LIBRADOS_C_API_DEFAULT_F(rados_put_vector)(
 			 vector_bl, metadata_bl);
 }
 LIBRADOS_C_API_BASE_DEFAULT(rados_put_vector);
+
+extern "C" int LIBRADOS_C_API_DEFAULT_F(rados_query_vectors)(
+  rados_ioctx_t io,
+  const char *vector_bucket_name,
+  const char *index_name,
+  rados_vector_data_type_t data_type,
+  rados_vector_distance_metric_t distance_metric,
+  uint32_t dimension,
+  const void *query_vector,
+  size_t query_vector_len,
+  uint32_t top_k,
+  int return_distance,
+  rados_query_vectors_result_t *result)
+{
+  if (result != nullptr) {
+    result->entries = nullptr;
+    result->entries_len = 0;
+  }
+  if (io == nullptr || vector_bucket_name == nullptr ||
+      index_name == nullptr || query_vector == nullptr ||
+      result == nullptr) {
+    return -EINVAL;
+  }
+
+  librados::IoCtxImpl *ctx = (librados::IoCtxImpl *)io;
+  bufferlist query_bl;
+  query_bl.append(static_cast<const char *>(query_vector), query_vector_len);
+  std::vector<librados::query_vectors_result_entry> entries;
+  return ctx->query_vectors(vector_bucket_name, index_name,
+			    data_type, distance_metric, dimension,
+			    query_bl, top_k, return_distance != 0,
+			    &entries);
+}
+LIBRADOS_C_API_BASE_DEFAULT(rados_query_vectors);
+
+extern "C" void LIBRADOS_C_API_DEFAULT_F(
+    rados_query_vectors_result_release)(
+  rados_query_vectors_result_t *result)
+{
+  if (result == nullptr) {
+    return;
+  }
+  for (size_t i = 0; i < result->entries_len; ++i) {
+    free(result->entries[i].key);
+  }
+  free(result->entries);
+  result->entries = nullptr;
+  result->entries_len = 0;
+}
+LIBRADOS_C_API_BASE_DEFAULT(rados_query_vectors_result_release);
 
 extern "C" int LIBRADOS_C_API_DEFAULT_F(rados_append)(
   rados_ioctx_t io,

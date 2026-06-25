@@ -1284,6 +1284,29 @@ int librados::IoCtx::put_vector(const std::string& vector_bucket_name,
 				 vector_bl, metadata);
 }
 
+int librados::IoCtx::query_vectors(
+    const std::string& vector_bucket_name,
+    const std::string& index_name,
+    rados_vector_data_type_t data_type,
+    rados_vector_distance_metric_t distance_metric,
+    uint32_t dimension,
+    const void *query_vector,
+    size_t query_vector_len,
+    uint32_t top_k,
+    bool return_distance,
+    std::vector<librados::query_vectors_result_entry> *results)
+{
+  if (query_vector == nullptr || results == nullptr) {
+    return -EINVAL;
+  }
+
+  bufferlist query_bl;
+  query_bl.append(static_cast<const char *>(query_vector), query_vector_len);
+  return io_ctx_impl->query_vectors(vector_bucket_name, index_name,
+				    data_type, distance_metric, dimension,
+				    query_bl, top_k, return_distance, results);
+}
+
 int librados::IoCtx::append(const std::string& oid, bufferlist& bl, size_t len)
 {
   object_t obj(oid);

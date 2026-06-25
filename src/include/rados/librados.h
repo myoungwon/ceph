@@ -65,6 +65,16 @@ typedef enum {
   LIBRADOS_VECTOR_DISTANCE_METRIC_DOT = 3,
 } rados_vector_distance_metric_t;
 
+typedef struct {
+  char *key;
+  float distance;
+} rados_query_vectors_result_entry_t;
+
+typedef struct {
+  rados_query_vectors_result_entry_t *entries;
+  size_t entries_len;
+} rados_query_vectors_result_t;
+
 /* RADOS lock flags
  * They are also defined in cls_lock_types.h. Keep them in sync!
  */
@@ -1555,6 +1565,41 @@ CEPH_RADOS_API int rados_put_vector(
     rados_vector_distance_metric_t distance_metric, uint32_t dimension,
     const void *vector_data, size_t vector_data_len, const char *metadata,
     size_t metadata_len);
+
+/**
+ * Query vectors from a vector bucket/index.
+ *
+ * This API currently validates the request and returns -EOPNOTSUPP until the
+ * vector query planner and backend execution paths are implemented.
+ *
+ * @param io the io context in which the vector query will occur
+ * @param vector_bucket_name vector bucket name
+ * @param index_name vector index name
+ * @param data_type query vector element data type
+ * @param distance_metric distance metric configured for this vector query
+ * @param dimension number of vector dimensions
+ * @param query_vector query vector data bytes
+ * @param query_vector_len length of query_vector, in bytes
+ * @param top_k number of nearest vectors requested
+ * @param return_distance whether result distances should be returned
+ * @param result query result output, released with
+ *        rados_query_vectors_result_release()
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_query_vectors(
+    rados_ioctx_t io, const char *vector_bucket_name, const char *index_name,
+    rados_vector_data_type_t data_type,
+    rados_vector_distance_metric_t distance_metric, uint32_t dimension,
+    const void *query_vector, size_t query_vector_len, uint32_t top_k,
+    int return_distance, rados_query_vectors_result_t *result);
+
+/**
+ * Release memory owned by a vector query result.
+ *
+ * @param result result returned by rados_query_vectors()
+ */
+CEPH_RADOS_API void rados_query_vectors_result_release(
+    rados_query_vectors_result_t *result);
 
 /**
  * Write *len* bytes from *buf* into the *oid* object. The value of
