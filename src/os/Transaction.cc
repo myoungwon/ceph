@@ -401,6 +401,24 @@ void Transaction::dump(ceph::Formatter *f)
       }
       break;
 
+    case Transaction::OP_PUT_VECTOR:
+      {
+        coll_t cid = i.get_cid(op->cid);
+        ghobject_t oid = i.get_oid(op->oid);
+	map<string, bufferlist> aset;
+	i.decode_attrset(aset);
+	f->dump_string("op_name", "put_vector");
+	f->dump_stream("collection") << cid;
+	f->dump_stream("oid") << oid;
+	f->open_object_section("attr_lens");
+	for (map<string, bufferlist>::iterator p = aset.begin();
+	    p != aset.end(); ++p) {
+	  f->dump_unsigned(p->first.c_str(), p->second.length());
+	}
+	f->close_section();
+      }
+      break;
+
     case Transaction::OP_OMAP_RMKEYS:
       {
         coll_t cid = i.get_cid(op->cid);

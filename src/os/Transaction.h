@@ -430,6 +430,7 @@ public:
     case OP_COLL_REMOVE:
     case OP_OMAP_CLEAR:
     case OP_OMAP_SETKEYS:
+    case OP_PUT_VECTOR:
     case OP_OMAP_RMKEYS:
     case OP_OMAP_RMKEYRANGE:
     case OP_OMAP_SETHEADER:
@@ -1188,6 +1189,35 @@ public:
     ) {
     Op* _op = _get_next_op();
     _op->op = OP_OMAP_SETKEYS;
+    _op->cid = _get_coll_id(cid);
+    _op->oid = _get_object_id(oid);
+    data_misaligned_bl.append(attrset_bl);
+    data.ops = data.ops + 1;
+  }
+
+  /// Put vector-native keys on oid omap.
+  void put_vector(
+    const coll_t& cid,                           ///< [in] Collection containing oid
+    const ghobject_t &oid,                       ///< [in] Object to update
+    const std::map<std::string, ceph::buffer::list> &attrset ///< [in] Vector keys and values
+    ) {
+    using ceph::encode;
+    Op* _op = _get_next_op();
+    _op->op = OP_PUT_VECTOR;
+    _op->cid = _get_coll_id(cid);
+    _op->oid = _get_object_id(oid);
+    encode(attrset, data_misaligned_bl);
+    data.ops = data.ops + 1;
+  }
+
+  /// Put vector-native keys on oid omap (ceph::buffer::list variant).
+  void put_vector(
+    const coll_t &cid,                           ///< [in] Collection containing oid
+    const ghobject_t &oid,                       ///< [in] Object to update
+    const ceph::buffer::list &attrset_bl         ///< [in] Vector keys and values
+    ) {
+    Op* _op = _get_next_op();
+    _op->op = OP_PUT_VECTOR;
     _op->cid = _get_coll_id(cid);
     _op->oid = _get_object_id(oid);
     data_misaligned_bl.append(attrset_bl);

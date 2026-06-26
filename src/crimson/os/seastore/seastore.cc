@@ -70,10 +70,10 @@ template <> struct fmt::formatter<crimson::os::seastore::op_type_t>
       name = "put_vectors";
       break;
     case op_type_t::OMAP_GET_VECTORS:
-      name = "put_vectors";
+      name = "get_vectors";
       break;
     case op_type_t::OMAP_QUERY_VECTORS:
-      name = "put_vectors";
+      name = "query_vectors";
       break;
     case op_type_t::MAX:
       name = "unknown";
@@ -2166,6 +2166,7 @@ SeaStore::Shard::_do_transaction_step(
           op->op == Transaction::OP_SETATTRS ||
           op->op == Transaction::OP_RMATTR ||
           op->op == Transaction::OP_OMAP_SETKEYS ||
+          op->op == Transaction::OP_PUT_VECTOR ||
           op->op == Transaction::OP_OMAP_RMKEYS ||
           op->op == Transaction::OP_OMAP_RMKEYRANGE ||
           op->op == Transaction::OP_OMAP_SETHEADER) {
@@ -3142,7 +3143,7 @@ SeaStore::Shard::omaptree_query_vectors(
     co_return ret;
   }
 
-  // TODO: search neighbors 
+  // TODO: search neighbors
   ObjectStore::omap_iter_seek_t start_from = ObjectStore::omap_iter_seek_t::min_lower_bound();
   ceph::bufferlist result;
   BtreeOMapManager manager(*transaction_manager);
@@ -3452,13 +3453,11 @@ SeaStore::Shard::omaptree_put_vectors(
 	  root = new_root;
 	});
       }
-      // TODO
       for (auto &p : kvs) {
-	// This is optionally set by upper layer
-	assert(!p.first.stars_with("_CONTENT_"));
+	ceph_assert(!p.first.empty());
 #if 0
 	if (p.first.empty()) {
-	  p.first = "_CONTENT_" + 
+	  p.first = "_CONTENT_" +
 	    TOPNSPC::crypto::digest<TOPNSPC::crypto::SHA256>(
 	    p.second
 	    ).to_str();

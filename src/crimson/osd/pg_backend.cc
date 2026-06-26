@@ -61,6 +61,7 @@ static string vector_hex_u32(uint32_t value)
 
 static string vector_entry_id(const ceph::rados::put_vector_request_t& req)
 {
+  // entry_id is a compact hash of one logical bucket/index/user key binding.
   string value;
   value.reserve(req.bucket_name.length() + req.index_name.length() +
                 req.key.length() + 2);
@@ -87,25 +88,28 @@ static std::map<std::string, ceph::bufferlist> put_vector_omap(
     const ceph::rados::put_vector_request_t& req,
     const string& entry_id)
 {
-  const string prefix = "vector." + entry_id + ".";
+  // _CONTENT_<vector_hash> stores the raw vector bytes.
+  // _ENTRY_<entry_id>.* stores metadata for one logical vector entry.
+  const string content_key = "_CONTENT_" + req.vector_hash;
+  const string entry_prefix = "_ENTRY_" + entry_id + ".";
   std::map<std::string, ceph::bufferlist> omap;
 
-  vector_omap_set(&omap, "vector.entry." + entry_id, req.key);
-  vector_omap_set(&omap, prefix + "bucket_name", req.bucket_name);
-  vector_omap_set(&omap, prefix + "index_name", req.index_name);
-  vector_omap_set(&omap, prefix + "key", req.key);
-  vector_omap_set(&omap, prefix + "data_type", req.data_type);
-  vector_omap_set(&omap, prefix + "distance_metric", req.distance_metric);
-  vector_omap_set(&omap, prefix + "dimension", req.dimension);
-  vector_omap_set(&omap, prefix + "layout_version",
+  omap[content_key] = req.vector_data;
+  vector_omap_set(&omap, entry_prefix + "bucket_name", req.bucket_name);
+  vector_omap_set(&omap, entry_prefix + "index_name", req.index_name);
+  vector_omap_set(&omap, entry_prefix + "user_key", req.key);
+  vector_omap_set(&omap, entry_prefix + "content_key", content_key);
+  vector_omap_set(&omap, entry_prefix + "data_type", req.data_type);
+  vector_omap_set(&omap, entry_prefix + "distance_metric", req.distance_metric);
+  vector_omap_set(&omap, entry_prefix + "dimension", req.dimension);
+  vector_omap_set(&omap, entry_prefix + "layout_version",
                   ceph::rados::vector_layout_version);
-  vector_omap_set(&omap, prefix + "placement_algorithm",
+  vector_omap_set(&omap, entry_prefix + "placement_algorithm",
                   req.placement_algorithm);
-  vector_omap_set(&omap, prefix + "placement_key", req.placement_key);
-  vector_omap_set(&omap, prefix + "vector_hash", req.vector_hash);
-  omap[prefix + "data"] = req.vector_data;
+  vector_omap_set(&omap, entry_prefix + "placement_key", req.placement_key);
+  vector_omap_set(&omap, entry_prefix + "vector_hash", req.vector_hash);
   if (req.metadata.length() > 0) {
-    omap[prefix + "metadata"] = req.metadata;
+    omap[entry_prefix + "metadata"] = req.metadata;
   }
 
   return omap;
@@ -1796,15 +1800,20 @@ PGBackend::put_vector(
   std::map<std::string, ceph::bufferlist> omap =
     put_vector_omap(req, entry_id);
 
-  OSDOp omap_op{CEPH_OSD_OP_OMAPSETVALS};
-  encode(omap, omap_op.indata);
+  ceph::bufferlist encoded_omap;
+  encode(omap, encoded_omap);
 
-  return omap_set_vals(
-    os,
-    omap_op,
-    txn,
-    osd_op_params,
-    delta_stats);
+  maybe_create_new_object(os, txn, delta_stats);
+  txn.put_vector(coll->get_cid(), ghobject_t{os.oi.soid}, omap);
+  osd_op_params.clean_regions.mark_omap_dirty();
+  delta_stats.num_wr++;
+  delta_stats.num_wr_kb += shift_round_up(encoded_omap.length(), 10);
+  if (!os.oi.is_omap()) {
+    os.oi.set_flag(object_info_t::FLAG_OMAP);
+    delta_stats.num_objects_omap++;
+  }
+  os.oi.clear_omap_digest();
+  return seastar::now();
 }
 
 PGBackend::interruptible_future<>

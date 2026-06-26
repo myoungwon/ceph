@@ -109,33 +109,40 @@ TEST_F(LibRadosIoPP, PutVectorPP) {
   const string oid = vector_test_oid("bucket", "index", "vec-pp", vector_bl);
   const string entry_id = vector_entry_id("bucket", "index", "vec-pp");
   const string entry_id2 = vector_entry_id("bucket", "index", "vec-pp-2");
-  const string prefix = "vector." + entry_id + ".";
-  const string prefix2 = "vector." + entry_id2 + ".";
+  const string vector_hash =
+    vector_hex_u32(vector_bl.crc32c(static_cast<uint32_t>(-1)));
+  // Vector omap layout example:
+  //   _CONTENT_<vector_hash> stores the raw vector payload.
+  //   _ENTRY_<entry_id>.* stores metadata for one logical vector entry,
+  //   e.g. _ENTRY_abcd1234.user_key and _ENTRY_abcd1234.content_key.
+  // The content_key field points back to _CONTENT_<vector_hash>.
+  const string content_key = "_CONTENT_" + vector_hash;
+  const string prefix = "_ENTRY_" + entry_id + ".";
+  const string prefix2 = "_ENTRY_" + entry_id2 + ".";
   std::set<string> keys = {
-    "vector.entry." + entry_id,
-    "vector.entry." + entry_id2,
-    prefix + "data",
+    content_key,
+    prefix + "content_key",
     prefix + "dimension",
-    prefix + "key",
     prefix + "metadata",
+    prefix + "user_key",
     prefix + "vector_hash",
-    prefix2 + "key",
+    prefix2 + "user_key",
   };
   std::map<string, bufferlist> vals;
   ASSERT_EQ(0, ioctx.omap_get_vals_by_keys(oid, keys, &vals));
   ASSERT_EQ(keys.size(), vals.size());
 
-  auto key_iter = vals[prefix + "key"].cbegin();
+  auto key_iter = vals[prefix + "user_key"].cbegin();
   string stored_key;
   decode(stored_key, key_iter);
   ASSERT_EQ("vec-pp", stored_key);
 
-  auto entry_iter = vals["vector.entry." + entry_id].cbegin();
-  string indexed_key;
-  decode(indexed_key, entry_iter);
-  ASSERT_EQ("vec-pp", indexed_key);
+  auto content_key_iter = vals[prefix + "content_key"].cbegin();
+  string stored_content_key;
+  decode(stored_content_key, content_key_iter);
+  ASSERT_EQ(content_key, stored_content_key);
 
-  auto key2_iter = vals[prefix2 + "key"].cbegin();
+  auto key2_iter = vals[prefix2 + "user_key"].cbegin();
   string stored_key2;
   decode(stored_key2, key2_iter);
   ASSERT_EQ("vec-pp-2", stored_key2);
@@ -148,11 +155,10 @@ TEST_F(LibRadosIoPP, PutVectorPP) {
   auto vector_hash_iter = vals[prefix + "vector_hash"].cbegin();
   string stored_vector_hash;
   decode(stored_vector_hash, vector_hash_iter);
-  ASSERT_EQ(vector_hex_u32(vector_bl.crc32c(static_cast<uint32_t>(-1))),
-            stored_vector_hash);
+  ASSERT_EQ(vector_hash, stored_vector_hash);
 
-  ASSERT_EQ(vector_bl.length(), vals[prefix + "data"].length());
-  ASSERT_EQ(0, memcmp(vector_bl.c_str(), vals[prefix + "data"].c_str(),
+  ASSERT_EQ(vector_bl.length(), vals[content_key].length());
+  ASSERT_EQ(0, memcmp(vector_bl.c_str(), vals[content_key].c_str(),
                       vector_bl.length()));
 
   ASSERT_EQ(updated_metadata.length(), vals[prefix + "metadata"].length());
