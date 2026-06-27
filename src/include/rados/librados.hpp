@@ -27,6 +27,11 @@ namespace librados {
 
 using ceph::bufferlist;
 
+struct query_vectors_result_entry {
+  std::string key;
+  float distance = 0;
+};
+
 struct AioCompletionImpl;
 struct IoCtxImpl;
 struct ListObjectImpl;
@@ -921,6 +926,19 @@ inline namespace v14_2_0 {
 		   const void *vector_data,
 		   size_t vector_data_len,
 		   const bufferlist& metadata);
+    /**
+     * query vectors in a vector bucket/index
+     */
+    int query_vectors(const std::string& vector_bucket_name,
+		      const std::string& index_name,
+		      rados_vector_data_type_t data_type,
+		      rados_vector_distance_metric_t distance_metric,
+		      uint32_t dimension,
+		      const void *query_vector,
+		      size_t query_vector_len,
+		      uint32_t top_k,
+		      bool return_distance,
+		      std::vector<query_vectors_result_entry> *results);
     /**
      * append bytes to an object
      *

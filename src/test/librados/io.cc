@@ -134,6 +134,62 @@ TEST_F(LibRadosIo, PutVector) {
       4, vector, sizeof(vector), metadata, sizeof(metadata)));
 }
 
+TEST_F(LibRadosIo, QueryVectorsValidation) {
+  float vector[] = {1.0, 2.0, 3.0, 4.0};
+  rados_query_vectors_result_t result = {};
+
+  ASSERT_EQ(-EOPNOTSUPP, rados_query_vectors(
+      ioctx, "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 10, 1, &result));
+  ASSERT_EQ(nullptr, result.entries);
+  ASSERT_EQ(0u, result.entries_len);
+  rados_query_vectors_result_release(&result);
+
+  ASSERT_EQ(-EINVAL, rados_query_vectors(
+      ioctx, "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      0, vector, sizeof(vector), 10, 1, &result));
+
+  ASSERT_EQ(-EINVAL, rados_query_vectors(
+      ioctx, "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 0, 1, &result));
+
+  ASSERT_EQ(-EINVAL, rados_query_vectors(
+      ioctx, "", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 10, 1, &result));
+
+  ASSERT_EQ(-EINVAL, rados_query_vectors(
+      ioctx, "bucket", "",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 10, 1, &result));
+
+  ASSERT_EQ(-EINVAL, rados_query_vectors(
+      ioctx, "bucket", "index",
+      static_cast<rados_vector_data_type_t>(999),
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 10, 1, &result));
+
+  ASSERT_EQ(-EINVAL, rados_query_vectors(
+      ioctx, "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      static_cast<rados_vector_distance_metric_t>(999),
+      4, vector, sizeof(vector), 10, 1, &result));
+
+  ASSERT_EQ(-EINVAL, rados_query_vectors(
+      ioctx, "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector) - 1, 10, 1, &result));
+}
+
 TEST_F(LibRadosIo, TooBig) {
   char buf[1] = { 0 };
   ASSERT_EQ(-E2BIG, rados_write(ioctx, "A", buf, UINT_MAX, 0));

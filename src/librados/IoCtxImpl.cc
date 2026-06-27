@@ -729,6 +729,72 @@ int librados::IoCtxImpl::put_vector(const std::string& vector_bucket_name,
   return operate(placement.oid, &op, NULL);
 }
 
+int librados::IoCtxImpl::query_vectors(
+    const std::string& vector_bucket_name,
+    const std::string& index_name,
+    rados_vector_data_type_t data_type,
+    rados_vector_distance_metric_t distance_metric,
+    uint32_t dimension,
+    const bufferlist& query_vector,
+    uint32_t top_k,
+    bool return_distance,
+    std::vector<librados::query_vectors_result_entry> *results)
+{
+  if (results == nullptr) {
+    return -EINVAL;
+  }
+  results->clear();
+
+  if (vector_bucket_name.empty() || index_name.empty()) {
+    return -EINVAL;
+  }
+
+  if (dimension == 0 || dimension > LIBRADOS_VECTOR_MAX_DIMENSION) {
+    return -EINVAL;
+  }
+
+  if (top_k == 0) {
+    return -EINVAL;
+  }
+
+  size_t element_size = 0;
+  const uint32_t encoded_data_type = static_cast<uint32_t>(data_type);
+  int r = ceph::rados::vector_data_type_size(encoded_data_type, &element_size);
+  if (r < 0) {
+    return -EINVAL;
+  }
+
+  const uint32_t encoded_distance_metric =
+    static_cast<uint32_t>(distance_metric);
+  if (!ceph::rados::vector_distance_metric_supported(
+        encoded_distance_metric)) {
+    return -EINVAL;
+  }
+
+  const size_t expected_len = static_cast<size_t>(dimension) * element_size;
+  if (query_vector.length() != expected_len) {
+    return -EINVAL;
+  }
+
+  ceph::rados::query_vectors_request_t req;
+  req.bucket_name = vector_bucket_name;
+  req.index_name = index_name;
+  req.data_type = encoded_data_type;
+  req.distance_metric = encoded_distance_metric;
+  req.dimension = dimension;
+  req.top_k = top_k;
+  req.return_distance = return_distance;
+  req.query_vector = query_vector;
+  req.algorithm_id = ceph::rados::vector_query_algorithm_flat;
+  req.algorithm_version = ceph::rados::vector_query_algorithm_version_0;
+
+  bufferlist payload;
+  encode(req, payload);
+  // Query planning and backend execution are intentionally added in follow-up
+  // PRs. PR1 only validates the public API and prepares the request format.
+  return -EOPNOTSUPP;
+}
+
 int librados::IoCtxImpl::append(const object_t& oid, bufferlist& bl, size_t len)
 {
   if (len > UINT_MAX/2)
