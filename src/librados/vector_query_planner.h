@@ -30,6 +30,18 @@ struct probe_t {
   std::string placement_key;
 };
 
+struct query_request_t {
+  // librados-side query input. Planner-only fields live in
+  // vector_index_config_t/query_plan_t and are not encoded into OSD requests.
+  std::string bucket_name;
+  std::string index_name;
+  uint32_t data_type = 0;
+  uint32_t distance_metric = 0;
+  uint32_t dimension = 0;
+  uint32_t top_k = 0;
+  ceph::bufferlist query_vector;
+};
+
 struct put_plan_t {
   uint32_t algorithm_id = 0;
   uint32_t algorithm_version = 0;
@@ -186,12 +198,12 @@ inline int build_put_plan(
 }
 
 inline int build_query_plan(
-    const ceph::rados::query_vectors_request_t& req,
+    const query_request_t& req,
     const ceph::rados::vector_index_config_t& config,
     query_plan_t *plan)
 {
   if (plan == nullptr || req.bucket_name.empty() || req.index_name.empty() ||
-      req.query_vector.length() == 0) {
+      req.top_k == 0 || req.query_vector.length() == 0) {
     return -EINVAL;
   }
 
@@ -209,7 +221,7 @@ inline int build_query_plan(
   }
 
   const std::string placement_algorithm =
-    effective_placement_algorithm(config, req.placement_algorithm);
+    effective_placement_algorithm(config);
   if (placement_algorithm.empty()) {
     return -EOPNOTSUPP;
   }
@@ -243,29 +255,27 @@ inline int build_query_plan(
 }
 
 inline int build_query_plan(
-    const ceph::rados::query_vectors_request_t& req,
+    const query_request_t& req,
     query_plan_t *plan)
 {
   ceph::rados::vector_index_config_t config;
   config.data_type = req.data_type;
   config.distance_metric = req.distance_metric;
   config.dimension = req.dimension;
-  config.algorithm_id = req.algorithm_id;
-  config.algorithm_version = req.algorithm_version;
-  config.placement_algorithm = req.placement_algorithm;
-  config.routing_policy = req.routing_policy;
-  config.algorithm_params = req.algorithm_params;
+  config.algorithm_id = ceph::rados::vector_query_algorithm_hash;
+  config.algorithm_version = ceph::rados::vector_query_algorithm_version_0;
+  config.placement_algorithm = vector_placement::hash_v0_algorithm;
   return build_query_plan(req, config, plan);
 }
 
-inline int build_plan(const ceph::rados::query_vectors_request_t& req,
+inline int build_plan(const query_request_t& req,
                       plan_t *plan)
 {
   return build_query_plan(req, plan);
 }
 
 inline int build_routed_requests(
-    const ceph::rados::query_vectors_request_t& req,
+    const query_request_t& req,
     const query_plan_t& plan,
     std::vector<routed_request_t> *requests)
 {
@@ -278,13 +288,15 @@ inline int build_routed_requests(
   }
 
   for (const auto& probe : plan.probes) {
-    ceph::rados::query_vectors_request_t probe_req = req;
-    probe_req.algorithm_id = plan.algorithm_id;
-    probe_req.algorithm_version = plan.algorithm_version;
-    probe_req.placement_algorithm = plan.placement_algorithm;
-    probe_req.routing_policy = plan.routing_policy;
-    probe_req.algorithm_params = plan.algorithm_params;
-    probe_req.probe_prefixes.clear();
+    ceph::rados::query_vectors_request_t probe_req;
+    probe_req.bucket_name = req.bucket_name;
+    probe_req.index_name = req.index_name;
+    probe_req.data_type = req.data_type;
+    probe_req.distance_metric = req.distance_metric;
+    probe_req.dimension = req.dimension;
+    probe_req.local_top_k = plan.routing_policy.local_topk != 0 ?
+      plan.routing_policy.local_topk : req.top_k;
+    probe_req.query_vector = req.query_vector;
     probe_req.probe_prefixes.push_back(probe.placement_key);
 
     ceph::bufferlist payload;

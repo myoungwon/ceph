@@ -153,13 +153,9 @@ struct put_vector_request_t {
   std::string placement_key;
   // Hash of vector_data used for placement and content storage keys.
   std::string vector_hash;
-  // Opaque algorithm-specific parameters copied from the index config.
-  ceph::bufferlist algorithm_params;
-  // Effective routing policy copied from the index config.
-  vector_routing_policy_t routing_policy;
 
   void encode(ceph::bufferlist& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 2, bl);
     using ceph::encode;
     encode(bucket_name, bl);
     encode(index_name, bl);
@@ -172,13 +168,11 @@ struct put_vector_request_t {
     encode(placement_algorithm, bl);
     encode(placement_key, bl);
     encode(vector_hash, bl);
-    encode(algorithm_params, bl);
-    routing_policy.encode(bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(ceph::bufferlist::const_iterator& p) {
-    DECODE_START(1, p);
+    DECODE_START(2, p);
     using ceph::decode;
     decode(bucket_name, p);
     decode(index_name, p);
@@ -191,8 +185,14 @@ struct put_vector_request_t {
     decode(placement_algorithm, p);
     decode(placement_key, p);
     decode(vector_hash, p);
-    decode(algorithm_params, p);
-    routing_policy.decode(p);
+    if (struct_v >= 2) {
+      // No planner-only fields are encoded in v2.
+    } else {
+      ceph::bufferlist ignored_algorithm_params;
+      vector_routing_policy_t ignored_routing_policy;
+      decode(ignored_algorithm_params, p);
+      ignored_routing_policy.decode(p);
+    }
     DECODE_FINISH(p);
   }
 };
@@ -208,75 +208,81 @@ struct query_vectors_request_t {
   uint32_t distance_metric = 0;
   // Number of query vector dimensions.
   uint32_t dimension = 0;
-  // Number of nearest vectors requested in the merged result.
-  uint32_t top_k = 0;
-  // Whether distances should be returned to the caller.
-  bool return_distance = false;
+  // Maximum number of local results this OSD should return for this routed
+  // probe. librados owns global fanout and final top_k trimming.
+  uint32_t local_top_k = 0;
   // Raw query vector payload bytes.
   ceph::bufferlist query_vector;
-  // Vector query algorithm identifier selected for this request.
-  uint32_t algorithm_id = 0;
-  // Version of the selected query algorithm.
-  uint32_t algorithm_version = 0;
-  // Placement algorithm used to route query probes.
-  std::string placement_algorithm;
-  // Effective routing policy used by the query planner and OSD.
-  vector_routing_policy_t routing_policy;
-  // Opaque algorithm-specific parameters copied from the index config.
-  ceph::bufferlist algorithm_params;
-  // Placement keys that this routed probe should scan; empty scans all keys.
+  // Placement keys that this routed probe should scan; empty scans all keys in
+  // the target object. Missing prefixes are normal empty-result probes.
   std::vector<std::string> probe_prefixes;
 
   void encode(ceph::bufferlist& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 2, bl);
     using ceph::encode;
     encode(bucket_name, bl);
     encode(index_name, bl);
     encode(data_type, bl);
     encode(distance_metric, bl);
     encode(dimension, bl);
-    encode(top_k, bl);
-    encode(return_distance, bl);
+    encode(local_top_k, bl);
     encode(query_vector, bl);
-    encode(algorithm_id, bl);
-    encode(algorithm_version, bl);
-    encode(placement_algorithm, bl);
-    routing_policy.encode(bl);
-    encode(algorithm_params, bl);
     encode(probe_prefixes, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(ceph::bufferlist::const_iterator& p) {
-    DECODE_START(1, p);
+    DECODE_START(2, p);
     using ceph::decode;
     decode(bucket_name, p);
     decode(index_name, p);
     decode(data_type, p);
     decode(distance_metric, p);
     decode(dimension, p);
-    decode(top_k, p);
-    decode(return_distance, p);
-    decode(query_vector, p);
-    decode(algorithm_id, p);
-    decode(algorithm_version, p);
-    decode(placement_algorithm, p);
-    routing_policy.decode(p);
-    decode(algorithm_params, p);
-    decode(probe_prefixes, p);
+    if (struct_v >= 2) {
+      decode(local_top_k, p);
+      decode(query_vector, p);
+      decode(probe_prefixes, p);
+    } else {
+      uint32_t top_k = 0;
+      bool ignored_return_distance = false;
+      uint32_t ignored_algorithm_id = 0;
+      uint32_t ignored_algorithm_version = 0;
+      std::string ignored_placement_algorithm;
+      vector_routing_policy_t old_routing_policy;
+      ceph::bufferlist ignored_algorithm_params;
+
+      decode(top_k, p);
+      decode(ignored_return_distance, p);
+      decode(query_vector, p);
+      decode(ignored_algorithm_id, p);
+      decode(ignored_algorithm_version, p);
+      decode(ignored_placement_algorithm, p);
+      old_routing_policy.decode(p);
+      decode(ignored_algorithm_params, p);
+      decode(probe_prefixes, p);
+
+      local_top_k = old_routing_policy.local_topk != 0 ?
+        old_routing_policy.local_topk : top_k;
+    }
     DECODE_FINISH(p);
   }
 };
 
 struct query_vectors_result_entry_t {
+  // User-provided vector key for the matched entry.
   std::string key;
+  // Distance between the query vector and this result entry.
   float distance = 0;
+  // Internal entry identity used to merge duplicate routed results.
+  std::string entry_id;
 
   void encode(ceph::bufferlist& bl) const {
     ENCODE_START(1, 1, bl);
     using ceph::encode;
     encode(key, bl);
     encode(distance, bl);
+    encode(entry_id, bl);
     ENCODE_FINISH(bl);
   }
 
@@ -285,11 +291,13 @@ struct query_vectors_result_entry_t {
     using ceph::decode;
     decode(key, p);
     decode(distance, p);
+    decode(entry_id, p);
     DECODE_FINISH(p);
   }
 };
 
 struct query_vectors_result_t {
+  // Sorted vector query result entries.
   std::vector<query_vectors_result_entry_t> entries;
 
   void encode(ceph::bufferlist& bl) const {

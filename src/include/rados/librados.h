@@ -1569,8 +1569,8 @@ CEPH_RADOS_API int rados_put_vector(
 /**
  * Query vectors from a vector bucket/index.
  *
- * This API currently validates the request and returns -EOPNOTSUPP until the
- * vector query planner and backend execution paths are implemented.
+ * The client planner routes this request to vector objects, OSDs compute local
+ * top-k results, and librados merges them into the final top-k result.
  *
  * @param io the io context in which the vector query will occur
  * @param vector_bucket_name vector bucket name

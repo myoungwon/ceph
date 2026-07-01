@@ -306,6 +306,7 @@ extern const char *ceph_osd_state_name(int s);
 									    \
 	/* vector */							    \
 	f(PUT_VECTOR,	__CEPH_OSD_OP(WR, DATA, 46),	"put-vector")	    \
+	f(QUERY_VECTORS, __CEPH_OSD_OP(RD, DATA, 47),	"query-vectors")    \
 									    \
 	/* tiering */							    \
 	f(COPY_FROM,	__CEPH_OSD_OP(WR, DATA, 26),	"copy-from")	    \

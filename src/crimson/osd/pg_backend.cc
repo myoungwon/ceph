@@ -3,6 +3,7 @@
 
 #include "pg_backend.h"
 #include "include/rados/vector_ops.h"
+#include "common/vector_query_exec.h"
 
 #include <charconv>
 #include <cstdio>
@@ -1814,6 +1815,65 @@ PGBackend::put_vector(
   }
   os.oi.clear_omap_digest();
   return seastar::now();
+}
+
+PGBackend::ll_read_ierrorator::future<>
+PGBackend::query_vectors(
+  const ObjectState& os,
+  OSDOp& osd_op,
+  object_stat_sum_t& delta_stats) const
+{
+  ceph::rados::query_vectors_request_t req;
+
+  try {
+    auto p = osd_op.indata.cbegin();
+    decode(req, p);
+    if (!p.end()) {
+      throw crimson::osd::invalid_argument{};
+    }
+  } catch (const ceph::buffer::error&) {
+    throw crimson::osd::invalid_argument{};
+  }
+
+  int r = ceph::rados::vector_query_exec::validate_query_request(req);
+  if (r < 0) {
+    throw crimson::osd::invalid_argument{};
+  }
+
+  ceph::rados::vector_query_exec::omap_scan_state_t scan;
+  if (os.exists && !os.oi.is_whiteout() && os.oi.is_omap()) {
+    ObjectStore::omap_iter_seek_t start_from =
+      ObjectStore::omap_iter_seek_t::min_lower_bound();
+    omap_iterate_cb_t callback =
+      [&scan](std::string_view key, std::string_view value) {
+        ceph::rados::vector_query_exec::consume_omap_key_value(
+            key, value, &scan);
+        return ObjectStore::omap_iter_ret_t::NEXT;
+      };
+
+    co_await maybe_do_omap_iterate(
+      store, coll, os.oi, start_from, callback
+    ).safe_then([](auto) {
+      return seastar::now();
+    }).handle_error(
+      crimson::ct_error::enodata::handle([] {
+        return ll_read_errorator::now();
+      }),
+      ll_read_errorator::pass_further{}
+    );
+  }
+
+  ceph::rados::query_vectors_result_t query_result;
+  r = ceph::rados::vector_query_exec::build_local_results(
+      req, scan, &query_result);
+  if (r < 0) {
+    throw crimson::osd::invalid_argument{};
+  }
+
+  encode(query_result, osd_op.outdata);
+  delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
+  delta_stats.num_rd++;
+  co_return;
 }
 
 PGBackend::interruptible_future<>

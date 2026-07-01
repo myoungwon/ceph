@@ -386,6 +386,10 @@ public:
     ceph::os::Transaction& txn,
     osd_op_params_t& osd_op_params,
     object_stat_sum_t& delta_stats);
+  ll_read_ierrorator::future<> query_vectors(
+    const ObjectState& os,
+    OSDOp& osd_op,
+    object_stat_sum_t& delta_stats) const;
   ll_read_ierrorator::future<ceph::bufferlist> omap_get_header(
     const crimson::os::CollectionRef& c,
     const ghobject_t& oid,

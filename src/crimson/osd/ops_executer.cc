@@ -756,6 +756,10 @@ OpsExecuter::do_execute_op(OSDOp& osd_op)
     return do_write_op([this, &osd_op](auto& backend, auto& os, auto& txn) {
       return backend.put_vector(os, osd_op, txn, *osd_op_params, delta_stats);
     });
+  case CEPH_OSD_OP_QUERY_VECTORS:
+    return do_read_op([this, &osd_op](auto& backend, const auto& os) {
+      return backend.query_vectors(os, osd_op, delta_stats);
+    });
 
   // OMAP
   case CEPH_OSD_OP_OMAPGETKEYS:

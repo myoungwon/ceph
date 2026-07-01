@@ -39,6 +39,7 @@
 #include "common/scrub_types.h"
 #include "include/compat.h"
 #include "include/rados/vector_ops.h"
+#include "common/vector_query_exec.h"
 #include "json_spirit/json_spirit_reader.h"
 #include "json_spirit/json_spirit_value.h"
 #include "messages/MCommandReply.h"
@@ -7061,6 +7062,68 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
           std::max((uint64_t)op.extent.length, oi.size));
 	write_update_size_and_usage(ctx->delta_stats, oi, ctx->modified_ranges,
 	    0, op.extent.length, true);
+      }
+      break;
+
+    case CEPH_OSD_OP_QUERY_VECTORS:
+      ++ctx->num_read;
+      result = 0;
+      {
+	if (!pool.info.supports_omap()) {
+	  result = -EOPNOTSUPP;
+	  break;
+	}
+	if (op.extent.length == 0 ||
+	    op.extent.length != osd_op.indata.length()) {
+	  result = -EINVAL;
+	  break;
+	}
+
+	ceph::rados::query_vectors_request_t req;
+	try {
+	  auto reqp = osd_op.indata.cbegin();
+	  decode(req, reqp);
+	  if (!reqp.end()) {
+	    result = -EINVAL;
+	    break;
+	  }
+	} catch (const ceph::buffer::error&) {
+	  result = -EINVAL;
+	  break;
+	}
+
+	result = ceph::rados::vector_query_exec::validate_query_request(req);
+	if (result < 0) {
+	  break;
+	}
+
+	ceph::rados::vector_query_exec::omap_scan_state_t scan;
+	if (oi.is_omap()) {
+	  const auto scan_result = osd->store->omap_iterate(
+	    ch, ghobject_t(soid),
+	    ObjectStore::omap_iter_seek_t::min_lower_bound(),
+	    [&scan](std::string_view key, std::string_view value) mutable {
+	      ceph::rados::vector_query_exec::consume_omap_key_value(
+		  key, value, &scan);
+	      return ObjectStore::omap_iter_ret_t::NEXT;
+	    });
+	  if (scan_result < 0) {
+	    result = scan_result;
+	    break;
+	  }
+	}
+
+	ceph::rados::query_vectors_result_t query_result;
+	result = ceph::rados::vector_query_exec::build_local_results(
+	    req, scan, &query_result);
+	if (result < 0) {
+	  break;
+	}
+
+	encode(query_result, osd_op.outdata);
+	ctx->delta_stats.num_rd_kb +=
+	  shift_round_up(osd_op.outdata.length(), 10);
+	ctx->delta_stats.num_rd++;
       }
       break;
 

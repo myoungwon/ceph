@@ -27,6 +27,7 @@
 #include "include/ceph_hash.h"
 #include "include/encoding.h"
 #include "include/rados/vector_ops.h"
+#include "common/vector_query_exec.h"
 #include "common/valgrind.h"
 #include "common/EventTrace.h"
 
@@ -688,8 +689,6 @@ int librados::IoCtxImpl::put_vector(const std::string& vector_bucket_name,
   }
 
   req.placement_algorithm = plan.placement_algorithm;
-  req.routing_policy = plan.routing_policy;
-  req.algorithm_params = plan.algorithm_params;
 
   for (const auto& target : plan.targets) {
     ::ObjectOperation op;
@@ -758,27 +757,22 @@ int librados::IoCtxImpl::query_vectors(
     return -EINVAL;
   }
 
-  ceph::rados::query_vectors_request_t req;
+  librados::vector_query::query_request_t req;
   req.bucket_name = vector_bucket_name;
   req.index_name = index_name;
   req.data_type = encoded_data_type;
   req.distance_metric = encoded_distance_metric;
   req.dimension = dimension;
   req.top_k = top_k;
-  req.return_distance = return_distance;
   req.query_vector = query_vector;
-  req.algorithm_id = ceph::rados::vector_query_algorithm_hash;
-  req.algorithm_version = ceph::rados::vector_query_algorithm_version_0;
-  req.placement_algorithm = librados::vector_placement::hash_v0_algorithm;
 
   ceph::rados::vector_index_config_t config;
   config.data_type = encoded_data_type;
   config.distance_metric = encoded_distance_metric;
   config.dimension = dimension;
-  config.algorithm_id = req.algorithm_id;
-  config.algorithm_version = req.algorithm_version;
-  config.placement_algorithm = req.placement_algorithm;
-  req.routing_policy = config.routing_policy;
+  config.algorithm_id = ceph::rados::vector_query_algorithm_hash;
+  config.algorithm_version = ceph::rados::vector_query_algorithm_version_0;
+  config.placement_algorithm = librados::vector_placement::hash_v0_algorithm;
 
   librados::vector_query::query_plan_t plan;
   r = librados::vector_query::build_query_plan(req, config, &plan);
@@ -793,9 +787,56 @@ int librados::IoCtxImpl::query_vectors(
     return r;
   }
 
-  // PR2 stops at client-side planning and routed payload construction. PR3
-  // will add ObjectOperation/query op plumbing and backend execution.
-  return -EOPNOTSUPP;
+  ceph::rados::query_vectors_result_t merged_result;
+  for (const auto& routed_request : routed_requests) {
+    ::ObjectOperation op;
+    bufferlist payload = routed_request.payload;
+    bufferlist reply;
+    int op_rval = 0;
+    op.query_vectors(payload, &reply, &op_rval);
+
+    r = operate_read(routed_request.oid, &op, &reply);
+    if (r == -ENOENT || op_rval == -ENOENT) {
+      continue;
+    }
+    if (r < 0) {
+      return r;
+    }
+    if (op_rval < 0) {
+      return op_rval;
+    }
+    if (reply.length() == 0) {
+      continue;
+    }
+
+    ceph::rados::query_vectors_result_t partial_result;
+    try {
+      auto p = reply.cbegin();
+      decode(partial_result, p);
+      if (!p.end()) {
+        return -EIO;
+      }
+    } catch (const ceph::buffer::error&) {
+      return -EIO;
+    }
+
+    for (const auto& entry : partial_result.entries) {
+      ceph::rados::vector_query_exec::merge_result_entry(
+          &merged_result.entries, entry);
+    }
+  }
+
+  ceph::rados::vector_query_exec::sort_and_trim_results(
+      &merged_result.entries, top_k);
+
+  results->reserve(merged_result.entries.size());
+  for (const auto& entry : merged_result.entries) {
+    librados::query_vectors_result_entry out_entry;
+    out_entry.key = entry.key;
+    out_entry.distance = return_distance ? entry.distance : 0;
+    results->push_back(std::move(out_entry));
+  }
+  return 0;
 }
 
 int librados::IoCtxImpl::append(const object_t& oid, bufferlist& bl, size_t len)
