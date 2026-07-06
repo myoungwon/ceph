@@ -916,6 +916,9 @@ inline namespace v14_2_0 {
     int write(const std::string& oid, bufferlist& bl, size_t len, uint64_t off);
     /**
      * store one vector entry in a vector bucket/index
+     *
+     * The key is the caller-visible logical key; OSDs derive the internal
+     * entry_id from bucket/index/key. Invalid input returns -EINVAL.
      */
     int put_vector(const std::string& vector_bucket_name,
 		   const std::string& index_name,
@@ -928,6 +931,10 @@ inline namespace v14_2_0 {
 		   const bufferlist& metadata);
     /**
      * query vectors in a vector bucket/index
+     *
+     * Missing target objects, missing probe prefixes, and no matches return an
+     * empty result. Duplicate partial results are merged by entry_id, keeping
+     * the best distance. Invalid input returns -EINVAL.
      */
     int query_vectors(const std::string& vector_bucket_name,
 		      const std::string& index_name,

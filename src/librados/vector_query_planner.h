@@ -139,6 +139,9 @@ inline int append_hash_v0_targets(
   if (targets == nullptr || count == 0) {
     return -EINVAL;
   }
+  // hash-v0 is the baseline placement contract: it hashes vector bytes, uses
+  // a hash-derived prefix as the placement key, and builds an object id from
+  // bucket/index/placement_key. It is not an ANN planner.
   const std::string vector_hash =
     vector_placement::hash_v0_vector_hash(vector_data);
   for (uint32_t rank = 0; rank < count; ++rank) {

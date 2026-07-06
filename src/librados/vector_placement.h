@@ -11,11 +11,13 @@
 #include "include/buffer.h"
 #include "include/ceph_hash.h"
 #include "include/object.h"
+#include "include/rados/vector_ops.h"
 
 namespace librados {
 namespace vector_placement {
 
-inline constexpr const char *hash_v0_algorithm = "hash-v0";
+inline constexpr const char *hash_v0_algorithm =
+  ceph::rados::vector_placement_algorithm_hash_v0;
 
 struct hash_v0_placement_t {
   object_t oid;
