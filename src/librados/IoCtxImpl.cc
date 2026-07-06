@@ -821,6 +821,9 @@ int librados::IoCtxImpl::query_vectors(
     }
 
     for (const auto& entry : partial_result.entries) {
+      if (!ceph::rados::vector_query_exec::result_entry_valid(entry)) {
+        return -EIO;
+      }
       ceph::rados::vector_query_exec::merge_result_entry(
           &merged_result.entries, entry);
     }

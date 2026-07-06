@@ -354,7 +354,12 @@ inline int compute_float32_distance(const query_vectors_request_t& req,
 inline const std::string& result_entry_identity(
     const query_vectors_result_entry_t& entry)
 {
-  return entry.entry_id.empty() ? entry.key : entry.entry_id;
+  return entry.entry_id;
+}
+
+inline bool result_entry_valid(const query_vectors_result_entry_t& entry)
+{
+  return !entry.key.empty() && !entry.entry_id.empty();
 }
 
 inline bool result_entry_better(const query_vectors_result_entry_t& lhs,
@@ -373,6 +378,10 @@ inline void merge_result_entry(std::vector<query_vectors_result_entry_t> *entrie
     return;
   }
   const std::string& candidate_id = result_entry_identity(candidate);
+  if (candidate_id.empty()) {
+    entries->push_back(candidate);
+    return;
+  }
   for (auto& entry : *entries) {
     if (result_entry_identity(entry) == candidate_id) {
       if (result_entry_better(candidate, entry)) {
