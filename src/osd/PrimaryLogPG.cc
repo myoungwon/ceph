@@ -7104,7 +7104,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	    ObjectStore::omap_iter_seek_t::min_lower_bound(),
 	    [&scan](std::string_view key, std::string_view value) mutable {
 	      ceph::rados::vector_query_exec::consume_omap_key_value(
-		  key, value, &scan);
+		  key, value, scan);
 	      return ObjectStore::omap_iter_ret_t::NEXT;
 	    });
 	  if (scan_result < 0) {
@@ -7154,38 +7154,9 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  break;
 	}
 
-	if (req.bucket_name.empty() || req.index_name.empty() ||
-	    req.key.empty()) {
-	  result = -EINVAL;
-	  break;
-	}
-	if (req.placement_algorithm.empty() || req.placement_key.empty() ||
-	    req.vector_hash.empty()) {
-	  result = -EINVAL;
-	  break;
-	}
-	if (req.dimension == 0 ||
-	    req.dimension > ceph::rados::vector_max_dimension) {
-	  result = -EINVAL;
-	  break;
-	}
-
-	size_t element_size = 0;
-	result = ceph::rados::vector_data_type_size(
-	  req.data_type, &element_size);
+	result = ceph::rados::vector_query_exec::validate_put_request(
+	  req, true);
 	if (result < 0) {
-	  break;
-	}
-	if (!ceph::rados::vector_distance_metric_supported(
-	      req.distance_metric)) {
-	  result = -EOPNOTSUPP;
-	  break;
-	}
-
-	const size_t expected_len =
-	  static_cast<size_t>(req.dimension) * element_size;
-	if (req.vector_data.length() != expected_len) {
-	  result = -EINVAL;
 	  break;
 	}
 

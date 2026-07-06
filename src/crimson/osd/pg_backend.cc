@@ -1771,29 +1771,8 @@ PGBackend::put_vector(
     throw crimson::osd::invalid_argument{};
   }
 
-  if (req.bucket_name.empty() ||
-      req.index_name.empty() ||
-      req.key.empty() ||
-      req.vector_hash.empty() ||
-      req.dimension == 0 ||
-      req.dimension > ceph::rados::vector_max_dimension) {
-    throw crimson::osd::invalid_argument{};
-  }
-
-  size_t element_size = 0;
-  int r = ceph::rados::vector_data_type_size(req.data_type, &element_size);
+  int r = ceph::rados::vector_query_exec::validate_put_request(req, true);
   if (r < 0) {
-    throw crimson::osd::invalid_argument{};
-  }
-
-  if (!ceph::rados::vector_distance_metric_supported(req.distance_metric)) {
-    throw crimson::osd::invalid_argument{};
-  }
-
-  const size_t expected_len =
-    static_cast<size_t>(req.dimension) * element_size;
-
-  if (req.vector_data.length() != expected_len) {
     throw crimson::osd::invalid_argument{};
   }
 
@@ -1847,7 +1826,7 @@ PGBackend::query_vectors(
     omap_iterate_cb_t callback =
       [&scan](std::string_view key, std::string_view value) {
         ceph::rados::vector_query_exec::consume_omap_key_value(
-            key, value, &scan);
+            key, value, scan);
         return ObjectStore::omap_iter_ret_t::NEXT;
       };
 

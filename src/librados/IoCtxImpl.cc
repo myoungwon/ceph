@@ -649,14 +649,14 @@ int librados::IoCtxImpl::put_vector(const std::string& vector_bucket_name,
   const uint32_t encoded_data_type = static_cast<uint32_t>(data_type);
   int r = ceph::rados::vector_data_type_size(encoded_data_type, &element_size);
   if (r < 0) {
-    return r;
+    return -EINVAL;
   }
 
   const uint32_t encoded_distance_metric =
     static_cast<uint32_t>(distance_metric);
   if (!ceph::rados::vector_distance_metric_supported(
         encoded_distance_metric)) {
-    return -EOPNOTSUPP;
+    return -EINVAL;
   }
 
   const size_t expected_len = static_cast<size_t>(dimension) * element_size;

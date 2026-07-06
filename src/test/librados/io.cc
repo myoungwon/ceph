@@ -110,6 +110,12 @@ TEST_F(LibRadosIo, PutVector) {
       4, nullptr, sizeof(vector), metadata, sizeof(metadata)));
 
   ASSERT_EQ(-EINVAL, rados_put_vector(
+      ioctx, "bucket", "index", "empty-vector",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, 0, metadata, sizeof(metadata)));
+
+  ASSERT_EQ(-EINVAL, rados_put_vector(
       ioctx, "bucket", "", "empty-index",
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
@@ -121,13 +127,13 @@ TEST_F(LibRadosIo, PutVector) {
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), metadata, sizeof(metadata)));
 
-  ASSERT_EQ(-EOPNOTSUPP, rados_put_vector(
+  ASSERT_EQ(-EINVAL, rados_put_vector(
       ioctx, "bucket", "index", "bad-type",
       static_cast<rados_vector_data_type_t>(999),
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), metadata, sizeof(metadata)));
 
-  ASSERT_EQ(-EOPNOTSUPP, rados_put_vector(
+  ASSERT_EQ(-EINVAL, rados_put_vector(
       ioctx, "bucket", "index", "bad-metric",
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       static_cast<rados_vector_distance_metric_t>(999),

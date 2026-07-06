@@ -1,6 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*
 // vim: ts=8 sw=2 sts=2 expandtab
 
+#include <algorithm>
 #include <climits>
 #include <cstdio>
 #include <errno.h>
@@ -12,6 +13,7 @@
 #include "include/encoding.h"
 #include "include/err.h"
 #include "include/scope_guard.h"
+#include "common/vector_query_exec.h"
 #include "librados/vector_placement.h"
 #include "librados/vector_query_planner.h"
 #include "test/librados/test_cxx.h"
@@ -64,22 +66,19 @@ static string vector_entry_id(const string& bucket, const string& index,
       value.c_str(), static_cast<unsigned>(value.length())));
 }
 
-static ceph::rados::query_vectors_request_t make_query_planner_request(
+static librados::vector_query::query_request_t make_query_planner_request(
     const string& bucket,
     const string& index,
     const bufferlist& query_vector)
 {
-  ceph::rados::query_vectors_request_t req;
+  librados::vector_query::query_request_t req;
   req.bucket_name = bucket;
   req.index_name = index;
   req.data_type = LIBRADOS_VECTOR_DATA_TYPE_FLOAT32;
   req.distance_metric = LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE;
   req.dimension = 4;
   req.top_k = 10;
-  req.return_distance = true;
   req.query_vector = query_vector;
-  req.algorithm_id = ceph::rados::vector_query_algorithm_hash;
-  req.algorithm_version = ceph::rados::vector_query_algorithm_version_0;
   return req;
 }
 
@@ -98,6 +97,8 @@ TEST(VectorQueryPlanner, HashV0DeterministicRouting) {
   EXPECT_EQ(ceph::rados::vector_query_algorithm_hash, plan1.algorithm_id);
   EXPECT_EQ(ceph::rados::vector_query_algorithm_version_0,
             plan1.algorithm_version);
+  EXPECT_EQ(librados::vector_placement::hash_v0_algorithm,
+            plan1.placement_algorithm);
   EXPECT_EQ(plan1.probes[0].oid.name, plan2.probes[0].oid.name);
   EXPECT_EQ(plan1.probes[0].placement_key,
             plan2.probes[0].placement_key);
@@ -126,6 +127,12 @@ TEST(VectorQueryPlanner, HashV0DeterministicRouting) {
   ceph::rados::query_vectors_request_t routed_req;
   auto payload_iter = requests[0].payload.cbegin();
   decode(routed_req, payload_iter);
+  ASSERT_TRUE(payload_iter.end());
+  EXPECT_EQ("bucket", routed_req.bucket_name);
+  EXPECT_EQ("index", routed_req.index_name);
+  EXPECT_EQ(4u, routed_req.dimension);
+  EXPECT_EQ(10u, routed_req.local_top_k);
+  EXPECT_EQ(query_bl.length(), routed_req.query_vector.length());
   ASSERT_EQ(1u, routed_req.probe_prefixes.size());
   EXPECT_EQ(requests[0].placement_key, routed_req.probe_prefixes[0]);
   EXPECT_EQ(0, ceph::rados::vector_query_exec::validate_query_request(
@@ -517,6 +524,12 @@ TEST_F(LibRadosIoPP, PutVectorPP) {
       4, nullptr, sizeof(vector), metadata));
 
   ASSERT_EQ(-EINVAL, ioctx.put_vector(
+      "bucket", "index", "empty-vector",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, 0, metadata));
+
+  ASSERT_EQ(-EINVAL, ioctx.put_vector(
       "bucket", "", "empty-index",
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
@@ -528,13 +541,13 @@ TEST_F(LibRadosIoPP, PutVectorPP) {
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), metadata));
 
-  ASSERT_EQ(-EOPNOTSUPP, ioctx.put_vector(
+  ASSERT_EQ(-EINVAL, ioctx.put_vector(
       "bucket", "index", "bad-type",
       static_cast<rados_vector_data_type_t>(999),
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), metadata));
 
-  ASSERT_EQ(-EOPNOTSUPP, ioctx.put_vector(
+  ASSERT_EQ(-EINVAL, ioctx.put_vector(
       "bucket", "index", "bad-metric",
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       static_cast<rados_vector_distance_metric_t>(999),

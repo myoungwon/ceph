@@ -34,11 +34,6 @@ struct omap_entry_t {
   uint32_t data_type = 0;
   uint32_t distance_metric = 0;
   uint32_t dimension = 0;
-  bool has_bucket_name = false;
-  bool has_index_name = false;
-  bool has_user_key = false;
-  bool has_content_key = false;
-  bool has_placement_key = false;
   bool has_data_type = false;
   bool has_distance_metric = false;
   bool has_dimension = false;
@@ -55,6 +50,92 @@ inline bool starts_with(std::string_view value, std::string_view prefix)
     value.substr(0, prefix.size()) == prefix;
 }
 
+inline bool is_lower_hex(char c)
+{
+  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+}
+
+inline bool is_lower_hex_string(std::string_view value, size_t len)
+{
+  if (value.size() != len) {
+    return false;
+  }
+  for (char c : value) {
+    if (!is_lower_hex(c)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+inline bool is_hash_v0_placement_key(std::string_view placement_key)
+{
+  return is_lower_hex_string(
+      placement_key, vector_hash_v0_placement_key_len);
+}
+
+inline bool is_hash_v0_vector_hash(std::string_view vector_hash)
+{
+  return is_lower_hex_string(vector_hash, vector_hash_v0_vector_hash_len);
+}
+
+inline int validate_vector_payload(uint32_t data_type,
+                                   uint32_t distance_metric,
+                                   uint32_t dimension,
+                                   const ceph::bufferlist& vector_data,
+                                   size_t *element_size = nullptr)
+{
+  if (dimension == 0 || dimension > vector_max_dimension) {
+    return -EINVAL;
+  }
+
+  size_t type_size = 0;
+  int r = vector_data_type_size(data_type, &type_size);
+  if (r < 0) {
+    return -EINVAL;
+  }
+  if (!vector_distance_metric_supported(distance_metric)) {
+    return -EINVAL;
+  }
+
+  const size_t expected_len = static_cast<size_t>(dimension) * type_size;
+  if (vector_data.length() != expected_len) {
+    return -EINVAL;
+  }
+
+  if (element_size != nullptr) {
+    *element_size = type_size;
+  }
+  return 0;
+}
+
+inline int validate_put_request(const put_vector_request_t& req,
+                                bool require_routed_fields,
+                                size_t *element_size = nullptr)
+{
+  if (req.bucket_name.empty() || req.index_name.empty() || req.key.empty()) {
+    return -EINVAL;
+  }
+
+  int r = validate_vector_payload(req.data_type, req.distance_metric,
+                                  req.dimension, req.vector_data,
+                                  element_size);
+  if (r < 0) {
+    return r;
+  }
+
+  if (!require_routed_fields) {
+    return 0;
+  }
+
+  if (req.placement_algorithm != vector_placement_algorithm_hash_v0 ||
+      !is_hash_v0_placement_key(req.placement_key) ||
+      !is_hash_v0_vector_hash(req.vector_hash)) {
+    return -EINVAL;
+  }
+  return 0;
+}
+
 inline ceph::bufferlist bufferlist_from_view(std::string_view value)
 {
   ceph::bufferlist bl;
@@ -66,11 +147,24 @@ template <typename T>
 inline bool decode_omap_value(const ceph::bufferlist& bl, T *out)
 {
   try {
+    T decoded;
     auto p = bl.cbegin();
-    decode(*out, p);
-    return p.end();
+    decode(decoded, p);
+    if (!p.end()) {
+      return false;
+    }
+    *out = decoded;
+    return true;
   } catch (const ceph::buffer::error&) {
     return false;
+  }
+}
+
+inline void decode_omap_string_value(const ceph::bufferlist& bl,
+                                     std::string *out)
+{
+  if (!decode_omap_value(bl, out)) {
+    out->clear();
   }
 }
 
@@ -97,15 +191,11 @@ inline bool parse_entry_key(std::string_view key,
 
 inline void consume_omap_key_value(std::string_view key,
                                    std::string_view value,
-                                   omap_scan_state_t *state)
+                                   omap_scan_state_t& state)
 {
-  if (state == nullptr) {
-    return;
-  }
-
   constexpr std::string_view content_prefix = "_CONTENT_";
   if (starts_with(key, content_prefix)) {
-    state->contents[std::string(key)] = bufferlist_from_view(value);
+    state.contents[std::string(key)] = bufferlist_from_view(value);
     return;
   }
 
@@ -116,19 +206,19 @@ inline void consume_omap_key_value(std::string_view key,
   }
 
   ceph::bufferlist bl = bufferlist_from_view(value);
-  auto& entry = state->entries[entry_id];
+  auto& entry = state.entries[entry_id];
   entry.entry_id = entry_id;
 
   if (field == "bucket_name") {
-    entry.has_bucket_name = decode_omap_value(bl, &entry.bucket_name);
+    decode_omap_string_value(bl, &entry.bucket_name);
   } else if (field == "index_name") {
-    entry.has_index_name = decode_omap_value(bl, &entry.index_name);
+    decode_omap_string_value(bl, &entry.index_name);
   } else if (field == "user_key") {
-    entry.has_user_key = decode_omap_value(bl, &entry.user_key);
+    decode_omap_string_value(bl, &entry.user_key);
   } else if (field == "content_key") {
-    entry.has_content_key = decode_omap_value(bl, &entry.content_key);
+    decode_omap_string_value(bl, &entry.content_key);
   } else if (field == "placement_key") {
-    entry.has_placement_key = decode_omap_value(bl, &entry.placement_key);
+    decode_omap_string_value(bl, &entry.placement_key);
   } else if (field == "data_type") {
     entry.has_data_type = decode_omap_value(bl, &entry.data_type);
   } else if (field == "distance_metric") {
@@ -143,27 +233,21 @@ inline int validate_query_request(const query_vectors_request_t& req,
                                   size_t *element_size = nullptr)
 {
   if (req.bucket_name.empty() || req.index_name.empty() ||
-      req.dimension == 0 || req.dimension > vector_max_dimension ||
-      req.top_k == 0) {
+      req.local_top_k == 0) {
     return -EINVAL;
   }
 
-  size_t type_size = 0;
-  int r = vector_data_type_size(req.data_type, &type_size);
+  int r = validate_vector_payload(req.data_type, req.distance_metric,
+                                  req.dimension, req.query_vector,
+                                  element_size);
   if (r < 0) {
-    return -EINVAL;
-  }
-  if (!vector_distance_metric_supported(req.distance_metric)) {
-    return -EINVAL;
+    return r;
   }
 
-  const size_t expected_len = static_cast<size_t>(req.dimension) * type_size;
-  if (req.query_vector.length() != expected_len) {
-    return -EINVAL;
-  }
-
-  if (element_size != nullptr) {
-    *element_size = type_size;
+  for (const auto& prefix : req.probe_prefixes) {
+    if (!is_hash_v0_placement_key(prefix)) {
+      return -EINVAL;
+    }
   }
   return 0;
 }
@@ -174,7 +258,7 @@ inline bool probe_matches(const query_vectors_request_t& req,
   if (req.probe_prefixes.empty()) {
     return true;
   }
-  if (!entry.has_placement_key) {
+  if (entry.placement_key.empty()) {
     return false;
   }
   return std::find(req.probe_prefixes.begin(), req.probe_prefixes.end(),
@@ -184,10 +268,10 @@ inline bool probe_matches(const query_vectors_request_t& req,
 inline bool entry_matches_query(const query_vectors_request_t& req,
                                 const omap_entry_t& entry)
 {
-  return entry.has_bucket_name &&
-    entry.has_index_name &&
-    entry.has_user_key &&
-    entry.has_content_key &&
+  return !entry.bucket_name.empty() &&
+    !entry.index_name.empty() &&
+    !entry.user_key.empty() &&
+    !entry.content_key.empty() &&
     entry.has_data_type &&
     entry.has_distance_metric &&
     entry.has_dimension &&
@@ -312,14 +396,6 @@ inline void sort_and_trim_results(std::vector<query_vectors_result_entry_t> *ent
   }
 }
 
-inline uint32_t local_topk_limit(const query_vectors_request_t& req)
-{
-  if (req.routing_policy.local_topk != 0) {
-    return req.routing_policy.local_topk;
-  }
-  return req.top_k;
-}
-
 inline int build_local_results(const query_vectors_request_t& req,
                                const omap_scan_state_t& scan,
                                query_vectors_result_t *result)
@@ -357,7 +433,7 @@ inline int build_local_results(const query_vectors_request_t& req,
     merge_result_entry(&result->entries, result_entry);
   }
 
-  sort_and_trim_results(&result->entries, local_topk_limit(req));
+  sort_and_trim_results(&result->entries, req.local_top_k);
   return 0;
 }
 
