@@ -66,6 +66,20 @@ TEST_F(LibRadosIo, PutVector) {
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), metadata, sizeof(metadata)));
 
+  rados_query_vectors_result_t query_result = {};
+  ASSERT_EQ(0, rados_query_vectors(
+      ioctx, "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 1, 1, &query_result));
+  ASSERT_NE(nullptr, query_result.entries);
+  ASSERT_EQ(1u, query_result.entries_len);
+  ASSERT_STREQ("vec-1", query_result.entries[0].key);
+  EXPECT_NEAR(0.0f, query_result.entries[0].distance, 1e-6f);
+  rados_query_vectors_result_release(&query_result);
+  ASSERT_EQ(nullptr, query_result.entries);
+  ASSERT_EQ(0u, query_result.entries_len);
+
   const string oid = vector_test_oid("bucket", "index", "vec-1",
                                      vector, sizeof(vector));
   bufferlist vector_bl;

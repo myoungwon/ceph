@@ -451,6 +451,18 @@ TEST_F(LibRadosIoPP, PutVectorPP) {
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), metadata));
 
+  std::vector<query_vectors_result_entry> query_results;
+  ASSERT_EQ(0, ioctx.query_vectors(
+      "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 2, true, &query_results));
+  ASSERT_EQ(2u, query_results.size());
+  EXPECT_EQ("vec-pp", query_results[0].key);
+  EXPECT_EQ("vec-pp-2", query_results[1].key);
+  EXPECT_NEAR(0.0f, query_results[0].distance, 1e-6f);
+  EXPECT_NEAR(0.0f, query_results[1].distance, 1e-6f);
+
   const string oid = vector_test_oid("bucket", "index", "vec-pp", vector_bl);
   const string entry_id = vector_entry_id("bucket", "index", "vec-pp");
   const string entry_id2 = vector_entry_id("bucket", "index", "vec-pp-2");
