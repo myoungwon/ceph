@@ -1544,7 +1544,8 @@ CEPH_RADOS_API int rados_write(rados_ioctx_t io, const char *oid,
  * Store one vector entry in a vector bucket/index.
  *
  * Metadata is optional and may contain an application-defined related object
- * id or serialized metadata document.
+ * id or serialized metadata document. The vector key is the caller-visible
+ * logical key; OSDs derive the internal entry_id from bucket/index/key.
  *
  * @param io the io context in which the vector PUT will occur
  * @param vector_bucket_name vector bucket name
@@ -1557,7 +1558,8 @@ CEPH_RADOS_API int rados_write(rados_ioctx_t io, const char *oid,
  * @param vector_data_len length of vector_data, in bytes
  * @param metadata optional metadata bytes
  * @param metadata_len length of metadata, in bytes
- * @returns 0 on success, negative error code on failure
+ * @returns 0 on success, -EINVAL for invalid input, or another negative error
+ *          code on failure
  */
 CEPH_RADOS_API int rados_put_vector(
     rados_ioctx_t io, const char *vector_bucket_name, const char *index_name,
@@ -1569,8 +1571,11 @@ CEPH_RADOS_API int rados_put_vector(
 /**
  * Query vectors from a vector bucket/index.
  *
- * This API currently validates the request and returns -EOPNOTSUPP until the
- * vector query planner and backend execution paths are implemented.
+ * The client planner routes this request to vector objects, OSDs compute local
+ * top-k results, and librados merges them into the final top-k result.
+ * Missing target objects, missing probe prefixes, and no matches are successful
+ * empty results. Duplicate partial results for the same logical vector are
+ * merged by entry_id, keeping the best distance.
  *
  * @param io the io context in which the vector query will occur
  * @param vector_bucket_name vector bucket name
@@ -1584,7 +1589,8 @@ CEPH_RADOS_API int rados_put_vector(
  * @param return_distance whether result distances should be returned
  * @param result query result output, released with
  *        rados_query_vectors_result_release()
- * @returns 0 on success, negative error code on failure
+ * @returns 0 on success, -EINVAL for invalid input, or another negative error
+ *          code on failure
  */
 CEPH_RADOS_API int rados_query_vectors(
     rados_ioctx_t io, const char *vector_bucket_name, const char *index_name,

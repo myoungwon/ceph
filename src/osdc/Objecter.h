@@ -599,6 +599,16 @@ struct ObjectOperation {
   void put_vector(ceph::buffer::list&& bl) {
     add_data(CEPH_OSD_OP_PUT_VECTOR, 0, bl.length(), bl);
   }
+  void query_vectors(ceph::buffer::list& bl, ceph::buffer::list *outbl,
+		     int *prval) {
+    add_data(CEPH_OSD_OP_QUERY_VECTORS, 0, bl.length(), bl);
+    out_bl.back() = outbl;
+    out_rval.back() = prval;
+  }
+  void query_vectors(ceph::buffer::list&& bl, ceph::buffer::list *outbl,
+		     int *prval) {
+    query_vectors(bl, outbl, prval);
+  }
   void writesame(uint64_t off, uint64_t write_len, ceph::buffer::list& bl) {
     add_writesame(CEPH_OSD_OP_WRITESAME, off, write_len, bl);
   }

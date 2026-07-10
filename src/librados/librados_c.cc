@@ -21,6 +21,7 @@
 #include "librados/librados_util.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <map>
 #include <set>
@@ -1377,10 +1378,40 @@ extern "C" int LIBRADOS_C_API_DEFAULT_F(rados_query_vectors)(
   bufferlist query_bl;
   query_bl.append(static_cast<const char *>(query_vector), query_vector_len);
   std::vector<librados::query_vectors_result_entry> entries;
-  return ctx->query_vectors(vector_bucket_name, index_name,
-			    data_type, distance_metric, dimension,
-			    query_bl, top_k, return_distance != 0,
-			    &entries);
+  int ret = ctx->query_vectors(vector_bucket_name, index_name,
+			       data_type, distance_metric, dimension,
+			       query_bl, top_k, return_distance != 0,
+			       &entries);
+  if (ret < 0) {
+    return ret;
+  }
+  if (entries.empty()) {
+    return 0;
+  }
+
+  result->entries = static_cast<rados_query_vectors_result_entry_t *>(
+      calloc(entries.size(), sizeof(*result->entries)));
+  if (result->entries == nullptr) {
+    return -ENOMEM;
+  }
+  result->entries_len = entries.size();
+
+  for (size_t i = 0; i < entries.size(); ++i) {
+    const size_t key_len = entries[i].key.length();
+    result->entries[i].key = static_cast<char *>(malloc(key_len + 1));
+    if (result->entries[i].key == nullptr) {
+      for (size_t j = 0; j < i; ++j) {
+	free(result->entries[j].key);
+      }
+      free(result->entries);
+      result->entries = nullptr;
+      result->entries_len = 0;
+      return -ENOMEM;
+    }
+    memcpy(result->entries[i].key, entries[i].key.c_str(), key_len + 1);
+    result->entries[i].distance = entries[i].distance;
+  }
+  return 0;
 }
 LIBRADOS_C_API_BASE_DEFAULT(rados_query_vectors);
 

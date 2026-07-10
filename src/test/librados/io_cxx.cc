@@ -1,6 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*
 // vim: ts=8 sw=2 sts=2 expandtab
 
+#include <algorithm>
 #include <climits>
 #include <cstdio>
 #include <errno.h>
@@ -12,6 +13,9 @@
 #include "include/encoding.h"
 #include "include/err.h"
 #include "include/scope_guard.h"
+#include "common/vector_query_exec.h"
+#include "librados/vector_placement.h"
+#include "librados/vector_query_planner.h"
 #include "test/librados/test_cxx.h"
 #include "test/librados/testcase_cxx.h"
 
@@ -62,6 +66,347 @@ static string vector_entry_id(const string& bucket, const string& index,
       value.c_str(), static_cast<unsigned>(value.length())));
 }
 
+static librados::vector_query::query_request_t make_query_planner_request(
+    const string& bucket,
+    const string& index,
+    const bufferlist& query_vector)
+{
+  librados::vector_query::query_request_t req;
+  req.bucket_name = bucket;
+  req.index_name = index;
+  req.data_type = LIBRADOS_VECTOR_DATA_TYPE_FLOAT32;
+  req.distance_metric = LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE;
+  req.dimension = 4;
+  req.top_k = 10;
+  req.query_vector = query_vector;
+  return req;
+}
+
+TEST(VectorQueryPlanner, HashV0DeterministicRouting) {
+  float query[] = {1.0, 2.0, 3.0, 4.0};
+  bufferlist query_bl;
+  query_bl.append(reinterpret_cast<const char *>(query), sizeof(query));
+
+  auto req = make_query_planner_request("bucket", "index", query_bl);
+  librados::vector_query::plan_t plan1;
+  librados::vector_query::plan_t plan2;
+  ASSERT_EQ(0, librados::vector_query::build_plan(req, &plan1));
+  ASSERT_EQ(0, librados::vector_query::build_plan(req, &plan2));
+  ASSERT_EQ(1u, plan1.probes.size());
+  ASSERT_EQ(1u, plan2.probes.size());
+  EXPECT_EQ(ceph::rados::vector_query_algorithm_hash, plan1.algorithm_id);
+  EXPECT_EQ(ceph::rados::vector_query_algorithm_version_0,
+            plan1.algorithm_version);
+  EXPECT_EQ(librados::vector_placement::hash_v0_algorithm,
+            plan1.placement_algorithm);
+  EXPECT_EQ(plan1.probes[0].oid.name, plan2.probes[0].oid.name);
+  EXPECT_EQ(plan1.probes[0].placement_key,
+            plan2.probes[0].placement_key);
+  const auto put_placement =
+    librados::vector_placement::compute_hash_v0_placement(
+        "bucket", "index", query_bl);
+  const auto vector_hash =
+    librados::vector_placement::hash_v0_vector_hash(query_bl);
+  EXPECT_EQ(librados::vector_placement::hash_v0_placement_key(vector_hash),
+            plan1.probes[0].placement_key);
+  EXPECT_EQ(put_placement.vector_hash, vector_hash);
+  EXPECT_EQ(put_placement.placement_key, plan1.probes[0].placement_key);
+  EXPECT_EQ(put_placement.oid.name, plan1.probes[0].oid.name);
+  EXPECT_EQ(librados::vector_placement::make_hash_v0_oid(
+      "bucket", "index", plan1.probes[0].placement_key).name,
+      plan1.probes[0].oid.name);
+
+  std::vector<librados::vector_query::routed_request_t> requests;
+  ASSERT_EQ(0, librados::vector_query::build_routed_requests(
+      req, plan1, &requests));
+  ASSERT_EQ(1u, requests.size());
+  EXPECT_EQ(plan1.probes[0].oid.name, requests[0].oid.name);
+  EXPECT_EQ(plan1.probes[0].placement_key, requests[0].placement_key);
+  EXPECT_GT(requests[0].payload.length(), 0u);
+
+  ceph::rados::query_vectors_request_t routed_req;
+  auto payload_iter = requests[0].payload.cbegin();
+  decode(routed_req, payload_iter);
+  ASSERT_TRUE(payload_iter.end());
+  EXPECT_EQ("bucket", routed_req.bucket_name);
+  EXPECT_EQ("index", routed_req.index_name);
+  EXPECT_EQ(4u, routed_req.dimension);
+  EXPECT_EQ(10u, routed_req.local_top_k);
+  EXPECT_EQ(query_bl.length(), routed_req.query_vector.length());
+  ASSERT_EQ(1u, routed_req.probe_prefixes.size());
+  EXPECT_EQ(requests[0].placement_key, routed_req.probe_prefixes[0]);
+  EXPECT_EQ(0, ceph::rados::vector_query_exec::validate_query_request(
+      routed_req));
+}
+
+TEST(VectorQueryValidation, RejectsMalformedHashV0WireFields) {
+  float query[] = {1.0, 2.0, 3.0, 4.0};
+  bufferlist query_bl;
+  query_bl.append(reinterpret_cast<const char *>(query), sizeof(query));
+
+  auto req = make_query_planner_request("bucket", "index", query_bl);
+  ceph::rados::query_vectors_request_t wire_req;
+  wire_req.bucket_name = req.bucket_name;
+  wire_req.index_name = req.index_name;
+  wire_req.data_type = req.data_type;
+  wire_req.distance_metric = req.distance_metric;
+  wire_req.dimension = req.dimension;
+  wire_req.local_top_k = req.top_k;
+  wire_req.query_vector = req.query_vector;
+  wire_req.probe_prefixes.push_back("abcd");
+  ASSERT_EQ(0, ceph::rados::vector_query_exec::validate_query_request(
+      wire_req));
+
+  auto bad_prefix = wire_req;
+  bad_prefix.probe_prefixes = {"abc"};
+  EXPECT_EQ(-EINVAL, ceph::rados::vector_query_exec::validate_query_request(
+      bad_prefix));
+
+  auto bad_prefix_case = wire_req;
+  bad_prefix_case.probe_prefixes = {"ABCd"};
+  EXPECT_EQ(-EINVAL, ceph::rados::vector_query_exec::validate_query_request(
+      bad_prefix_case));
+
+  auto empty_prefix = wire_req;
+  empty_prefix.probe_prefixes = {""};
+  EXPECT_EQ(-EINVAL, ceph::rados::vector_query_exec::validate_query_request(
+      empty_prefix));
+
+  auto empty_local_topk = wire_req;
+  empty_local_topk.local_top_k = 0;
+  EXPECT_EQ(-EINVAL, ceph::rados::vector_query_exec::validate_query_request(
+      empty_local_topk));
+}
+
+TEST(VectorQueryValidation, PlannerFieldsStayOutOfWireRequest) {
+  float query[] = {1.0, 2.0, 3.0, 4.0};
+  bufferlist query_bl;
+  query_bl.append(reinterpret_cast<const char *>(query), sizeof(query));
+
+  auto req = make_query_planner_request("bucket", "index", query_bl);
+  ceph::rados::vector_index_config_t config;
+  config.data_type = req.data_type;
+  config.distance_metric = req.distance_metric;
+  config.dimension = req.dimension;
+  config.algorithm_id = ceph::rados::vector_query_algorithm_hash;
+  config.algorithm_version = ceph::rados::vector_query_algorithm_version_0;
+  config.placement_algorithm = librados::vector_placement::hash_v0_algorithm;
+  config.routing_policy.probe_pgs = 1;
+  config.routing_policy.write_pgs = 3;
+  config.routing_policy.local_topk = 2;
+
+  librados::vector_query::query_plan_t plan;
+  ASSERT_EQ(0, librados::vector_query::build_query_plan(req, config, &plan));
+
+  std::vector<librados::vector_query::routed_request_t> requests;
+  ASSERT_EQ(0, librados::vector_query::build_routed_requests(
+      req, plan, &requests));
+  ASSERT_EQ(1u, requests.size());
+
+  ceph::rados::query_vectors_request_t routed_req;
+  auto payload_iter = requests[0].payload.cbegin();
+  decode(routed_req, payload_iter);
+  ASSERT_TRUE(payload_iter.end());
+  EXPECT_EQ(2u, routed_req.local_top_k);
+  ASSERT_EQ(1u, routed_req.probe_prefixes.size());
+  EXPECT_EQ(requests[0].placement_key, routed_req.probe_prefixes[0]);
+  EXPECT_EQ(0, ceph::rados::vector_query_exec::validate_query_request(
+      routed_req));
+}
+
+TEST(VectorPutValidation, RequiresHashV0RoutedFields) {
+  float vector[] = {1.0, 2.0, 3.0, 4.0};
+  bufferlist vector_bl;
+  vector_bl.append(reinterpret_cast<const char *>(vector), sizeof(vector));
+
+  ceph::rados::put_vector_request_t req;
+  req.bucket_name = "bucket";
+  req.index_name = "index";
+  req.key = "vec";
+  req.data_type = LIBRADOS_VECTOR_DATA_TYPE_FLOAT32;
+  req.distance_metric = LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE;
+  req.dimension = 4;
+  req.vector_data = vector_bl;
+  req.placement_algorithm = librados::vector_placement::hash_v0_algorithm;
+  req.placement_key = "abcd";
+  req.vector_hash = "1234abcd";
+  ASSERT_EQ(0, ceph::rados::vector_query_exec::validate_put_request(
+      req, true));
+
+  auto bad_algorithm = req;
+  bad_algorithm.placement_algorithm.clear();
+  EXPECT_EQ(-EINVAL, ceph::rados::vector_query_exec::validate_put_request(
+      bad_algorithm, true));
+
+  auto bad_placement_key = req;
+  bad_placement_key.placement_key = "abc";
+  EXPECT_EQ(-EINVAL, ceph::rados::vector_query_exec::validate_put_request(
+      bad_placement_key, true));
+
+  auto bad_hash = req;
+  bad_hash.vector_hash = "1234abcg";
+  EXPECT_EQ(-EINVAL, ceph::rados::vector_query_exec::validate_put_request(
+      bad_hash, true));
+}
+
+TEST(VectorQueryResults, DedupsByEntryIdKeepingBestDistance) {
+  std::vector<ceph::rados::query_vectors_result_entry_t> entries;
+
+  ceph::rados::query_vectors_result_entry_t first;
+  first.key = "vec-a";
+  first.entry_id = "entry-a";
+  first.distance = 10.0;
+  ceph::rados::vector_query_exec::merge_result_entry(&entries, first);
+
+  ceph::rados::query_vectors_result_entry_t duplicate;
+  duplicate.key = "vec-a";
+  duplicate.entry_id = "entry-a";
+  duplicate.distance = 2.0;
+  ceph::rados::vector_query_exec::merge_result_entry(&entries, duplicate);
+
+  ceph::rados::query_vectors_result_entry_t same_key_other_entry;
+  same_key_other_entry.key = "vec-a";
+  same_key_other_entry.entry_id = "entry-b";
+  same_key_other_entry.distance = 1.0;
+  ceph::rados::vector_query_exec::merge_result_entry(
+      &entries, same_key_other_entry);
+
+  ASSERT_EQ(2u, entries.size());
+  auto entry_a = std::find_if(
+      entries.begin(), entries.end(), [](const auto& entry) {
+        return entry.entry_id == "entry-a";
+      });
+  ASSERT_NE(entries.end(), entry_a);
+  EXPECT_EQ("vec-a", entry_a->key);
+  EXPECT_EQ(2.0, entry_a->distance);
+
+  auto entry_b = std::find_if(
+      entries.begin(), entries.end(), [](const auto& entry) {
+        return entry.entry_id == "entry-b";
+      });
+  ASSERT_NE(entries.end(), entry_b);
+  EXPECT_EQ("vec-a", entry_b->key);
+  EXPECT_EQ(1.0, entry_b->distance);
+}
+
+TEST(VectorQueryExecutor, LocalTopKLimitsPartialResults) {
+  float query[] = {0.0, 0.0};
+  float near[] = {1.0, 0.0};
+  float far[] = {3.0, 4.0};
+  bufferlist query_bl;
+  bufferlist near_bl;
+  bufferlist far_bl;
+  query_bl.append(reinterpret_cast<const char *>(query), sizeof(query));
+  near_bl.append(reinterpret_cast<const char *>(near), sizeof(near));
+  far_bl.append(reinterpret_cast<const char *>(far), sizeof(far));
+
+  ceph::rados::query_vectors_request_t req;
+  req.bucket_name = "bucket";
+  req.index_name = "index";
+  req.data_type = LIBRADOS_VECTOR_DATA_TYPE_FLOAT32;
+  req.distance_metric = LIBRADOS_VECTOR_DISTANCE_METRIC_EUCLIDEAN;
+  req.dimension = 2;
+  req.local_top_k = 1;
+  req.query_vector = query_bl;
+  req.probe_prefixes.push_back("abcd");
+
+  ceph::rados::vector_query_exec::omap_scan_state_t scan;
+  ceph::rados::vector_query_exec::omap_entry_t near_entry;
+  near_entry.entry_id = "entry-near";
+  near_entry.bucket_name = req.bucket_name;
+  near_entry.index_name = req.index_name;
+  near_entry.user_key = "vec-near";
+  near_entry.content_key = "_CONTENT_near";
+  near_entry.placement_key = "abcd";
+  near_entry.data_type = req.data_type;
+  near_entry.distance_metric = req.distance_metric;
+  near_entry.dimension = req.dimension;
+  near_entry.has_data_type = true;
+  near_entry.has_distance_metric = true;
+  near_entry.has_dimension = true;
+  scan.entries[near_entry.entry_id] = near_entry;
+  scan.contents[near_entry.content_key] = near_bl;
+
+  auto far_entry = near_entry;
+  far_entry.entry_id = "entry-far";
+  far_entry.user_key = "vec-far";
+  far_entry.content_key = "_CONTENT_far";
+  scan.entries[far_entry.entry_id] = far_entry;
+  scan.contents[far_entry.content_key] = far_bl;
+
+  ceph::rados::query_vectors_result_t result;
+  ASSERT_EQ(0, ceph::rados::vector_query_exec::build_local_results(
+      req, scan, &result));
+  ASSERT_EQ(1u, result.entries.size());
+  EXPECT_EQ("entry-near", result.entries[0].entry_id);
+  EXPECT_EQ("vec-near", result.entries[0].key);
+  EXPECT_NEAR(1.0f, result.entries[0].distance, 1e-6f);
+}
+
+TEST(VectorQueryPlanner, HashV0SeparatesBucketAndIndex) {
+  float query[] = {1.0, 2.0, 3.0, 4.0};
+  bufferlist query_bl;
+  query_bl.append(reinterpret_cast<const char *>(query), sizeof(query));
+
+  librados::vector_query::plan_t base;
+  librados::vector_query::plan_t other_bucket;
+  librados::vector_query::plan_t other_index;
+  ASSERT_EQ(0, librados::vector_query::build_plan(
+      make_query_planner_request("bucket", "index", query_bl), &base));
+  ASSERT_EQ(0, librados::vector_query::build_plan(
+      make_query_planner_request("bucket-2", "index", query_bl),
+      &other_bucket));
+  ASSERT_EQ(0, librados::vector_query::build_plan(
+      make_query_planner_request("bucket", "index-2", query_bl),
+      &other_index));
+
+  ASSERT_EQ(1u, base.probes.size());
+  ASSERT_EQ(1u, other_bucket.probes.size());
+  ASSERT_EQ(1u, other_index.probes.size());
+  EXPECT_NE(base.probes[0].oid.name, other_bucket.probes[0].oid.name);
+  EXPECT_NE(base.probes[0].oid.name, other_index.probes[0].oid.name);
+}
+
+TEST(VectorQueryPlanner, PutPlanRespectsWritePolicy) {
+  float vector[] = {1.0, 2.0, 3.0, 4.0};
+  bufferlist vector_bl;
+  vector_bl.append(reinterpret_cast<const char *>(vector), sizeof(vector));
+
+  ceph::rados::put_vector_request_t req;
+  req.bucket_name = "bucket";
+  req.index_name = "index";
+  req.key = "vec";
+  req.data_type = LIBRADOS_VECTOR_DATA_TYPE_FLOAT32;
+  req.distance_metric = LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE;
+  req.dimension = 4;
+  req.vector_data = vector_bl;
+
+  ceph::rados::vector_index_config_t config;
+  config.data_type = req.data_type;
+  config.distance_metric = req.distance_metric;
+  config.dimension = req.dimension;
+  config.algorithm_id = ceph::rados::vector_query_algorithm_hash;
+  config.algorithm_version = ceph::rados::vector_query_algorithm_version_0;
+  config.placement_algorithm = librados::vector_placement::hash_v0_algorithm;
+  config.routing_policy.write_pgs = 3;
+
+  librados::vector_query::put_plan_t plan;
+  ASSERT_EQ(0, librados::vector_query::build_put_plan(req, config, &plan));
+  ASSERT_EQ(3u, plan.targets.size());
+  EXPECT_EQ(3u, plan.routing_policy.write_pgs);
+  EXPECT_EQ(librados::vector_placement::hash_v0_algorithm,
+            plan.placement_algorithm);
+
+  const auto placement =
+    librados::vector_placement::compute_hash_v0_placement(
+        "bucket", "index", vector_bl);
+  EXPECT_EQ(placement.oid.name, plan.targets[0].oid.name);
+  EXPECT_EQ(placement.placement_key, plan.targets[0].placement_key);
+  EXPECT_EQ(placement.vector_hash, plan.targets[0].vector_hash);
+  EXPECT_NE(plan.targets[0].placement_key, plan.targets[1].placement_key);
+  EXPECT_NE(plan.targets[1].placement_key, plan.targets[2].placement_key);
+}
+
 TEST_F(LibRadosIoPP, TooBigPP) {
   IoCtx ioctx;
   bufferlist bl;
@@ -105,6 +450,18 @@ TEST_F(LibRadosIoPP, PutVectorPP) {
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), metadata));
+
+  std::vector<query_vectors_result_entry> query_results;
+  ASSERT_EQ(0, ioctx.query_vectors(
+      "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 2, true, &query_results));
+  ASSERT_EQ(2u, query_results.size());
+  EXPECT_EQ("vec-pp", query_results[0].key);
+  EXPECT_EQ("vec-pp-2", query_results[1].key);
+  EXPECT_NEAR(0.0f, query_results[0].distance, 1e-6f);
+  EXPECT_NEAR(0.0f, query_results[1].distance, 1e-6f);
 
   const string oid = vector_test_oid("bucket", "index", "vec-pp", vector_bl);
   const string entry_id = vector_entry_id("bucket", "index", "vec-pp");
@@ -179,6 +536,12 @@ TEST_F(LibRadosIoPP, PutVectorPP) {
       4, nullptr, sizeof(vector), metadata));
 
   ASSERT_EQ(-EINVAL, ioctx.put_vector(
+      "bucket", "index", "empty-vector",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, 0, metadata));
+
+  ASSERT_EQ(-EINVAL, ioctx.put_vector(
       "bucket", "", "empty-index",
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
@@ -190,13 +553,13 @@ TEST_F(LibRadosIoPP, PutVectorPP) {
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), metadata));
 
-  ASSERT_EQ(-EOPNOTSUPP, ioctx.put_vector(
+  ASSERT_EQ(-EINVAL, ioctx.put_vector(
       "bucket", "index", "bad-type",
       static_cast<rados_vector_data_type_t>(999),
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), metadata));
 
-  ASSERT_EQ(-EOPNOTSUPP, ioctx.put_vector(
+  ASSERT_EQ(-EINVAL, ioctx.put_vector(
       "bucket", "index", "bad-metric",
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       static_cast<rados_vector_distance_metric_t>(999),
@@ -207,8 +570,8 @@ TEST_F(LibRadosIoPP, QueryVectorsValidationPP) {
   float vector[] = {1.0, 2.0, 3.0, 4.0};
   std::vector<query_vectors_result_entry> results;
 
-  ASSERT_EQ(-EOPNOTSUPP, ioctx.query_vectors(
-      "bucket", "index",
+  ASSERT_EQ(0, ioctx.query_vectors(
+      "empty-query-bucket-pp", "empty-query-index-pp",
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), 10, true, &results));
@@ -255,6 +618,51 @@ TEST_F(LibRadosIoPP, QueryVectorsValidationPP) {
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector) - 1, 10, true, &results));
+}
+
+TEST_F(LibRadosIoPP, QueryVectorsPP) {
+  float vector[] = {1.0, 2.0, 3.0, 4.0};
+  bufferlist metadata;
+
+  ASSERT_EQ(0, ioctx.put_vector(
+      "query-bucket-pp", "query-index-pp", "vec-a",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata));
+  ASSERT_EQ(0, ioctx.put_vector(
+      "query-bucket-pp", "query-index-pp", "vec-b",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata));
+
+  std::vector<query_vectors_result_entry> results;
+  ASSERT_EQ(0, ioctx.query_vectors(
+      "query-bucket-pp", "query-index-pp",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 1, true, &results));
+  ASSERT_EQ(1u, results.size());
+  EXPECT_EQ("vec-a", results[0].key);
+  EXPECT_NEAR(0.0f, results[0].distance, 1e-6f);
+
+  ASSERT_EQ(0, ioctx.query_vectors(
+      "query-bucket-pp", "query-index-pp",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 10, true, &results));
+  ASSERT_EQ(2u, results.size());
+  EXPECT_EQ("vec-a", results[0].key);
+  EXPECT_EQ("vec-b", results[1].key);
+  EXPECT_NEAR(0.0f, results[0].distance, 1e-6f);
+  EXPECT_NEAR(0.0f, results[1].distance, 1e-6f);
+
+  ASSERT_EQ(0, ioctx.query_vectors(
+      "query-bucket-pp", "query-index-pp",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 1, false, &results));
+  ASSERT_EQ(1u, results.size());
+  EXPECT_EQ(0.0f, results[0].distance);
 }
 
 TEST_F(LibRadosIoPP, ReadOpPP) {

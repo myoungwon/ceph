@@ -66,6 +66,20 @@ TEST_F(LibRadosIo, PutVector) {
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), metadata, sizeof(metadata)));
 
+  rados_query_vectors_result_t query_result = {};
+  ASSERT_EQ(0, rados_query_vectors(
+      ioctx, "bucket", "index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 1, 1, &query_result));
+  ASSERT_NE(nullptr, query_result.entries);
+  ASSERT_EQ(1u, query_result.entries_len);
+  ASSERT_STREQ("vec-1", query_result.entries[0].key);
+  EXPECT_NEAR(0.0f, query_result.entries[0].distance, 1e-6f);
+  rados_query_vectors_result_release(&query_result);
+  ASSERT_EQ(nullptr, query_result.entries);
+  ASSERT_EQ(0u, query_result.entries_len);
+
   const string oid = vector_test_oid("bucket", "index", "vec-1",
                                      vector, sizeof(vector));
   bufferlist vector_bl;
@@ -110,6 +124,12 @@ TEST_F(LibRadosIo, PutVector) {
       4, nullptr, sizeof(vector), metadata, sizeof(metadata)));
 
   ASSERT_EQ(-EINVAL, rados_put_vector(
+      ioctx, "bucket", "index", "empty-vector",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, 0, metadata, sizeof(metadata)));
+
+  ASSERT_EQ(-EINVAL, rados_put_vector(
       ioctx, "bucket", "", "empty-index",
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
@@ -121,13 +141,13 @@ TEST_F(LibRadosIo, PutVector) {
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), metadata, sizeof(metadata)));
 
-  ASSERT_EQ(-EOPNOTSUPP, rados_put_vector(
+  ASSERT_EQ(-EINVAL, rados_put_vector(
       ioctx, "bucket", "index", "bad-type",
       static_cast<rados_vector_data_type_t>(999),
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), metadata, sizeof(metadata)));
 
-  ASSERT_EQ(-EOPNOTSUPP, rados_put_vector(
+  ASSERT_EQ(-EINVAL, rados_put_vector(
       ioctx, "bucket", "index", "bad-metric",
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       static_cast<rados_vector_distance_metric_t>(999),
@@ -138,8 +158,8 @@ TEST_F(LibRadosIo, QueryVectorsValidation) {
   float vector[] = {1.0, 2.0, 3.0, 4.0};
   rados_query_vectors_result_t result = {};
 
-  ASSERT_EQ(-EOPNOTSUPP, rados_query_vectors(
-      ioctx, "bucket", "index",
+  ASSERT_EQ(0, rados_query_vectors(
+      ioctx, "empty-query-bucket", "empty-query-index",
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector), 10, 1, &result));
@@ -188,6 +208,31 @@ TEST_F(LibRadosIo, QueryVectorsValidation) {
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
       4, vector, sizeof(vector) - 1, 10, 1, &result));
+}
+
+TEST_F(LibRadosIo, QueryVectors) {
+  float vector[] = {1.0, 2.0, 3.0, 4.0};
+  const char metadata[] = "query-metadata";
+
+  ASSERT_EQ(0, rados_put_vector(
+      ioctx, "query-bucket", "query-index", "vec-c",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata, sizeof(metadata)));
+
+  rados_query_vectors_result_t result = {};
+  ASSERT_EQ(0, rados_query_vectors(
+      ioctx, "query-bucket", "query-index",
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 10, 1, &result));
+  ASSERT_NE(nullptr, result.entries);
+  ASSERT_EQ(1u, result.entries_len);
+  ASSERT_STREQ("vec-c", result.entries[0].key);
+  EXPECT_NEAR(0.0f, result.entries[0].distance, 1e-6f);
+  rados_query_vectors_result_release(&result);
+  ASSERT_EQ(nullptr, result.entries);
+  ASSERT_EQ(0u, result.entries_len);
 }
 
 TEST_F(LibRadosIo, TooBig) {
