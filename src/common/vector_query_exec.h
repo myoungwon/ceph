@@ -79,6 +79,30 @@ inline bool is_hash_v0_vector_hash(std::string_view vector_hash)
   return is_lower_hex_string(vector_hash, vector_hash_v0_vector_hash_len);
 }
 
+inline bool is_lsh_v0_placement_key(std::string_view placement_key)
+{
+  return is_lower_hex_string(
+      placement_key, vector_lsh_v0_placement_key_len);
+}
+
+inline bool is_supported_placement_key(std::string_view placement_algorithm,
+                                       std::string_view placement_key)
+{
+  if (placement_algorithm == vector_placement_algorithm_hash_v0) {
+    return is_hash_v0_placement_key(placement_key);
+  }
+  if (placement_algorithm == vector_placement_algorithm_lsh_v0) {
+    return is_lsh_v0_placement_key(placement_key);
+  }
+  return false;
+}
+
+inline bool is_supported_probe_key(std::string_view placement_key)
+{
+  return is_hash_v0_placement_key(placement_key) ||
+    is_lsh_v0_placement_key(placement_key);
+}
+
 inline int validate_vector_payload(uint32_t data_type,
                                    uint32_t distance_metric,
                                    uint32_t dimension,
@@ -128,8 +152,8 @@ inline int validate_put_request(const put_vector_request_t& req,
     return 0;
   }
 
-  if (req.placement_algorithm != vector_placement_algorithm_hash_v0 ||
-      !is_hash_v0_placement_key(req.placement_key) ||
+  if (!is_supported_placement_key(req.placement_algorithm,
+                                  req.placement_key) ||
       !is_hash_v0_vector_hash(req.vector_hash)) {
     return -EINVAL;
   }
@@ -245,7 +269,7 @@ inline int validate_query_request(const query_vectors_request_t& req,
   }
 
   for (const auto& prefix : req.probe_prefixes) {
-    if (!is_hash_v0_placement_key(prefix)) {
+    if (!is_supported_probe_key(prefix)) {
       return -EINVAL;
     }
   }
