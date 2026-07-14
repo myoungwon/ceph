@@ -5,6 +5,7 @@
 #include <climits>
 #include <cstdio>
 #include <errno.h>
+#include <vector>
 
 #include "gtest/gtest.h"
 
@@ -34,22 +35,22 @@ static string vector_hex_u32(uint32_t value)
   return string(buf);
 }
 
-static string vector_hash_string(const string& value)
-{
-  return vector_hex_u32(ceph_str_hash_rjenkins(
-      value.c_str(), static_cast<unsigned>(value.length())));
-}
-
 static string vector_test_oid(const string& bucket, const string& index,
                               const string& key,
                               const bufferlist& vector_data)
 {
   (void)key;
-  const string vector_hash =
-    vector_hex_u32(vector_data.crc32c(static_cast<uint32_t>(-1)));
-  const string placement_key = vector_hash.substr(0, 4);
-  return ".rados.vector/v1/hash-v0/" + vector_hash_string(bucket) + "/" +
-    vector_hash_string(index) + "/" + placement_key;
+  std::vector<float> values;
+  if (librados::vector_placement::copy_float32_vector(
+        vector_data, 4, &values) < 0) {
+    return string();
+  }
+  const uint32_t signature =
+    librados::vector_placement::lsh_v0_signature(values, 0);
+  const string placement_key =
+    librados::vector_placement::lsh_v0_placement_key(0, signature);
+  return librados::vector_placement::make_lsh_v0_oid(
+      bucket, index, placement_key).name;
 }
 
 static string vector_entry_id(const string& bucket, const string& index,
