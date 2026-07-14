@@ -13,7 +13,9 @@
  *
  */
 
+#include <cstdlib>
 #include <limits.h>
+#include <memory>
 
 #include "IoCtxImpl.h"
 
@@ -46,6 +48,54 @@ namespace cb = ceph::buffer;
 
 namespace librados {
 namespace {
+
+uint32_t vector_lsh_env_u32(const char *name,
+                            uint32_t default_value,
+                            uint32_t min_value,
+                            uint32_t max_value)
+{
+  const char *value = std::getenv(name);
+  if (value == nullptr || *value == '\0') {
+    return default_value;
+  }
+
+  char *end = nullptr;
+  const unsigned long parsed = std::strtoul(value, &end, 10);
+  if (end == value || *end != '\0') {
+    return default_value;
+  }
+  if (parsed < min_value) {
+    return min_value;
+  }
+  if (parsed > max_value) {
+    return max_value;
+  }
+  return static_cast<uint32_t>(parsed);
+}
+
+uint32_t vector_lsh_table_count()
+{
+  return vector_lsh_env_u32(
+      "CEPH_VECTOR_LSH_TABLES",
+      ceph::rados::vector_lsh_v0_default_table_count,
+      1, 0xffffU);
+}
+
+uint32_t vector_lsh_signature_bits()
+{
+  return vector_lsh_env_u32(
+      "CEPH_VECTOR_LSH_BITS",
+      ceph::rados::vector_lsh_v0_bits,
+      1, ceph::rados::vector_lsh_v0_max_bits);
+}
+
+uint32_t vector_lsh_probe_count(uint32_t table_count, uint32_t signature_bits)
+{
+  const uint32_t hamming = vector_lsh_env_u32(
+      "CEPH_VECTOR_LSH_PROBE_HAMMING", 1, 0, 1);
+  return table_count *
+    (1 + hamming * signature_bits);
+}
 
 struct CB_notify_Finish {
   CephContext *cct;
@@ -678,9 +728,15 @@ int librados::IoCtxImpl::put_vector(const std::string& vector_bucket_name,
   config.data_type = encoded_data_type;
   config.distance_metric = encoded_distance_metric;
   config.dimension = dimension;
-  config.algorithm_id = ceph::rados::vector_query_algorithm_hash;
+  config.algorithm_id = ceph::rados::vector_query_algorithm_lsh;
   config.algorithm_version = ceph::rados::vector_query_algorithm_version_0;
-  config.placement_algorithm = librados::vector_placement::hash_v0_algorithm;
+  config.placement_algorithm = librados::vector_placement::lsh_v0_algorithm;
+  const uint32_t lsh_signature_bits = vector_lsh_signature_bits();
+  encode(lsh_signature_bits, config.algorithm_params);
+  config.routing_policy.write_pgs = vector_lsh_table_count();
+  config.routing_policy.probe_pgs =
+    vector_lsh_probe_count(config.routing_policy.write_pgs,
+                           lsh_signature_bits);
 
   librados::vector_query::put_plan_t plan;
   r = librados::vector_query::build_put_plan(req, config, &plan);
@@ -693,6 +749,19 @@ int librados::IoCtxImpl::put_vector(const std::string& vector_bucket_name,
   for (const auto& target : plan.targets) {
     ::ObjectOperation op;
     prepare_assert_ops(&op);
+
+    ldout(client->cct, 20) << "vector-debug put computed oid="
+				  << target.oid
+				  << " algorithm=" << req.placement_algorithm
+				  << " bucket=" << req.bucket_name
+			  << " index=" << req.index_name
+			  << " key=" << req.key
+			  << " data_type=" << req.data_type
+			  << " distance_metric=" << req.distance_metric
+			  << " dimension=" << req.dimension
+			  << " placement_key=" << target.placement_key
+			  << " vector_hash=" << target.vector_hash
+			  << dendl;
 
     req.placement_key = target.placement_key;
     req.vector_hash = target.vector_hash;
@@ -770,9 +839,15 @@ int librados::IoCtxImpl::query_vectors(
   config.data_type = encoded_data_type;
   config.distance_metric = encoded_distance_metric;
   config.dimension = dimension;
-  config.algorithm_id = ceph::rados::vector_query_algorithm_hash;
+  config.algorithm_id = ceph::rados::vector_query_algorithm_lsh;
   config.algorithm_version = ceph::rados::vector_query_algorithm_version_0;
-  config.placement_algorithm = librados::vector_placement::hash_v0_algorithm;
+  config.placement_algorithm = librados::vector_placement::lsh_v0_algorithm;
+  const uint32_t lsh_signature_bits = vector_lsh_signature_bits();
+  encode(lsh_signature_bits, config.algorithm_params);
+  config.routing_policy.write_pgs = vector_lsh_table_count();
+  config.routing_policy.probe_pgs =
+    vector_lsh_probe_count(config.routing_policy.write_pgs,
+                           lsh_signature_bits);
 
   librados::vector_query::query_plan_t plan;
   r = librados::vector_query::build_query_plan(req, config, &plan);
@@ -787,31 +862,72 @@ int librados::IoCtxImpl::query_vectors(
     return r;
   }
 
-  ceph::rados::query_vectors_result_t merged_result;
-  for (const auto& routed_request : routed_requests) {
+  struct PendingVectorQuery {
     ::ObjectOperation op;
-    bufferlist payload = routed_request.payload;
+    bufferlist payload;
     bufferlist reply;
     int op_rval = 0;
-    op.query_vectors(payload, &reply, &op_rval);
+    int submit_ret = 0;
+    AioCompletionImpl *completion = nullptr;
+    librados::vector_query::routed_request_t routed_request;
+  };
 
-    r = operate_read(routed_request.oid, &op, &reply);
-    if (r == -ENOENT || op_rval == -ENOENT) {
+  std::vector<std::unique_ptr<PendingVectorQuery>> pending_requests;
+  pending_requests.reserve(routed_requests.size());
+  for (const auto& routed_request : routed_requests) {
+    ldout(client->cct, 20) << "vector-debug query computed oid="
+				  << routed_request.oid
+				  << " algorithm=" << plan.placement_algorithm
+				  << " bucket=" << req.bucket_name
+			  << " index=" << req.index_name
+			  << " data_type=" << req.data_type
+			  << " distance_metric=" << req.distance_metric
+			  << " dimension=" << req.dimension
+			  << " top_k=" << req.top_k
+			  << " return_distance=" << return_distance
+			  << " placement_key=" << routed_request.placement_key
+			  << dendl;
+
+    auto pending = std::make_unique<PendingVectorQuery>();
+    pending->payload = routed_request.payload;
+    pending->routed_request = routed_request;
+    pending->completion = new AioCompletionImpl;
+    pending->op.query_vectors(
+        pending->payload, &pending->reply, &pending->op_rval);
+    pending->submit_ret = aio_operate_read(
+        routed_request.oid, &pending->op, pending->completion, 0,
+        &pending->reply);
+    pending_requests.push_back(std::move(pending));
+  }
+
+  ceph::rados::query_vectors_result_t merged_result;
+  for (auto& pending : pending_requests) {
+    r = pending->submit_ret;
+    if (pending->completion != nullptr && r == 0) {
+      pending->completion->wait_for_complete();
+      r = pending->completion->get_return_value();
+    }
+    if (pending->completion != nullptr) {
+      pending->completion->release();
+      pending->completion = nullptr;
+    }
+
+    if (r == -ENOENT || pending->op_rval == -ENOENT) {
       continue;
     }
     if (r < 0) {
       return r;
     }
-    if (op_rval < 0) {
-      return op_rval;
+    if (pending->op_rval < 0) {
+      return pending->op_rval;
     }
-    if (reply.length() == 0) {
+    if (pending->reply.length() == 0) {
       continue;
     }
 
     ceph::rados::query_vectors_result_t partial_result;
     try {
-      auto p = reply.cbegin();
+      auto p = pending->reply.cbegin();
       decode(partial_result, p);
       if (!p.end()) {
         return -EIO;
