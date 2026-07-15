@@ -31,6 +31,7 @@ inline constexpr uint32_t vector_query_algorithm_lsh = 2;
 inline constexpr uint32_t vector_query_algorithm_version_0 = 0;
 inline constexpr const char *vector_placement_algorithm_hash_v0 = "hash-v0";
 inline constexpr const char *vector_placement_algorithm_lsh_v0 = "lsh-v0";
+inline constexpr const char *vector_placement_algorithm_pg_lsh_v0 = "pg-lsh-v0";
 inline constexpr uint32_t vector_hash_v0_placement_key_len = 4;
 inline constexpr uint32_t vector_hash_v0_vector_hash_len = 8;
 inline constexpr uint32_t vector_lsh_v0_bits = 10;

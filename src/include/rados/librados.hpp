@@ -27,13 +27,23 @@ namespace librados {
 
 using ceph::bufferlist;
 
+struct IoCtxImpl;
+inline namespace v14_2_0 {
+class IoCtx;
+}
+
+namespace vector_internal {
+struct IoCtxAccess {
+  static IoCtxImpl *get(v14_2_0::IoCtx& ioctx);
+};
+}
+
 struct query_vectors_result_entry {
   std::string key;
   float distance = 0;
 };
 
 struct AioCompletionImpl;
-struct IoCtxImpl;
 struct ListObjectImpl;
 class NObjectIteratorImpl;
 struct ObjListCtx;
@@ -1546,6 +1556,7 @@ inline namespace v14_2_0 {
     friend class libradosstriper::RadosStriper; // Striper needs to see our IoCtxImpl
     friend class ObjectWriteOperation;  // copy_from needs to see our IoCtxImpl
     friend class ObjectReadOperation;  // set_chunk needs to see our IoCtxImpl
+    friend struct librados::vector_internal::IoCtxAccess;
 
     IoCtxImpl *io_ctx_impl;
   };
