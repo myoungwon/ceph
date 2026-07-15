@@ -7096,6 +7096,16 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	if (result < 0) {
 	  break;
 	}
+		dout(20) << "vector-debug query request object name="
+		<< soid.oid.name
+		<< " bucket=" << req.bucket_name
+		<< " index=" << req.index_name
+		<< " data_type=" << req.data_type
+		<< " distance_metric=" << req.distance_metric
+		<< " dimension=" << req.dimension
+		<< " local_top_k=" << req.local_top_k
+		<< " probe_prefix_count=" << req.probe_prefixes.size()
+		<< dendl;
 
 	ceph::rados::vector_query_exec::omap_scan_state_t scan;
 	if (oi.is_omap()) {
@@ -7112,13 +7122,49 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	    break;
 	  }
 	}
+		dout(20) << "vector-debug query iterated object name="
+		<< soid.oid.name
+		<< " soid=" << soid
+		<< " content_count=" << scan.contents.size()
+		<< " entry_count=" << scan.entries.size()
+		<< dendl;
 
 	ceph::rados::query_vectors_result_t query_result;
+	ceph::rados::vector_query_exec::query_filter_stats_t filter_stats;
 	result = ceph::rados::vector_query_exec::build_local_results(
-	    req, scan, &query_result);
+	    req, scan, &query_result, &filter_stats);
 	if (result < 0) {
 	  break;
 	}
+	query_result.local_matching_entries = filter_stats.matched_entries;
+	query_result.local_distance_computations =
+	  filter_stats.distance_computations;
+		dout(20) << "vector-debug query filter object name="
+		<< soid.oid.name
+		<< " bucket=" << req.bucket_name
+		<< " index=" << req.index_name
+		<< " data_type=" << req.data_type
+		<< " distance_metric=" << req.distance_metric
+		<< " dimension=" << req.dimension
+		<< " entry_count=" << scan.entries.size()
+		<< " content_count=" << scan.contents.size()
+		<< " total_entries=" << filter_stats.total_entries
+		<< " matched_entries=" << filter_stats.matched_entries
+		<< " distance_computations="
+		<< filter_stats.distance_computations
+		<< " merged_entries=" << filter_stats.merged_entries
+		<< " final_entries=" << filter_stats.final_entries
+		<< " incomplete_entries=" << filter_stats.incomplete_entries
+		<< " bucket_mismatch=" << filter_stats.bucket_mismatch
+		<< " index_mismatch=" << filter_stats.index_mismatch
+		<< " data_type_mismatch=" << filter_stats.data_type_mismatch
+		<< " distance_metric_mismatch="
+		<< filter_stats.distance_metric_mismatch
+		<< " dimension_mismatch=" << filter_stats.dimension_mismatch
+		<< " probe_mismatch=" << filter_stats.probe_mismatch
+		<< " missing_content=" << filter_stats.missing_content
+		<< " distance_error=" << filter_stats.distance_error
+		<< dendl;
 
 	encode(query_result, osd_op.outdata);
 	ctx->delta_stats.num_rd_kb +=
@@ -7159,6 +7205,18 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	if (result < 0) {
 	  break;
 	}
+		dout(20) << "vector-debug put request object name="
+			<< soid.oid.name
+			<< " algorithm=" << req.placement_algorithm
+			<< " bucket=" << req.bucket_name
+		<< " index=" << req.index_name
+		<< " key=" << req.key
+		<< " data_type=" << req.data_type
+		<< " distance_metric=" << req.distance_metric
+		<< " dimension=" << req.dimension
+		<< " placement_key=" << req.placement_key
+		<< " vector_hash=" << req.vector_hash
+		<< dendl;
 
 	maybe_create_new_object(ctx);
 

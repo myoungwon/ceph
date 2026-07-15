@@ -283,6 +283,10 @@ struct query_vectors_result_entry_t {
 struct query_vectors_result_t {
   // Sorted vector query result entries.
   std::vector<query_vectors_result_entry_t> entries;
+  // OSD-local physical scan stats. These are deliberately minimal; benchmark
+  // clients derive logical candidate and duplicate counts after global merge.
+  uint64_t local_matching_entries = 0;
+  uint64_t local_distance_computations = 0;
 
   void encode(ceph::bufferlist& bl) const {
     ENCODE_START(1, 1, bl);
@@ -291,6 +295,8 @@ struct query_vectors_result_t {
     for (const auto& entry : entries) {
       entry.encode(bl);
     }
+    encode(local_matching_entries, bl);
+    encode(local_distance_computations, bl);
     ENCODE_FINISH(bl);
   }
 
@@ -306,6 +312,8 @@ struct query_vectors_result_t {
       entry.decode(p);
       entries.push_back(std::move(entry));
     }
+    decode(local_matching_entries, p);
+    decode(local_distance_computations, p);
     DECODE_FINISH(p);
   }
 };
