@@ -2,10 +2,19 @@
 // vim: ts=8 sw=2 sts=2 expandtab
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <climits>
 #include <cstdio>
 #include <errno.h>
+#include <limits>
+#include <memory>
+#include <set>
+#include <sstream>
+#include <thread>
+#include <unordered_set>
 #include <vector>
+#include <unistd.h>
 
 #include "gtest/gtest.h"
 
@@ -15,6 +24,8 @@
 #include "include/err.h"
 #include "include/scope_guard.h"
 #include "common/vector_query_exec.h"
+#include "json_spirit/json_spirit.h"
+#include "librados/vector_pg_lsh.h"
 #include "librados/vector_placement.h"
 #include "librados/vector_query_planner.h"
 #include "test/librados/test_cxx.h"
@@ -65,6 +76,38 @@ static string vector_entry_id(const string& bucket, const string& index,
   value.append(key);
   return vector_hex_u32(ceph_str_hash_rjenkins(
       value.c_str(), static_cast<unsigned>(value.length())));
+}
+
+static uint32_t pg_lsh_test_lsh_bucket_id_for_pg(uint32_t table,
+                                                 uint32_t pg_num,
+                                                 uint32_t seed,
+                                                 uint32_t target_pg)
+{
+  for (uint32_t lsh_bucket_id = 0;
+       lsh_bucket_id < (1U << ceph::rados::vector_lsh_v0_max_bits);
+       ++lsh_bucket_id) {
+    if (librados::vector_placement::pg_lsh_v0_group_to_pg(
+          table, lsh_bucket_id, pg_num, seed) == target_pg) {
+      return lsh_bucket_id;
+    }
+  }
+  return std::numeric_limits<uint32_t>::max();
+}
+
+static uint32_t pg_lsh_test_lsh_bucket_id_not_pg(uint32_t table,
+                                                 uint32_t pg_num,
+                                                 uint32_t seed,
+                                                 uint32_t excluded_pg)
+{
+  for (uint32_t lsh_bucket_id = 0;
+       lsh_bucket_id < (1U << ceph::rados::vector_lsh_v0_max_bits);
+       ++lsh_bucket_id) {
+    if (librados::vector_placement::pg_lsh_v0_group_to_pg(
+          table, lsh_bucket_id, pg_num, seed) != excluded_pg) {
+      return lsh_bucket_id;
+    }
+  }
+  return std::numeric_limits<uint32_t>::max();
 }
 
 static librados::vector_query::query_request_t make_query_planner_request(
@@ -406,6 +449,672 @@ TEST(VectorQueryPlanner, PutPlanRespectsWritePolicy) {
   EXPECT_EQ(placement.vector_hash, plan.targets[0].vector_hash);
   EXPECT_NE(plan.targets[0].placement_key, plan.targets[1].placement_key);
   EXPECT_NE(plan.targets[1].placement_key, plan.targets[2].placement_key);
+}
+
+TEST(VectorPlacement, PgLshV0SelectionUsesLogicalOrderAndBudget) {
+  float vector[] = {1.0, -2.0, 3.0, -4.0};
+  bufferlist vector_bl;
+  vector_bl.append(reinterpret_cast<const char *>(vector), sizeof(vector));
+
+  constexpr uint32_t k = 10;
+  constexpr uint32_t l = 16;
+  constexpr uint32_t seed = 12345;
+  constexpr uint32_t pg_num = 16;
+
+  std::vector<librados::vector_placement::pg_lsh_v0_group_t> exact1;
+  std::vector<librados::vector_placement::pg_lsh_v0_group_t> exact2;
+  ASSERT_EQ(0, librados::vector_placement::pg_lsh_v0_exact_groups(
+      vector_bl, 4, k, l, seed, &exact1));
+  ASSERT_EQ(0, librados::vector_placement::pg_lsh_v0_exact_groups(
+      vector_bl, 4, k, l, seed, &exact2));
+  ASSERT_EQ(l, exact1.size());
+  ASSERT_EQ(exact1.size(), exact2.size());
+  for (size_t i = 0; i < exact1.size(); ++i) {
+    EXPECT_EQ(exact1[i].table, exact2[i].table);
+    EXPECT_EQ(exact1[i].lsh_bucket_id, exact2[i].lsh_bucket_id);
+    EXPECT_EQ(0u, exact1[i].hamming_distance);
+  }
+
+  const auto write_pgs =
+    librados::vector_placement::pg_lsh_v0_select_write_pgs(
+        exact1, pg_num, seed, 4);
+  ASSERT_EQ(4u, write_pgs.size());
+  std::unordered_set<uint32_t> unique_write_pgs(
+      write_pgs.begin(), write_pgs.end());
+  EXPECT_EQ(write_pgs.size(), unique_write_pgs.size());
+
+  std::vector<librados::vector_placement::pg_lsh_v0_group_t> query_groups;
+  ASSERT_EQ(0, librados::vector_placement::pg_lsh_v0_query_groups(
+      vector_bl, 4, k, l, 1, seed, &query_groups));
+  EXPECT_EQ(l * (1 + k), query_groups.size());
+  for (uint32_t table = 0; table < l; ++table) {
+    EXPECT_EQ(table, query_groups[table].table);
+    EXPECT_EQ(0u, query_groups[table].hamming_distance);
+  }
+  for (uint32_t table = 0; table < l; ++table) {
+    const size_t first_radius_one = l + table * k;
+    EXPECT_EQ(table, query_groups[first_radius_one].table);
+    EXPECT_EQ(1u, query_groups[first_radius_one].hamming_distance);
+  }
+
+  librados::vector_pg_lsh::pool_pg_info_t pool_info;
+  pool_info.pg_num = pg_num;
+  pool_info.pgp_num = pg_num;
+  pool_info.osdmap_epoch = 1;
+
+  librados::vector_pg_lsh::params_t params;
+  params.k = k;
+  params.l = l;
+  params.seed = seed;
+  params.hamming_radius = 0;
+  params.d = 2;
+  params.m = 16;
+
+  std::vector<librados::vector_placement::pg_lsh_v0_ranked_pg_t> query_pgs;
+  uint64_t generated_group_count = 0;
+  ASSERT_EQ(0, librados::vector_pg_lsh::select_query_pgs(
+      vector_bl, 4, params, pool_info, &query_pgs,
+      &generated_group_count));
+  EXPECT_EQ(l, generated_group_count);
+  EXPECT_LT(query_pgs.size(), params.m);
+  EXPECT_EQ(10u, query_pgs.size());
+  std::unordered_set<uint32_t> unique_query_pgs;
+  for (const auto& pg : query_pgs) {
+    EXPECT_TRUE(unique_query_pgs.insert(pg.pg).second);
+  }
+
+  std::vector<uint32_t> vector_write_pgs;
+  ASSERT_EQ(0, librados::vector_pg_lsh::select_write_pgs(
+      vector_bl, 4, params, pool_info, &vector_write_pgs));
+  ASSERT_EQ(params.d, vector_write_pgs.size());
+
+  params.m = 8;
+  ASSERT_EQ(0, librados::vector_pg_lsh::select_query_pgs(
+      vector_bl, 4, params, pool_info, &query_pgs,
+      &generated_group_count));
+  EXPECT_EQ(l, generated_group_count);
+  ASSERT_EQ(params.m, query_pgs.size());
+  unique_query_pgs.clear();
+  for (const auto& pg : query_pgs) {
+    unique_query_pgs.insert(pg.pg);
+  }
+  for (const uint32_t pg : vector_write_pgs) {
+    EXPECT_EQ(1u, unique_query_pgs.count(pg));
+  }
+
+  params.m = 16;
+  params.hamming_radius = 1;
+  ASSERT_EQ(0, librados::vector_pg_lsh::select_query_pgs(
+      vector_bl, 4, params, pool_info, &query_pgs,
+      &generated_group_count));
+  EXPECT_EQ(l * (1 + k), generated_group_count);
+  ASSERT_EQ(params.m, query_pgs.size());
+
+  librados::vector_pg_lsh::params_t exhausted_params;
+  exhausted_params.k = 1;
+  exhausted_params.l = 2;
+  exhausted_params.seed = seed;
+  exhausted_params.hamming_radius = 0;
+  exhausted_params.d = 1;
+  exhausted_params.m = 16;
+  ASSERT_EQ(0, librados::vector_pg_lsh::select_query_pgs(
+      vector_bl, 4, exhausted_params, pool_info, &query_pgs,
+      &generated_group_count));
+  EXPECT_EQ(2u, generated_group_count);
+  EXPECT_LE(query_pgs.size(), generated_group_count);
+  EXPECT_LT(query_pgs.size(), exhausted_params.m);
+}
+
+TEST(VectorPlacement, PgLshV0ManualCollisionSelection) {
+  constexpr uint32_t seed = 12345;
+  constexpr uint32_t pg_num = 16;
+  const uint32_t collision_pg =
+    librados::vector_placement::pg_lsh_v0_group_to_pg(
+        0, 0, pg_num, seed);
+  const uint32_t table1_collision_lsh_bucket_id =
+    pg_lsh_test_lsh_bucket_id_for_pg(1, pg_num, seed, collision_pg);
+  const uint32_t table2_other_lsh_bucket_id =
+    pg_lsh_test_lsh_bucket_id_not_pg(2, pg_num, seed, collision_pg);
+  ASSERT_NE(std::numeric_limits<uint32_t>::max(),
+            table1_collision_lsh_bucket_id);
+  ASSERT_NE(std::numeric_limits<uint32_t>::max(),
+            table2_other_lsh_bucket_id);
+
+  std::vector<librados::vector_placement::pg_lsh_v0_group_t> exact = {
+    {0, 0, 0},
+    {1, table1_collision_lsh_bucket_id, 0},
+    {2, table2_other_lsh_bucket_id, 0},
+  };
+  const auto write_pgs =
+    librados::vector_placement::pg_lsh_v0_select_write_pgs(
+        exact, pg_num, seed, 2);
+  ASSERT_EQ(2u, write_pgs.size());
+  EXPECT_EQ(collision_pg, write_pgs[0]);
+  EXPECT_NE(collision_pg, write_pgs[1]);
+
+  bool found_order_case = false;
+  uint32_t high_pg = 0;
+  uint32_t low_pg = 0;
+  uint32_t high_lsh_bucket_id = 0;
+  uint32_t low_lsh_bucket_id = 0;
+  for (uint32_t candidate_high = pg_num - 1;
+       candidate_high > 0 && !found_order_case;
+       --candidate_high) {
+    const uint32_t candidate_high_lsh_bucket_id =
+      pg_lsh_test_lsh_bucket_id_for_pg(0, pg_num, seed, candidate_high);
+    if (candidate_high_lsh_bucket_id ==
+        std::numeric_limits<uint32_t>::max()) {
+      continue;
+    }
+    for (uint32_t candidate_low = 0;
+         candidate_low < candidate_high;
+         ++candidate_low) {
+      const uint32_t candidate_low_lsh_bucket_id =
+        pg_lsh_test_lsh_bucket_id_for_pg(1, pg_num, seed, candidate_low);
+      if (candidate_low_lsh_bucket_id ==
+          std::numeric_limits<uint32_t>::max()) {
+        continue;
+      }
+      high_pg = candidate_high;
+      low_pg = candidate_low;
+      high_lsh_bucket_id = candidate_high_lsh_bucket_id;
+      low_lsh_bucket_id = candidate_low_lsh_bucket_id;
+      found_order_case = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(found_order_case);
+
+  const std::vector<librados::vector_placement::pg_lsh_v0_group_t>
+    order_groups = {
+      {0, high_lsh_bucket_id, 0},
+      {1, low_lsh_bucket_id, 0},
+    };
+  const auto selected = librados::vector_placement::pg_lsh_v0_select_unique_pgs(
+      order_groups, pg_num, seed, 2);
+  ASSERT_EQ(2u, selected.size());
+  ASSERT_GT(high_pg, low_pg);
+  EXPECT_EQ(high_pg, selected[0].pg);
+  EXPECT_EQ(low_pg, selected[1].pg);
+}
+
+static bool vector_test_json_uint64(const std::string& body,
+                                    const std::string& field,
+                                    uint64_t *out)
+{
+  if (out == nullptr) {
+    return false;
+  }
+  json_spirit::mValue root;
+  if (!json_spirit::read(body, root) ||
+      root.type() != json_spirit::obj_type) {
+    return false;
+  }
+  const auto& obj = root.get_obj();
+  const auto it = obj.find(field);
+  if (it == obj.end() || it->second.type() != json_spirit::int_type) {
+    return false;
+  }
+  const int64_t value = it->second.get_int64();
+  if (value < 0) {
+    return false;
+  }
+  *out = static_cast<uint64_t>(value);
+  return true;
+}
+
+static int pool_pg_info_for_test(
+    Rados& cluster,
+    const std::string& pool_name,
+    librados::vector_pg_lsh::pool_pg_info_t *info)
+{
+  if (info == nullptr) {
+    return -EINVAL;
+  }
+
+  bufferlist outbl;
+  uint64_t value = 0;
+  std::string cmd = "{\"prefix\":\"osd pool get\",\"pool\":\"" + pool_name +
+    "\",\"var\":\"pg_num\",\"format\":\"json\"}";
+  int r = cluster.mon_command(std::move(cmd), {}, &outbl, nullptr);
+  if (r < 0) {
+    return r;
+  }
+  if (!vector_test_json_uint64(outbl.to_str(), "pg_num", &value) ||
+      value == 0 || value > std::numeric_limits<uint32_t>::max()) {
+    return -EINVAL;
+  }
+  info->pg_num = static_cast<uint32_t>(value);
+
+  outbl.clear();
+  cmd = "{\"prefix\":\"osd pool get\",\"pool\":\"" + pool_name +
+    "\",\"var\":\"pgp_num\",\"format\":\"json\"}";
+  r = cluster.mon_command(std::move(cmd), {}, &outbl, nullptr);
+  if (r < 0) {
+    return r;
+  }
+  if (!vector_test_json_uint64(outbl.to_str(), "pgp_num", &value) ||
+      value == 0 || value > std::numeric_limits<uint32_t>::max()) {
+    return -EINVAL;
+  }
+  info->pgp_num = static_cast<uint32_t>(value);
+
+  outbl.clear();
+  cmd = "{\"prefix\":\"osd dump\",\"format\":\"json\"}";
+  r = cluster.mon_command(std::move(cmd), {}, &outbl, nullptr);
+  if (r < 0) {
+    return r;
+  }
+  if (!vector_test_json_uint64(outbl.to_str(), "epoch", &value)) {
+    return -EINVAL;
+  }
+  info->osdmap_epoch = value;
+  return 0;
+}
+
+static int ensure_pool_pg_count_for_test(Rados& cluster,
+                                         const std::string& pool_name,
+                                         uint32_t required_pg_num,
+                                         librados::vector_pg_lsh::pool_pg_info_t *info)
+{
+  if (info == nullptr || required_pg_num == 0) {
+    return -EINVAL;
+  }
+
+  int r = pool_pg_info_for_test(cluster, pool_name, info);
+  if (r < 0) {
+    return r;
+  }
+  if (info->pg_num >= required_pg_num &&
+      info->pgp_num >= required_pg_num) {
+    return cluster.wait_for_latest_osdmap();
+  }
+
+  bufferlist outbl;
+  std::string cmd = "{\"prefix\":\"osd pool set\",\"pool\":\"" + pool_name +
+    "\",\"var\":\"pg_num\",\"val\":\"" + std::to_string(required_pg_num) +
+    "\",\"format\":\"json\"}";
+  r = cluster.mon_command(std::move(cmd), {}, &outbl, nullptr);
+  if (r < 0) {
+    return r;
+  }
+  outbl.clear();
+  cmd = "{\"prefix\":\"osd pool set\",\"pool\":\"" + pool_name +
+    "\",\"var\":\"pgp_num\",\"val\":\"" + std::to_string(required_pg_num) +
+    "\",\"format\":\"json\"}";
+  r = cluster.mon_command(std::move(cmd), {}, &outbl, nullptr);
+  if (r < 0) {
+    return r;
+  }
+
+  r = cluster.wait_for_latest_osdmap();
+  if (r < 0) {
+    return r;
+  }
+
+  for (int attempt = 0; attempt < 30; ++attempt) {
+    r = pool_pg_info_for_test(cluster, pool_name, info);
+    if (r < 0) {
+      return r;
+    }
+    if (info->pg_num >= required_pg_num &&
+        info->pgp_num >= required_pg_num) {
+      return 0;
+    }
+    sleep(1);
+  }
+  return -ETIMEDOUT;
+}
+
+static int acting_primary_for_raw_pg(Rados& cluster,
+                                     int64_t pool_id,
+                                     uint32_t raw_pg,
+                                     int *primary);
+
+static int choose_two_raw_pgs_with_different_primaries(
+    Rados& cluster,
+    int64_t pool_id,
+    uint32_t pg_num,
+    uint32_t *pg0,
+    uint32_t *pg1,
+    int *primary0,
+    int *primary1)
+{
+  if (pg0 == nullptr || pg1 == nullptr ||
+      primary0 == nullptr || primary1 == nullptr ||
+      pg_num < 2) {
+    return -EINVAL;
+  }
+
+  bool have_pg0 = false;
+  for (uint32_t pg = 0; pg < pg_num; ++pg) {
+    int primary = -1;
+    int r = acting_primary_for_raw_pg(cluster, pool_id, pg, &primary);
+    if (r < 0) {
+      return r;
+    }
+    if (!have_pg0) {
+      *pg0 = pg;
+      *primary0 = primary;
+      have_pg0 = true;
+      continue;
+    }
+    if (primary != *primary0) {
+      *pg1 = pg;
+      *primary1 = primary;
+      return 0;
+    }
+  }
+  return -ENOENT;
+}
+
+static int acting_primary_for_raw_pg(Rados& cluster,
+                                     int64_t pool_id,
+                                     uint32_t raw_pg,
+                                     int *primary)
+{
+  if (primary == nullptr || pool_id < 0) {
+    return -EINVAL;
+  }
+
+  std::ostringstream pgid;
+  pgid << pool_id << "." << std::hex << raw_pg;
+  bufferlist outbl;
+  std::string cmd = "{\"prefix\":\"pg map\",\"pgid\":\"" + pgid.str() +
+    "\",\"format\":\"json\"}";
+  int r = cluster.mon_command(std::move(cmd), {}, &outbl, nullptr);
+  if (r < 0) {
+    return r;
+  }
+
+  json_spirit::mValue root;
+  if (!json_spirit::read(outbl.to_str(), root)) {
+    return -EINVAL;
+  }
+  const auto& obj = root.get_obj();
+  const auto acting_it = obj.find("acting");
+  if (acting_it == obj.end()) {
+    return -ENOENT;
+  }
+  const auto& acting = acting_it->second.get_array();
+  if (acting.empty()) {
+    return -ENOENT;
+  }
+  *primary = acting.front().get_int();
+  return 0;
+}
+
+static int put_pg_lsh_test_vector(IoCtx& ioctx,
+                                  uint32_t pg,
+                                  const string& locator,
+                                  const string& key,
+                                  const float *vector,
+                                  size_t vector_len)
+{
+  bufferlist vector_bl;
+  vector_bl.append(reinterpret_cast<const char *>(vector), vector_len);
+
+  ceph::rados::put_vector_request_t req;
+  req.bucket_name = "pg-lsh-bucket";
+  req.index_name = "pg-lsh-index";
+  req.key = key;
+  req.data_type = ceph::rados::vector_data_type_float32;
+  req.distance_metric = ceph::rados::vector_distance_metric_euclidean;
+  req.dimension = 4;
+  req.vector_data = vector_bl;
+
+  librados::vector_pg_lsh::put_target_t target;
+  target.pg = pg;
+  target.oid = librados::vector_placement::make_pg_lsh_v0_oid(
+      req.bucket_name, req.index_name, pg);
+  target.locator_key = locator;
+  target.placement_key =
+    librados::vector_placement::pg_lsh_v0_placement_key(pg);
+  target.vector_hash =
+    librados::vector_placement::hash_v0_vector_hash(vector_bl);
+  return librados::vector_pg_lsh::put_vector(ioctx, target, std::move(req));
+}
+
+TEST_F(LibRadosIoPP, PgLshV0RawOpsRouteAndMergeByEntryId) {
+  librados::vector_pg_lsh::pool_pg_info_t pool_info;
+  ASSERT_EQ(0, ensure_pool_pg_count_for_test(
+      cluster, pool_name, 8, &pool_info));
+  ioctx.close();
+  ASSERT_EQ(0, cluster.ioctx_create(pool_name.c_str(), ioctx));
+  ASSERT_EQ(0, cluster.wait_for_latest_osdmap());
+
+  const int64_t pool_id = ioctx.get_id();
+  ASSERT_GE(pool_id, 0);
+
+  uint32_t pg0 = 0;
+  uint32_t pg1 = 0;
+  int primary0 = -1;
+  int primary1 = -1;
+  const int choose_ret = choose_two_raw_pgs_with_different_primaries(
+      cluster, pool_id, pool_info.pg_num, &pg0, &pg1,
+      &primary0, &primary1);
+  if (choose_ret == -ENOENT) {
+    GTEST_SKIP() << "test pool does not expose two acting primaries";
+  }
+  ASSERT_EQ(0, choose_ret);
+  EXPECT_NE(primary0, primary1);
+
+  auto locator_state =
+    std::make_shared<librados::vector_pg_lsh::locator_state_t>();
+  librados::vector_pg_lsh::locator_cache_t locator_cache(
+      &ioctx, pool_info, pool_name, "pg-lsh-bucket", "pg-lsh-index",
+      locator_state);
+  ASSERT_EQ(0, locator_cache.precompute_all());
+  IoCtx& test_ioctx = ioctx;
+  std::atomic<uint32_t> locator_errors{0};
+  std::vector<std::thread> locator_threads;
+  for (uint32_t thread_id = 0; thread_id < 4; ++thread_id) {
+    locator_threads.emplace_back([&locator_cache, &test_ioctx, &pool_info,
+                                  &locator_errors] {
+      for (uint32_t pg = 0; pg < pool_info.pg_num; ++pg) {
+        string locator;
+        uint32_t actual = 0;
+        if (locator_cache.locator_for_pg(pg, &locator) < 0 ||
+            test_ioctx.get_object_pg_hash_position2(locator, &actual) < 0 ||
+            actual != pg) {
+          locator_errors.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    });
+  }
+  for (auto& thread : locator_threads) {
+    thread.join();
+  }
+  ASSERT_EQ(0u, locator_errors.load());
+
+  librados::vector_pg_lsh::params_t params;
+  params.k = 4;
+  params.l = 2;
+  params.seed = 12345;
+  params.hamming_radius = 0;
+  params.d = 2;
+  params.m = 2;
+  ASSERT_EQ(0, librados::vector_pg_lsh::validate_params(
+      params, pool_info));
+
+  std::array<float, 4> near_vector = {};
+  std::vector<librados::vector_pg_lsh::put_target_t> put_targets;
+  std::vector<librados::vector_pg_lsh::query_probe_t> probes;
+  uint64_t generated_group_count = 0;
+  int query_primary0 = -1;
+  int query_primary1 = -1;
+  bool found_vector = false;
+  for (uint32_t candidate = 0; candidate < 4096; ++candidate) {
+    std::array<float, 4> candidate_vector = {};
+    for (uint32_t dim = 0; dim < candidate_vector.size(); ++dim) {
+      const uint32_t x = candidate * 1103515245u + 12345u +
+        dim * 2654435761u;
+      int raw = static_cast<int>((x >> 24) & 0xffU) - 128;
+      if (raw == 0) {
+        raw = static_cast<int>(dim) + 1;
+      }
+      candidate_vector[dim] = static_cast<float>(raw) / 17.0f;
+    }
+
+    bufferlist candidate_bl;
+    candidate_bl.append(
+        reinterpret_cast<const char *>(candidate_vector.data()),
+        candidate_vector.size() * sizeof(float));
+
+    std::vector<librados::vector_pg_lsh::put_target_t> candidate_targets;
+    if (librados::vector_pg_lsh::build_put_targets(
+          "pg-lsh-bucket", "pg-lsh-index", candidate_bl,
+          candidate_vector.size(), params, pool_info, &locator_cache,
+          &candidate_targets) < 0 ||
+        candidate_targets.size() != params.d ||
+        candidate_targets[0].pg == candidate_targets[1].pg) {
+      continue;
+    }
+
+    std::vector<librados::vector_pg_lsh::query_probe_t> candidate_probes;
+    uint64_t candidate_generated_groups = 0;
+    if (librados::vector_pg_lsh::build_query_probes(
+          "pg-lsh-bucket", "pg-lsh-index", candidate_bl,
+          candidate_vector.size(), params, pool_info, &locator_cache,
+          &candidate_probes, &candidate_generated_groups) < 0 ||
+        candidate_probes.size() != params.m ||
+        candidate_generated_groups != params.l) {
+      continue;
+    }
+
+    const std::unordered_set<uint32_t> write_pgs = {
+      candidate_targets[0].pg,
+      candidate_targets[1].pg,
+    };
+    const std::unordered_set<uint32_t> query_pgs = {
+      candidate_probes[0].pg,
+      candidate_probes[1].pg,
+    };
+    if (write_pgs != query_pgs) {
+      continue;
+    }
+
+    int p0 = -1;
+    int p1 = -1;
+    ASSERT_EQ(0, acting_primary_for_raw_pg(
+        cluster, pool_id, candidate_probes[0].pg, &p0));
+    ASSERT_EQ(0, acting_primary_for_raw_pg(
+        cluster, pool_id, candidate_probes[1].pg, &p1));
+    if (p0 == p1) {
+      continue;
+    }
+
+    near_vector = candidate_vector;
+    put_targets = std::move(candidate_targets);
+    probes = std::move(candidate_probes);
+    generated_group_count = candidate_generated_groups;
+    query_primary0 = p0;
+    query_primary1 = p1;
+    found_vector = true;
+    break;
+  }
+  ASSERT_TRUE(found_vector)
+    << "failed to find deterministic D=2/M=2 pg-lsh route across acting primaries";
+  ASSERT_EQ(params.d, put_targets.size());
+  ASSERT_EQ(params.m, probes.size());
+  ASSERT_EQ(params.l, generated_group_count);
+  EXPECT_NE(query_primary0, query_primary1);
+
+  std::unordered_set<uint32_t> queried_pgs;
+  for (const auto& probe : probes) {
+    EXPECT_TRUE(queried_pgs.insert(probe.pg).second);
+    uint32_t actual = 0;
+    ASSERT_EQ(0, ioctx.get_object_pg_hash_position2(
+        probe.locator_key, &actual));
+    EXPECT_EQ(probe.pg, actual);
+  }
+  ASSERT_EQ(params.m, queried_pgs.size());
+  for (const auto& target : put_targets) {
+    EXPECT_EQ(1u, queried_pgs.count(target.pg));
+    uint32_t actual = 0;
+    ASSERT_EQ(0, ioctx.get_object_pg_hash_position2(
+        target.locator_key, &actual));
+    EXPECT_EQ(target.pg, actual);
+  }
+
+  bufferlist near_bl;
+  near_bl.append(reinterpret_cast<const char *>(near_vector.data()),
+                 near_vector.size() * sizeof(float));
+  ceph::rados::put_vector_request_t put_req;
+  put_req.bucket_name = "pg-lsh-bucket";
+  put_req.index_name = "pg-lsh-index";
+  put_req.key = "vec-dup";
+  put_req.data_type = ceph::rados::vector_data_type_float32;
+  put_req.distance_metric = ceph::rados::vector_distance_metric_euclidean;
+  put_req.dimension = near_vector.size();
+  put_req.vector_data = near_bl;
+  for (const auto& target : put_targets) {
+    ASSERT_EQ(0, librados::vector_pg_lsh::put_vector(
+        ioctx, target, put_req));
+  }
+
+  const float far_vector[] = {10.0, 20.0, 30.0, 40.0};
+  ASSERT_EQ(0, put_pg_lsh_test_vector(
+      ioctx, probes[1].pg, probes[1].locator_key, "vec-far",
+      far_vector, sizeof(far_vector)));
+
+  struct PendingProbe {
+    librados::vector_pg_lsh::query_probe_t probe;
+    librados::vector_pg_lsh::query_op_state_t op_state;
+    std::unique_ptr<AioCompletion> completion;
+    bufferlist reply;
+    int op_rval = 0;
+  };
+  std::vector<std::unique_ptr<PendingProbe>> pending;
+  pending.reserve(probes.size());
+  for (const auto& probe : probes) {
+    auto pending_probe = std::make_unique<PendingProbe>();
+    pending_probe->probe = probe;
+    pending_probe->completion.reset(Rados::aio_create_completion());
+    ASSERT_NE(nullptr, pending_probe->completion);
+
+    ceph::rados::query_vectors_request_t req;
+    req.bucket_name = "pg-lsh-bucket";
+    req.index_name = "pg-lsh-index";
+    req.data_type = ceph::rados::vector_data_type_float32;
+    req.distance_metric = ceph::rados::vector_distance_metric_euclidean;
+    req.dimension = near_vector.size();
+    req.local_top_k = std::numeric_limits<uint32_t>::max();
+    req.query_vector = near_bl;
+
+    ASSERT_EQ(0, librados::vector_pg_lsh::submit_query(
+        ioctx, probe, std::move(req), &pending_probe->op_state,
+        pending_probe->completion.get(), &pending_probe->reply,
+        &pending_probe->op_rval));
+    pending.push_back(std::move(pending_probe));
+  }
+
+  std::vector<ceph::rados::query_vectors_result_entry_t> merged;
+  uint64_t matching_entries = 0;
+  uint64_t distance_computations = 0;
+  for (const auto& pending_probe : pending) {
+    ASSERT_EQ(0, pending_probe->completion->wait_for_complete());
+    ASSERT_EQ(0, pending_probe->completion->get_return_value());
+    ASSERT_EQ(0, pending_probe->op_rval);
+
+    ceph::rados::query_vectors_result_t partial;
+    auto p = pending_probe->reply.cbegin();
+    decode(partial, p);
+    ASSERT_TRUE(p.end());
+    matching_entries += partial.local_matching_entries;
+    distance_computations += partial.local_distance_computations;
+    for (const auto& entry : partial.entries) {
+      ceph::rados::vector_query_exec::merge_result_entry(&merged, entry);
+    }
+  }
+
+  EXPECT_EQ(3u, matching_entries);
+  EXPECT_EQ(3u, distance_computations);
+  ASSERT_EQ(2u, merged.size());
+  ceph::rados::vector_query_exec::sort_and_trim_results(&merged, 2);
+  EXPECT_EQ("vec-dup", merged[0].key);
+  EXPECT_EQ("vec-far", merged[1].key);
+  EXPECT_NEAR(0.0f, merged[0].distance, 1e-6f);
 }
 
 TEST_F(LibRadosIoPP, TooBigPP) {
