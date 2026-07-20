@@ -31,6 +31,7 @@ struct omap_entry_t {
   std::string user_key;
   std::string content_key;
   std::string placement_key;
+  std::string vector_hash;
   uint32_t data_type = 0;
   uint32_t distance_metric = 0;
   uint32_t dimension = 0;
@@ -42,6 +43,23 @@ struct omap_entry_t {
 struct omap_scan_state_t {
   std::map<std::string, omap_entry_t> entries;
   std::map<std::string, ceph::bufferlist> contents;
+};
+
+struct query_filter_stats_t {
+  uint64_t total_entries = 0;
+  uint64_t incomplete_entries = 0;
+  uint64_t bucket_mismatch = 0;
+  uint64_t index_mismatch = 0;
+  uint64_t data_type_mismatch = 0;
+  uint64_t distance_metric_mismatch = 0;
+  uint64_t dimension_mismatch = 0;
+  uint64_t probe_mismatch = 0;
+  uint64_t missing_content = 0;
+  uint64_t distance_error = 0;
+  uint64_t matched_entries = 0;
+  uint64_t distance_computations = 0;
+  uint64_t merged_entries = 0;
+  uint64_t final_entries = 0;
 };
 
 inline bool starts_with(std::string_view value, std::string_view prefix)
@@ -77,6 +95,38 @@ inline bool is_hash_v0_placement_key(std::string_view placement_key)
 inline bool is_hash_v0_vector_hash(std::string_view vector_hash)
 {
   return is_lower_hex_string(vector_hash, vector_hash_v0_vector_hash_len);
+}
+
+inline bool is_lsh_v0_placement_key(std::string_view placement_key)
+{
+  return is_lower_hex_string(
+      placement_key, vector_lsh_v0_placement_key_len);
+}
+
+inline bool is_pg_lsh_v0_placement_key(std::string_view placement_key)
+{
+  return is_hash_v0_vector_hash(placement_key);
+}
+
+inline bool is_supported_placement_key(std::string_view placement_algorithm,
+                                       std::string_view placement_key)
+{
+  if (placement_algorithm == vector_placement_algorithm_hash_v0) {
+    return is_hash_v0_placement_key(placement_key);
+  }
+  if (placement_algorithm == vector_placement_algorithm_lsh_v0) {
+    return is_lsh_v0_placement_key(placement_key);
+  }
+  if (placement_algorithm == vector_placement_algorithm_pg_lsh_v0) {
+    return is_pg_lsh_v0_placement_key(placement_key);
+  }
+  return false;
+}
+
+inline bool is_supported_probe_key(std::string_view placement_key)
+{
+  return is_hash_v0_placement_key(placement_key) ||
+    is_lsh_v0_placement_key(placement_key);
 }
 
 inline int validate_vector_payload(uint32_t data_type,
@@ -128,8 +178,8 @@ inline int validate_put_request(const put_vector_request_t& req,
     return 0;
   }
 
-  if (req.placement_algorithm != vector_placement_algorithm_hash_v0 ||
-      !is_hash_v0_placement_key(req.placement_key) ||
+  if (!is_supported_placement_key(req.placement_algorithm,
+                                  req.placement_key) ||
       !is_hash_v0_vector_hash(req.vector_hash)) {
     return -EINVAL;
   }
@@ -219,6 +269,8 @@ inline void consume_omap_key_value(std::string_view key,
     decode_omap_string_value(bl, &entry.content_key);
   } else if (field == "placement_key") {
     decode_omap_string_value(bl, &entry.placement_key);
+  } else if (field == "vector_hash") {
+    decode_omap_string_value(bl, &entry.vector_hash);
   } else if (field == "data_type") {
     entry.has_data_type = decode_omap_value(bl, &entry.data_type);
   } else if (field == "distance_metric") {
@@ -245,7 +297,7 @@ inline int validate_query_request(const query_vectors_request_t& req,
   }
 
   for (const auto& prefix : req.probe_prefixes) {
-    if (!is_hash_v0_placement_key(prefix)) {
+    if (!is_supported_probe_key(prefix)) {
       return -EINVAL;
     }
   }
@@ -407,12 +459,16 @@ inline void sort_and_trim_results(std::vector<query_vectors_result_entry_t> *ent
 
 inline int build_local_results(const query_vectors_request_t& req,
                                const omap_scan_state_t& scan,
-                               query_vectors_result_t *result)
+                               query_vectors_result_t *result,
+                               query_filter_stats_t *stats = nullptr)
 {
   if (result == nullptr) {
     return -EINVAL;
   }
   result->entries.clear();
+  if (stats != nullptr) {
+    *stats = query_filter_stats_t();
+  }
 
   int r = validate_query_request(req);
   if (r < 0) {
@@ -421,18 +477,78 @@ inline int build_local_results(const query_vectors_request_t& req,
 
   for (const auto& [entry_id, entry] : scan.entries) {
     (void)entry_id;
-    if (!entry_matches_query(req, entry)) {
+    if (stats != nullptr) {
+      stats->total_entries++;
+    }
+    if (entry.bucket_name.empty() ||
+        entry.index_name.empty() ||
+        entry.user_key.empty() ||
+        entry.content_key.empty() ||
+        !entry.has_data_type ||
+        !entry.has_distance_metric ||
+        !entry.has_dimension) {
+      if (stats != nullptr) {
+        stats->incomplete_entries++;
+      }
+      continue;
+    }
+    if (entry.bucket_name != req.bucket_name) {
+      if (stats != nullptr) {
+        stats->bucket_mismatch++;
+      }
+      continue;
+    }
+    if (entry.index_name != req.index_name) {
+      if (stats != nullptr) {
+        stats->index_mismatch++;
+      }
+      continue;
+    }
+    if (entry.data_type != req.data_type) {
+      if (stats != nullptr) {
+        stats->data_type_mismatch++;
+      }
+      continue;
+    }
+    if (entry.distance_metric != req.distance_metric) {
+      if (stats != nullptr) {
+        stats->distance_metric_mismatch++;
+      }
+      continue;
+    }
+    if (entry.dimension != req.dimension) {
+      if (stats != nullptr) {
+        stats->dimension_mismatch++;
+      }
+      continue;
+    }
+    if (!probe_matches(req, entry)) {
+      if (stats != nullptr) {
+        stats->probe_mismatch++;
+      }
       continue;
     }
     const auto content = scan.contents.find(entry.content_key);
     if (content == scan.contents.end()) {
+      if (stats != nullptr) {
+        stats->missing_content++;
+      }
       continue;
     }
 
     float distance = 0;
+    if (stats != nullptr) {
+      stats->distance_computations++;
+    }
     r = compute_float32_distance(req, content->second, &distance);
     if (r < 0) {
+      if (stats != nullptr) {
+        stats->distance_error++;
+      }
       continue;
+    }
+    if (stats != nullptr) {
+      stats->matched_entries++;
     }
 
     query_vectors_result_entry_t result_entry;
@@ -442,7 +558,13 @@ inline int build_local_results(const query_vectors_request_t& req,
     merge_result_entry(&result->entries, result_entry);
   }
 
+  if (stats != nullptr) {
+    stats->merged_entries = result->entries.size();
+  }
   sort_and_trim_results(&result->entries, req.local_top_k);
+  if (stats != nullptr) {
+    stats->final_entries = result->entries.size();
+  }
   return 0;
 }
 

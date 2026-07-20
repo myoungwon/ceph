@@ -3,11 +3,13 @@
 
 #include <climits>
 #include <cstdio>
+#include <vector>
 
 #include "include/rados/librados.h"
 #include "include/ceph_hash.h"
 #include "include/encoding.h"
 #include "include/err.h"
+#include "librados/vector_placement.h"
 #include "include/scope_guard.h"
 #include "test/librados/test.h"
 #include "test/librados/TestCase.h"
@@ -28,12 +30,6 @@ static string vector_hex_u32(uint32_t value)
   return string(buf);
 }
 
-static string vector_hash_string(const string& value)
-{
-  return vector_hex_u32(ceph_str_hash_rjenkins(
-      value.c_str(), static_cast<unsigned>(value.length())));
-}
-
 static string vector_test_oid(const string& bucket, const string& index,
                               const string& key, const void *vector_data,
                               size_t vector_data_len)
@@ -41,11 +37,16 @@ static string vector_test_oid(const string& bucket, const string& index,
   (void)key;
   bufferlist bl;
   bl.append(static_cast<const char *>(vector_data), vector_data_len);
-  const string vector_hash =
-    vector_hex_u32(bl.crc32c(static_cast<uint32_t>(-1)));
-  const string placement_key = vector_hash.substr(0, 4);
-  return ".rados.vector/v1/hash-v0/" + vector_hash_string(bucket) + "/" +
-    vector_hash_string(index) + "/" + placement_key;
+  std::vector<float> values;
+  if (librados::vector_placement::copy_float32_vector(bl, 4, &values) < 0) {
+    return string();
+  }
+  const uint32_t signature =
+    librados::vector_placement::lsh_v0_signature(values, 0);
+  const string placement_key =
+    librados::vector_placement::lsh_v0_placement_key(0, signature);
+  return librados::vector_placement::make_lsh_v0_oid(
+      bucket, index, placement_key).name;
 }
 
 TEST_F(LibRadosIo, SimpleWrite) {

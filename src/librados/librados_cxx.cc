@@ -13,6 +13,7 @@
  *
  */
 
+#include <limits>
 #include <limits.h>
 
 #include "common/config.h"
@@ -36,6 +37,7 @@
 #include "librados/RadosXattrIter.h"
 #include "librados/ListObjectImpl.h"
 #include "librados/librados_util.h"
+#include "librados/vector_pg_lsh.h"
 #include "cls/lock/cls_lock_client.h"
 
 #include <string>
@@ -480,6 +482,105 @@ void librados::ObjectWriteOperation::write_full(const bufferlist& bl)
   ::ObjectOperation *o = &impl->o;
   bufferlist c = bl;
   o->write_full(c);
+}
+
+int librados::v14_2_0::vector_pg_lsh::put_vector(
+    librados::v14_2_0::IoCtx& ioctx,
+    const librados::v14_2_0::vector_pg_lsh::put_target_t& target,
+    ceph::rados::put_vector_request_t req)
+{
+  int ret = verify_probe_locator(ioctx, target.pg, target.locator_key);
+  if (ret < 0) {
+    return ret;
+  }
+
+  req.placement_algorithm =
+    ceph::rados::vector_placement_algorithm_pg_lsh_v0;
+  req.placement_key = target.placement_key;
+  req.vector_hash = target.vector_hash;
+
+  bufferlist payload;
+  encode(req, payload);
+
+  ::ObjectOperation op;
+  op.put_vector(payload);
+
+  librados::v14_2_0::IoCtx routed_ioctx;
+  routed_ioctx.dup(ioctx);
+  routed_ioctx.locator_set_key(target.locator_key);
+
+  IoCtxImpl *impl = vector_internal::IoCtxAccess::get(routed_ioctx);
+  return impl->operate(target.oid, &op, nullptr);
+}
+
+int librados::v14_2_0::vector_pg_lsh::submit_query(
+    librados::v14_2_0::IoCtx& ioctx,
+    const librados::v14_2_0::vector_pg_lsh::query_probe_t& probe,
+    ceph::rados::query_vectors_request_t req,
+    librados::v14_2_0::vector_pg_lsh::query_op_state_t *op_state,
+    librados::v14_2_0::AioCompletion *completion,
+    bufferlist *reply,
+    int *op_rval)
+{
+  if (op_state == nullptr || completion == nullptr ||
+      reply == nullptr || op_rval == nullptr) {
+    return -EINVAL;
+  }
+
+  int ret = verify_probe_locator(ioctx, probe.pg, probe.locator_key);
+  if (ret < 0) {
+    return ret;
+  }
+
+  req.probe_prefixes.clear();
+  req.local_top_k = std::numeric_limits<uint32_t>::max();
+
+  op_state->payload.clear();
+  encode(req, op_state->payload);
+  *op_rval = 0;
+  op_state->op.query_vectors(op_state->payload, reply, op_rval);
+
+  op_state->routed_ioctx.dup(ioctx);
+  op_state->routed_ioctx.locator_set_key(probe.locator_key);
+
+  IoCtxImpl *impl =
+    vector_internal::IoCtxAccess::get(op_state->routed_ioctx);
+  return impl->aio_operate_read(
+      probe.oid, &op_state->op, completion->pc, 0, reply);
+}
+
+int librados::v14_2_0::vector_pg_lsh::query_sync(
+    librados::v14_2_0::IoCtx& ioctx,
+    const librados::v14_2_0::vector_pg_lsh::query_probe_t& probe,
+    ceph::rados::query_vectors_request_t req,
+    bufferlist *reply,
+    int *op_rval)
+{
+  if (reply == nullptr || op_rval == nullptr) {
+    return -EINVAL;
+  }
+
+  int ret = verify_probe_locator(ioctx, probe.pg, probe.locator_key);
+  if (ret < 0) {
+    return ret;
+  }
+
+  req.probe_prefixes.clear();
+  req.local_top_k = std::numeric_limits<uint32_t>::max();
+
+  bufferlist payload;
+  encode(req, payload);
+
+  ::ObjectOperation op;
+  *op_rval = 0;
+  op.query_vectors(payload, reply, op_rval);
+
+  librados::v14_2_0::IoCtx routed_ioctx;
+  routed_ioctx.dup(ioctx);
+  routed_ioctx.locator_set_key(probe.locator_key);
+
+  IoCtxImpl *impl = vector_internal::IoCtxAccess::get(routed_ioctx);
+  return impl->operate_read(probe.oid, &op, reply);
 }
 
 void librados::ObjectWriteOperation::writesame(uint64_t off, uint64_t write_len,
@@ -1849,7 +1950,7 @@ int librados::IoCtx::lock_exclusive(const std::string &oid, const std::string &n
   if (duration)
     dur.set_from_timeval(duration);
 
-  return rados::cls::lock::lock(this, oid, name, ClsLockType::EXCLUSIVE, cookie, "",
+  return ::rados::cls::lock::lock(this, oid, name, ClsLockType::EXCLUSIVE, cookie, "",
 		  		description, dur, flags);
 }
 
@@ -1862,14 +1963,14 @@ int librados::IoCtx::lock_shared(const std::string &oid, const std::string &name
   if (duration)
     dur.set_from_timeval(duration);
 
-  return rados::cls::lock::lock(this, oid, name, ClsLockType::SHARED, cookie, tag,
+  return ::rados::cls::lock::lock(this, oid, name, ClsLockType::SHARED, cookie, tag,
 		  		description, dur, flags);
 }
 
 int librados::IoCtx::unlock(const std::string &oid, const std::string &name,
 			    const std::string &cookie)
 {
-  return rados::cls::lock::unlock(this, oid, name, cookie);
+  return ::rados::cls::lock::unlock(this, oid, name, cookie);
 }
 
 struct AioUnlockCompletion : public librados::ObjectOperationCompletion {
@@ -1891,7 +1992,7 @@ struct AioUnlockCompletion : public librados::ObjectOperationCompletion {
 int librados::IoCtx::aio_unlock(const std::string &oid, const std::string &name,
 			        const std::string &cookie, AioCompletion *c)
 {
-  return rados::cls::lock::aio_unlock(this, oid, name, cookie, c);
+  return ::rados::cls::lock::aio_unlock(this, oid, name, cookie, c);
 }
 
 int librados::IoCtx::break_lock(const std::string &oid, const std::string &name,
@@ -1900,7 +2001,7 @@ int librados::IoCtx::break_lock(const std::string &oid, const std::string &name,
   entity_name_t locker;
   if (!locker.parse(client))
     return -EINVAL;
-  return rados::cls::lock::break_lock(this, oid, name, cookie, locker);
+  return ::rados::cls::lock::break_lock(this, oid, name, cookie, locker);
 }
 
 int librados::IoCtx::list_lockers(const std::string &oid, const std::string &name,
@@ -1909,14 +2010,14 @@ int librados::IoCtx::list_lockers(const std::string &oid, const std::string &nam
 				  std::list<librados::locker_t> *lockers)
 {
   std::list<librados::locker_t> tmp_lockers;
-  map<rados::cls::lock::locker_id_t, rados::cls::lock::locker_info_t> rados_lockers;
+  map<::rados::cls::lock::locker_id_t, ::rados::cls::lock::locker_info_t> rados_lockers;
   std::string tmp_tag;
   ClsLockType tmp_type;
-  int r = rados::cls::lock::get_lock_info(this, oid, name, &rados_lockers, &tmp_type, &tmp_tag);
+  int r = ::rados::cls::lock::get_lock_info(this, oid, name, &rados_lockers, &tmp_type, &tmp_tag);
   if (r < 0)
 	  return r;
 
-  map<rados::cls::lock::locker_id_t, rados::cls::lock::locker_info_t>::iterator map_it;
+  map<::rados::cls::lock::locker_id_t, ::rados::cls::lock::locker_info_t>::iterator map_it;
   for (map_it = rados_lockers.begin(); map_it != rados_lockers.end(); ++map_it) {
     librados::locker_t locker;
     locker.client = stringify(map_it->first.locker);

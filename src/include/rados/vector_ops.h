@@ -27,10 +27,17 @@ inline constexpr uint32_t vector_distance_metric_cosine = 2;
 inline constexpr uint32_t vector_distance_metric_dot = 3;
 
 inline constexpr uint32_t vector_query_algorithm_hash = 1;
+inline constexpr uint32_t vector_query_algorithm_lsh = 2;
 inline constexpr uint32_t vector_query_algorithm_version_0 = 0;
 inline constexpr const char *vector_placement_algorithm_hash_v0 = "hash-v0";
+inline constexpr const char *vector_placement_algorithm_lsh_v0 = "lsh-v0";
+inline constexpr const char *vector_placement_algorithm_pg_lsh_v0 = "pg-lsh-v0";
 inline constexpr uint32_t vector_hash_v0_placement_key_len = 4;
 inline constexpr uint32_t vector_hash_v0_vector_hash_len = 8;
+inline constexpr uint32_t vector_lsh_v0_bits = 10;
+inline constexpr uint32_t vector_lsh_v0_max_bits = 16;
+inline constexpr uint32_t vector_lsh_v0_default_table_count = 16;
+inline constexpr uint32_t vector_lsh_v0_placement_key_len = 8;
 
 struct vector_routing_policy_t {
   // Number of placement targets to write for each vector entry.
@@ -70,7 +77,8 @@ struct vector_index_config_t {
   uint32_t distance_metric = 0;
   // Number of vector dimensions in this index; 0 accepts the request dimension.
   uint32_t dimension = 0;
-  // Planner algorithm family. The current baseline is hash-v0.
+  // Planner algorithm family. hash-v0 is a routing baseline; lsh-v0 adds
+  // semantic candidate routing while preserving the same OSD local search path.
   uint32_t algorithm_id = vector_query_algorithm_hash;
   // Planner/layout variant within algorithm_id. Version 0 is the hash-v0
   // baseline and is intentionally replaceable by future planners.
@@ -275,6 +283,10 @@ struct query_vectors_result_entry_t {
 struct query_vectors_result_t {
   // Sorted vector query result entries.
   std::vector<query_vectors_result_entry_t> entries;
+  // OSD-local physical scan stats. These are deliberately minimal; benchmark
+  // clients derive logical candidate and duplicate counts after global merge.
+  uint64_t local_matching_entries = 0;
+  uint64_t local_distance_computations = 0;
 
   void encode(ceph::bufferlist& bl) const {
     ENCODE_START(1, 1, bl);
@@ -283,6 +295,8 @@ struct query_vectors_result_t {
     for (const auto& entry : entries) {
       entry.encode(bl);
     }
+    encode(local_matching_entries, bl);
+    encode(local_distance_computations, bl);
     ENCODE_FINISH(bl);
   }
 
@@ -298,6 +312,8 @@ struct query_vectors_result_t {
       entry.decode(p);
       entries.push_back(std::move(entry));
     }
+    decode(local_matching_entries, p);
+    decode(local_distance_computations, p);
     DECODE_FINISH(p);
   }
 };

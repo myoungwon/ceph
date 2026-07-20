@@ -85,6 +85,8 @@ inline std::string default_placement_algorithm(uint32_t algorithm_id)
   switch (algorithm_id) {
   case ceph::rados::vector_query_algorithm_hash:
     return vector_placement::hash_v0_algorithm;
+  case ceph::rados::vector_query_algorithm_lsh:
+    return vector_placement::lsh_v0_algorithm;
   default:
     return std::string();
   }
@@ -113,7 +115,8 @@ inline int validate_index_config(
       ceph::rados::vector_query_algorithm_version_0) {
     return -EOPNOTSUPP;
   }
-  if (config.algorithm_id != ceph::rados::vector_query_algorithm_hash) {
+  if (config.algorithm_id != ceph::rados::vector_query_algorithm_hash &&
+      config.algorithm_id != ceph::rados::vector_query_algorithm_lsh) {
     return -EOPNOTSUPP;
   }
   if (config.data_type != 0 && config.data_type != req_data_type) {
@@ -127,6 +130,30 @@ inline int validate_index_config(
     return -EINVAL;
   }
   return 0;
+}
+
+inline uint32_t lsh_v0_signature_bits(
+    const ceph::bufferlist& algorithm_params)
+{
+  uint32_t bits = ceph::rados::vector_lsh_v0_bits;
+  if (algorithm_params.length() > 0) {
+    try {
+      auto p = algorithm_params.cbegin();
+      decode(bits, p);
+      if (!p.end()) {
+        bits = ceph::rados::vector_lsh_v0_bits;
+      }
+    } catch (const ceph::buffer::error&) {
+      bits = ceph::rados::vector_lsh_v0_bits;
+    }
+  }
+  if (bits == 0) {
+    bits = ceph::rados::vector_lsh_v0_bits;
+  }
+  if (bits > ceph::rados::vector_lsh_v0_max_bits) {
+    bits = ceph::rados::vector_lsh_v0_max_bits;
+  }
+  return bits;
 }
 
 inline int append_hash_v0_targets(
@@ -153,6 +180,108 @@ inline int append_hash_v0_targets(
       placement_key,
       vector_hash,
     });
+  }
+  return 0;
+}
+
+inline int append_lsh_v0_write_targets(
+    const std::string& bucket_name,
+    const std::string& index_name,
+    const ceph::bufferlist& vector_data,
+    uint32_t dimension,
+    uint32_t table_count,
+    uint32_t signature_bits,
+    std::vector<put_target_t> *targets)
+{
+  if (targets == nullptr || table_count == 0 || table_count > 0xffffU) {
+    return -EINVAL;
+  }
+
+  std::vector<float> values;
+  int r = vector_placement::copy_float32_vector(vector_data, dimension, &values);
+  if (r < 0) {
+    return r;
+  }
+
+  const std::string vector_hash =
+    vector_placement::hash_v0_vector_hash(vector_data);
+  for (uint32_t table = 0; table < table_count; ++table) {
+    const uint32_t signature =
+      vector_placement::lsh_v0_signature(values, table, signature_bits);
+    const std::string placement_key =
+      vector_placement::lsh_v0_placement_key(table, signature);
+    targets->push_back({
+      vector_placement::make_lsh_v0_oid(
+          bucket_name, index_name, placement_key),
+      placement_key,
+      vector_hash,
+    });
+  }
+  return 0;
+}
+
+inline void append_lsh_v0_query_target(
+    const std::string& bucket_name,
+    const std::string& index_name,
+    uint32_t table,
+    uint32_t signature,
+    const std::string& vector_hash,
+    std::vector<put_target_t> *targets)
+{
+  const std::string placement_key =
+    vector_placement::lsh_v0_placement_key(table, signature);
+  targets->push_back({
+    vector_placement::make_lsh_v0_oid(bucket_name, index_name, placement_key),
+    placement_key,
+    vector_hash,
+  });
+}
+
+inline int append_lsh_v0_query_targets(
+    const std::string& bucket_name,
+    const std::string& index_name,
+    const ceph::bufferlist& query_vector,
+    uint32_t dimension,
+    uint32_t table_count,
+    uint32_t signature_bits,
+    uint32_t probe_limit,
+    std::vector<put_target_t> *targets)
+{
+  if (targets == nullptr || table_count == 0 || table_count > 0xffffU ||
+      probe_limit == 0) {
+    return -EINVAL;
+  }
+
+  std::vector<float> values;
+  int r = vector_placement::copy_float32_vector(query_vector, dimension, &values);
+  if (r < 0) {
+    return r;
+  }
+
+  const std::string vector_hash =
+    vector_placement::hash_v0_vector_hash(query_vector);
+  std::vector<uint32_t> signatures;
+  signatures.reserve(table_count);
+  for (uint32_t table = 0; table < table_count; ++table) {
+    signatures.push_back(vector_placement::lsh_v0_signature(
+        values, table, signature_bits));
+    append_lsh_v0_query_target(
+        bucket_name, index_name, table, signatures.back(), vector_hash,
+        targets);
+    if (targets->size() >= probe_limit) {
+      return 0;
+    }
+  }
+
+  for (uint32_t bit = 0; bit < signature_bits; ++bit) {
+    for (uint32_t table = 0; table < table_count; ++table) {
+      append_lsh_v0_query_target(
+          bucket_name, index_name, table, signatures[table] ^ (1U << bit),
+          vector_hash, targets);
+      if (targets->size() >= probe_limit) {
+        return 0;
+      }
+    }
   }
   return 0;
 }
@@ -196,6 +325,12 @@ inline int build_put_plan(
     return append_hash_v0_targets(
         req.bucket_name, req.index_name, req.vector_data,
         plan->routing_policy.write_pgs, &plan->targets);
+  } else if (placement_algorithm == vector_placement::lsh_v0_algorithm) {
+    const uint32_t signature_bits =
+      lsh_v0_signature_bits(config.algorithm_params);
+    return append_lsh_v0_write_targets(
+        req.bucket_name, req.index_name, req.vector_data, req.dimension,
+        plan->routing_policy.write_pgs, signature_bits, &plan->targets);
   }
   return -EOPNOTSUPP;
 }
@@ -239,6 +374,13 @@ inline int build_query_plan(
   if (placement_algorithm == vector_placement::hash_v0_algorithm) {
     r = append_hash_v0_targets(
         req.bucket_name, req.index_name, req.query_vector,
+        plan->routing_policy.probe_pgs, &targets);
+  } else if (placement_algorithm == vector_placement::lsh_v0_algorithm) {
+    const uint32_t signature_bits =
+      lsh_v0_signature_bits(config.algorithm_params);
+    r = append_lsh_v0_query_targets(
+        req.bucket_name, req.index_name, req.query_vector, req.dimension,
+        plan->routing_policy.write_pgs, signature_bits,
         plan->routing_policy.probe_pgs, &targets);
   } else {
     return -EOPNOTSUPP;
