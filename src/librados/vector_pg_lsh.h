@@ -46,6 +46,7 @@ struct params_t {
   uint32_t residual_bits = 0;
   uint32_t distance_bucket_radius = 0;
   uint32_t residual_hamming_radius = 0;
+  uint32_t probe_limit_per_pg = 0;
   std::vector<double> anchor;
 };
 
@@ -107,6 +108,11 @@ inline int validate_params(const params_t& params,
   }
   if (params.distance_bucket_bits == 0 &&
       params.distance_bucket_radius != 0) {
+    return -EINVAL;
+  }
+  if (!vector_placement::pg_lsh_v0_sub_oid_enabled(
+        params.distance_bucket_bits, params.residual_bits) &&
+      params.probe_limit_per_pg != 0) {
     return -EINVAL;
   }
   return 0;
@@ -452,6 +458,7 @@ inline int build_query_probes(const std::string& bucket_name,
     if (ret < 0) {
       return ret;
     }
+    uint32_t emitted_for_pg = 0;
     for (const auto& probe_sub_oid : probe_sub_oids) {
       object_t oid = vector_placement::make_pg_lsh_v0_oid(
           bucket_name, index_name, ranked_pg.pg, probe_sub_oid);
@@ -467,6 +474,11 @@ inline int build_query_probes(const std::string& bucket_name,
         vector_placement::pg_lsh_v0_placement_key(ranked_pg.pg),
         probe_sub_oid,
       });
+      ++emitted_for_pg;
+      if (params.probe_limit_per_pg != 0 &&
+          emitted_for_pg >= params.probe_limit_per_pg) {
+        break;
+      }
     }
   }
   return 0;
