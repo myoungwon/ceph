@@ -593,7 +593,6 @@ int librados::v14_2_0::vector_pg_lsh::submit_query(
   }
 
   req.probe_prefixes.clear();
-  req.local_top_k = std::numeric_limits<uint32_t>::max();
 
   op_state->payload.clear();
   encode(req, op_state->payload);
@@ -626,7 +625,6 @@ int librados::v14_2_0::vector_pg_lsh::query_sync(
   }
 
   req.probe_prefixes.clear();
-  req.local_top_k = std::numeric_limits<uint32_t>::max();
 
   bufferlist payload;
   encode(req, payload);
