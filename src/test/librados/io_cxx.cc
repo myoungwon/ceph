@@ -387,6 +387,91 @@ TEST(VectorQueryExecutor, LocalTopKLimitsPartialResults) {
   EXPECT_NEAR(1.0f, result.entries[0].distance, 1e-6f);
 }
 
+TEST(VectorQueryExecutor, DistanceHandlesFragmentedCandidateWithoutRebuild) {
+  const std::vector<float> query_values = {0.0f, 0.0f};
+  const float candidate_values[] = {3.0f, 4.0f};
+  bufferlist candidate;
+  for (const float value : candidate_values) {
+    bufferptr segment(sizeof(value));
+    std::memcpy(segment.c_str(), &value, sizeof(value));
+    candidate.push_back(std::move(segment));
+  }
+  ASSERT_FALSE(candidate.is_contiguous());
+  const unsigned original_buffer_count = candidate.get_num_buffers();
+
+  ceph::rados::query_vectors_request_t req;
+  req.data_type = LIBRADOS_VECTOR_DATA_TYPE_FLOAT32;
+  req.distance_metric = LIBRADOS_VECTOR_DISTANCE_METRIC_EUCLIDEAN;
+  req.dimension = query_values.size();
+
+  float distance = 0;
+  ASSERT_EQ(0, ceph::rados::vector_query_exec::compute_float32_distance(
+      req, query_values,
+      ceph::rados::vector_query_exec::squared_l2_norm(query_values),
+      candidate, &distance));
+  EXPECT_NEAR(5.0f, distance, 1e-6f);
+  EXPECT_FALSE(candidate.is_contiguous());
+  EXPECT_EQ(original_buffer_count, candidate.get_num_buffers());
+}
+
+TEST(VectorQueryExecutor, LocalTopKKeepsBoundedSortedResults) {
+  float query[] = {0.0, 0.0};
+  bufferlist query_bl;
+  query_bl.append(reinterpret_cast<const char *>(query), sizeof(query));
+
+  ceph::rados::query_vectors_request_t req;
+  req.bucket_name = "bucket";
+  req.index_name = "index";
+  req.data_type = LIBRADOS_VECTOR_DATA_TYPE_FLOAT32;
+  req.distance_metric = LIBRADOS_VECTOR_DISTANCE_METRIC_EUCLIDEAN;
+  req.dimension = 2;
+  req.local_top_k = 2;
+  req.query_vector = query_bl;
+
+  ceph::rados::vector_query_exec::omap_scan_state_t scan;
+  auto add_entry = [&](const string& entry_id,
+                       const string& key,
+                       const string& content_key,
+                       float x,
+                       float y) {
+    ceph::rados::vector_query_exec::omap_entry_t entry;
+    entry.entry_id = entry_id;
+    entry.bucket_name = req.bucket_name;
+    entry.index_name = req.index_name;
+    entry.user_key = key;
+    entry.content_key = content_key;
+    entry.data_type = req.data_type;
+    entry.distance_metric = req.distance_metric;
+    entry.dimension = req.dimension;
+    entry.has_data_type = true;
+    entry.has_distance_metric = true;
+    entry.has_dimension = true;
+    scan.entries[entry.entry_id] = entry;
+
+    float vector[] = {x, y};
+    bufferlist vector_bl;
+    vector_bl.append(reinterpret_cast<const char *>(vector), sizeof(vector));
+    scan.contents[entry.content_key] = vector_bl;
+  };
+
+  add_entry("entry-a", "vec-a", "_CONTENT_a", 5.0, 0.0);
+  add_entry("entry-b", "vec-b", "_CONTENT_b", 1.0, 0.0);
+  add_entry("entry-c", "vec-c", "_CONTENT_c", 3.0, 0.0);
+  add_entry("entry-d", "vec-d", "_CONTENT_d", 2.0, 0.0);
+
+  ceph::rados::query_vectors_result_t result;
+  ceph::rados::vector_query_exec::query_filter_stats_t stats;
+  ASSERT_EQ(0, ceph::rados::vector_query_exec::build_local_results(
+      req, scan, &result, &stats));
+  ASSERT_EQ(2u, result.entries.size());
+  EXPECT_EQ("entry-b", result.entries[0].entry_id);
+  EXPECT_EQ("entry-d", result.entries[1].entry_id);
+  EXPECT_LE(result.entries[0].distance, result.entries[1].distance);
+  EXPECT_EQ(4u, stats.matched_entries);
+  EXPECT_EQ(4u, stats.merged_entries);
+  EXPECT_EQ(2u, stats.final_entries);
+}
+
 TEST(VectorQueryPlanner, HashV0SeparatesBucketAndIndex) {
   float query[] = {1.0, 2.0, 3.0, 4.0};
   bufferlist query_bl;
@@ -1079,7 +1164,7 @@ TEST_F(LibRadosIoPP, PgLshV0RawOpsRouteAndMergeByEntryId) {
     req.data_type = ceph::rados::vector_data_type_float32;
     req.distance_metric = ceph::rados::vector_distance_metric_euclidean;
     req.dimension = near_vector.size();
-    req.local_top_k = std::numeric_limits<uint32_t>::max();
+    req.local_top_k = 2;
     req.query_vector = near_bl;
 
     ASSERT_EQ(0, librados::vector_pg_lsh::submit_query(
