@@ -10,6 +10,7 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <span>
 #include <sstream>
 #include <thread>
 #include <unordered_set>
@@ -648,6 +649,99 @@ TEST(VectorPlacement, PgLshV0SelectionUsesLogicalOrderAndBudget) {
   EXPECT_EQ(2u, generated_group_count);
   EXPECT_LE(query_pgs.size(), generated_group_count);
   EXPECT_LT(query_pgs.size(), exhausted_params.m);
+}
+
+TEST(VectorPlacement, PgLshSubOidNameUsesCoarseDistanceBucket) {
+  float vector[] = {1.0, 2.0, 0.0, -1.0};
+  bufferlist vector_bl;
+  vector_bl.append(reinterpret_cast<const char *>(vector), sizeof(vector));
+
+  std::vector<double> random_anchor;
+  ASSERT_EQ(0, librados::vector_placement::pg_lsh_v0_random_anchor(
+      4, 12345, &random_anchor));
+  librados::vector_placement::pg_lsh_v0::sub_oid_config_t config = {
+    4, 12345, 4, 4, std::span<const double>(random_anchor),
+  };
+  librados::vector_placement::pg_lsh_v0::sub_oid_t sub_oid;
+  ASSERT_EQ(0, librados::vector_placement::pg_lsh_v0::compute_sub_oid(
+      vector_bl, config, &sub_oid));
+  EXPECT_EQ(0x4, sub_oid.distance_bucket);
+  EXPECT_EQ(0x5, sub_oid.residual_code);
+  EXPECT_EQ("g4_r5",
+            librados::vector_placement::pg_lsh_v0::format_sub_oid(
+                sub_oid, config));
+
+  std::vector<std::string> probe_sub_oids;
+  librados::vector_placement::pg_lsh_v0::probe_config_t probe_config = {
+    1, 1,
+  };
+  ASSERT_EQ(0, librados::vector_placement::pg_lsh_v0::build_probe_sub_oids(
+      sub_oid, config, probe_config, &probe_sub_oids));
+  ASSERT_EQ(15u, probe_sub_oids.size());
+  EXPECT_EQ("g4_r5", probe_sub_oids[0]);
+
+  const std::unordered_set<std::string> names(
+      probe_sub_oids.begin(), probe_sub_oids.end());
+  EXPECT_EQ(probe_sub_oids.size(), names.size());
+  EXPECT_EQ(1u, names.count("g3_r5"));
+  EXPECT_EQ(1u, names.count("g5_r5"));
+  EXPECT_EQ(1u, names.count("g4_r4"));
+
+  const std::vector<std::string> unchanged_on_error = {"sentinel"};
+  std::vector<std::string> invalid_output = unchanged_on_error;
+  const librados::vector_placement::pg_lsh_v0::probe_config_t invalid_probe = {
+    1, 5,
+  };
+  EXPECT_EQ(-EINVAL,
+            librados::vector_placement::pg_lsh_v0::build_probe_sub_oids(
+                sub_oid, config, invalid_probe, &invalid_output));
+  EXPECT_EQ(unchanged_on_error, invalid_output);
+
+  float axis_vector[] = {2.0, 0.0, 0.0, 0.0};
+  bufferlist axis_bl;
+  axis_bl.append(reinterpret_cast<const char *>(axis_vector),
+                 sizeof(axis_vector));
+  std::vector<double> axis_anchor = {1.0, 0.0, 0.0, 0.0};
+  config.anchor = std::span<const double>(axis_anchor);
+  ASSERT_EQ(0, librados::vector_placement::pg_lsh_v0::compute_sub_oid(
+      axis_bl, config, &sub_oid));
+  EXPECT_EQ(0x0, sub_oid.distance_bucket);
+  EXPECT_EQ(0xf, sub_oid.residual_code);
+  EXPECT_EQ("g0_rf",
+            librados::vector_placement::pg_lsh_v0::format_sub_oid(
+                sub_oid, config));
+}
+
+TEST(VectorPlacement, PgLshSubOidPreservesDistanceBucketBoundary) {
+  std::vector<double> anchor = {1.0, 0.0};
+  const librados::vector_placement::pg_lsh_v0::sub_oid_config_t config = {
+    2, 12345, 4, 0, std::span<const double>(anchor),
+  };
+
+  float below_boundary[] = {0.001f, 1.0f};
+  float above_boundary[] = {-0.001f, 1.0f};
+  bufferlist below_bl;
+  bufferlist above_bl;
+  below_bl.append(
+      reinterpret_cast<const char *>(below_boundary), sizeof(below_boundary));
+  above_bl.append(
+      reinterpret_cast<const char *>(above_boundary), sizeof(above_boundary));
+
+  librados::vector_placement::pg_lsh_v0::sub_oid_t below_sub_oid;
+  librados::vector_placement::pg_lsh_v0::sub_oid_t above_sub_oid;
+  ASSERT_EQ(0, librados::vector_placement::pg_lsh_v0::compute_sub_oid(
+      below_bl, config, &below_sub_oid));
+  ASSERT_EQ(0, librados::vector_placement::pg_lsh_v0::compute_sub_oid(
+      above_bl, config, &above_sub_oid));
+
+  EXPECT_EQ(0x7, below_sub_oid.distance_bucket);
+  EXPECT_EQ(0x8, above_sub_oid.distance_bucket);
+  EXPECT_EQ("g7_r0",
+            librados::vector_placement::pg_lsh_v0::format_sub_oid(
+                below_sub_oid, config));
+  EXPECT_EQ("g8_r0",
+            librados::vector_placement::pg_lsh_v0::format_sub_oid(
+                above_sub_oid, config));
 }
 
 TEST(VectorPlacement, PgLshV0ManualCollisionSelection) {
