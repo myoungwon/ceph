@@ -20,19 +20,10 @@
 #include "include/object.h"
 #include "include/rados/librados.hpp"
 #include "include/rados/vector_ops.h"
-#include "librados/IoCtxImpl.h"
+#include "librados/vector_put.h"
 #include "librados/vector_placement.h"
 
 namespace librados {
-namespace vector_internal {
-
-inline IoCtxImpl *IoCtxAccess::get(v14_2_0::IoCtx& ioctx)
-{
-  return ioctx.io_ctx_impl;
-}
-
-} // namespace vector_internal
-
 inline namespace v14_2_0 {
 namespace vector_pg_lsh {
 
@@ -79,6 +70,8 @@ struct query_op_state_t {
   ::ObjectOperation op;
   ceph::bufferlist payload;
 };
+
+using put_op_state_t = vector_internal::put_op_state_t;
 
 inline int validate_params(const params_t& params,
                            const pool_pg_info_t& pool_info)
@@ -391,6 +384,12 @@ inline int verify_probe_locator(v14_2_0::IoCtx& ioctx,
 CEPH_RADOS_API int put_vector(v14_2_0::IoCtx& ioctx,
                               const put_target_t& target,
                               ceph::rados::put_vector_request_t req);
+
+CEPH_RADOS_API int submit_put(v14_2_0::IoCtx& ioctx,
+                              const put_target_t& target,
+                              ceph::rados::put_vector_request_t req,
+                              put_op_state_t *op_state,
+                              v14_2_0::AioCompletion *completion);
 
 CEPH_RADOS_API int submit_query(v14_2_0::IoCtx& ioctx,
                                 const query_probe_t& probe,
