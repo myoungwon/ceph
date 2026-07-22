@@ -592,6 +592,8 @@ int librados::v14_2_0::vector_pg_lsh::submit_query(
     return ret;
   }
 
+  // PG-LSH already selected the exact routing OID. Scan that object's entries
+  // without applying the placement-key prefix used by generic planners.
   req.probe_prefixes.clear();
 
   op_state->payload.clear();
@@ -624,6 +626,8 @@ int librados::v14_2_0::vector_pg_lsh::query_sync(
     return ret;
   }
 
+  // PG-LSH already selected the exact routing OID. Scan that object's entries
+  // without applying the placement-key prefix used by generic planners.
   req.probe_prefixes.clear();
 
   bufferlist payload;
