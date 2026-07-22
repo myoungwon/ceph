@@ -13,6 +13,7 @@
 #include <span>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <unistd.h>
@@ -1052,6 +1053,144 @@ static int put_pg_lsh_test_vector(IoCtx& ioctx,
   target.vector_hash =
     librados::vector_placement::hash_v0_vector_hash(vector_bl);
   return librados::vector_pg_lsh::put_vector(ioctx, target, std::move(req));
+}
+
+TEST_F(LibRadosIoPP, PgLshV0SubOidProbeLimitIsPerPg) {
+  const std::string sub_pool_name =
+    get_temp_pool_name("pg-lsh-sub-oid-probe-limit-");
+  bufferlist outbl;
+  std::string cmd = "{\"prefix\":\"osd pool create\",\"pool\":\"" +
+    sub_pool_name + "\",\"pg_num\":8,\"pgp_num\":8,\"format\":\"json\"}";
+  ASSERT_EQ(0, cluster.mon_command(std::move(cmd), {}, &outbl, nullptr));
+  auto cleanup_sub_pool = make_scope_guard([&] {
+    cluster.pool_delete(sub_pool_name.c_str());
+  });
+
+  IoCtx sub_ioctx;
+  ASSERT_EQ(0, cluster.ioctx_create(sub_pool_name.c_str(), sub_ioctx));
+  ASSERT_EQ(0, sub_ioctx.application_enable("rados", true));
+  ASSERT_EQ(0, cluster.wait_for_latest_osdmap());
+
+  librados::vector_pg_lsh::pool_pg_info_t pool_info;
+  ASSERT_EQ(0, pool_pg_info_for_test(cluster, sub_pool_name, &pool_info));
+  ASSERT_GE(pool_info.pg_num, 8u);
+  ASSERT_GE(pool_info.pgp_num, 8u);
+
+  auto locator_state =
+    std::make_shared<librados::vector_pg_lsh::locator_state_t>();
+  librados::vector_pg_lsh::locator_cache_t locator_cache(
+      &sub_ioctx, pool_info, sub_pool_name, "pg-lsh-bucket", "pg-lsh-index",
+      locator_state);
+  ASSERT_EQ(0, locator_cache.precompute_all());
+
+  librados::vector_pg_lsh::params_t params;
+  params.k = 4;
+  params.l = 4;
+  params.seed = 12345;
+  params.hamming_radius = 0;
+  params.d = 2;
+  params.m = 2;
+  params.distance_bucket_bits = 4;
+  params.residual_bits = 4;
+  params.distance_bucket_radius = 1;
+  params.residual_hamming_radius = 0;
+  params.probe_limit_per_pg = 3;
+  ASSERT_EQ(0, librados::vector_pg_lsh::validate_params(
+      params, pool_info));
+
+  std::array<float, 4> found_vector = {};
+  std::vector<librados::vector_pg_lsh::query_probe_t> probes;
+  bool found = false;
+  for (uint32_t candidate = 0; candidate < 4096; ++candidate) {
+    std::array<float, 4> candidate_vector = {};
+    for (uint32_t dim = 0; dim < candidate_vector.size(); ++dim) {
+      const uint32_t x = candidate * 1103515245u + 12345u +
+        dim * 2654435761u;
+      int raw = static_cast<int>((x >> 24) & 0xffU) - 128;
+      if (raw == 0) {
+        raw = static_cast<int>(dim) + 1;
+      }
+      candidate_vector[dim] = static_cast<float>(raw) / 17.0f;
+    }
+
+    bufferlist candidate_bl;
+    candidate_bl.append(
+        reinterpret_cast<const char *>(candidate_vector.data()),
+        candidate_vector.size() * sizeof(float));
+
+    std::vector<librados::vector_pg_lsh::query_probe_t> candidate_probes;
+    uint64_t generated_group_count = 0;
+    if (librados::vector_pg_lsh::build_query_probes(
+          "pg-lsh-bucket", "pg-lsh-index", candidate_bl,
+          candidate_vector.size(), params, pool_info, &locator_cache,
+          &candidate_probes, &generated_group_count) < 0 ||
+        candidate_probes.size() != 6 ||
+        generated_group_count != params.l) {
+      continue;
+    }
+
+    std::unordered_map<uint32_t, uint32_t> probes_per_pg;
+    for (const auto& probe : candidate_probes) {
+      ++probes_per_pg[probe.pg];
+    }
+    if (probes_per_pg.size() != params.m) {
+      continue;
+    }
+    bool every_pg_has_limit = true;
+    for (const auto& entry : probes_per_pg) {
+      if (entry.second != params.probe_limit_per_pg) {
+        every_pg_has_limit = false;
+        break;
+      }
+    }
+    if (!every_pg_has_limit) {
+      continue;
+    }
+
+    found_vector = candidate_vector;
+    probes = std::move(candidate_probes);
+    found = true;
+    break;
+  }
+
+  ASSERT_TRUE(found)
+    << "failed to find deterministic M=2 pg-lsh sub-OID route";
+  ASSERT_EQ(6u, probes.size());
+
+  bufferlist vector_bl;
+  vector_bl.append(reinterpret_cast<const char *>(found_vector.data()),
+                   found_vector.size() * sizeof(float));
+  std::vector<double> random_anchor;
+  ASSERT_EQ(0, librados::vector_placement::pg_lsh_v0_random_anchor(
+      found_vector.size(), params.seed, &random_anchor));
+  params.anchor = std::move(random_anchor);
+  librados::vector_placement::pg_lsh_v0::sub_oid_t exact_sub_oid;
+  ASSERT_EQ(0, librados::vector_pg_lsh::compute_sub_oid(
+      vector_bl, found_vector.size(), params, &exact_sub_oid));
+  const std::string exact_sub_oid_name =
+    librados::vector_placement::pg_lsh_v0::format_sub_oid(
+        exact_sub_oid,
+        librados::vector_pg_lsh::sub_oid_config_view(
+            found_vector.size(), params));
+
+  std::unordered_map<uint32_t, uint32_t> probes_per_pg;
+  for (const auto& probe : probes) {
+    uint32_t actual_pg = 0;
+    ASSERT_EQ(0, sub_ioctx.get_object_pg_hash_position2(
+        probe.locator_key, &actual_pg));
+    EXPECT_EQ(probe.pg, actual_pg);
+
+    auto& pg_probe_count = probes_per_pg[probe.pg];
+    if (pg_probe_count == 0) {
+      EXPECT_EQ(exact_sub_oid_name, probe.sub_oid_name);
+    }
+    ++pg_probe_count;
+  }
+
+  ASSERT_EQ(2u, probes_per_pg.size());
+  for (const auto& entry : probes_per_pg) {
+    EXPECT_EQ(3u, entry.second);
+  }
 }
 
 TEST_F(LibRadosIoPP, PgLshV0RawOpsRouteAndMergeByEntryId) {
