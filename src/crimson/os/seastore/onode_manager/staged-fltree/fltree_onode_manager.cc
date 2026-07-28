@@ -71,6 +71,12 @@ void FLTreeOnode::Recorder::apply_value_delta(
     case delta_op_t::CREATE_DEFAULT:
       mlayout = onode_layout_t{};
       break;
+    case delta_op_t::UPDATE_VECTOR_NODE_LADDR:
+      DEBUG("update vector node laddr");
+      bliter.copy(
+	sizeof(mlayout.vector_node_laddr),
+	(char *)&mlayout.vector_node_laddr);
+      break;
     default:
       ceph_abort();
     }
@@ -137,6 +143,12 @@ void FLTreeOnode::Recorder::encode_update(
       (const char *)&layout.ss[0],
       onode_layout_t::MAX_SS_LENGTH);
     ceph::encode(layout.ss_size, encoded);
+    break;
+  case delta_op_t::UPDATE_VECTOR_NODE_LADDR:
+    DEBUG("update vector node laddr");
+    encoded.append(
+      (const char *)&layout.vector_node_laddr,
+      sizeof(layout.vector_node_laddr));
     break;
   case delta_op_t::CREATE_DEFAULT:
     DEBUG("create default layout");

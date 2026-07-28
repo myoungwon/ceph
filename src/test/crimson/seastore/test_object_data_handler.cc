@@ -87,6 +87,18 @@ public:
     });
   }
 
+  laddr_t get_vector_node_laddr() const final {
+    return layout.vector_node_laddr;
+  }
+
+  void update_vector_node_laddr(Transaction &, laddr_t addr) final {
+    layout.vector_node_laddr = addr;
+  }
+
+  void clear_vector_node_laddr(Transaction &) final {
+    layout.vector_node_laddr = L_ADDR_NULL;
+  }
+
   void update_onode_size(Transaction &t, uint32_t size) final {
     with_mutable_layout(t, [size](onode_layout_t &mlayout) {
       mlayout.size = size;

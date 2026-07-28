@@ -1960,11 +1960,17 @@ enum class extent_types_t : uint8_t {
   BACKREF_INTERNAL = 14,
   BACKREF_LEAF = 15,
   LOG_NODE = 16,
+  // Extent type values are persisted in on-disk metadata and journal
+  // records.  NONE=17 was the existing sentinel and must not move; new
+  // persisted types must be appended after it.
   NONE = 17,
   VECTOR_NODE = 18,
 };
 using extent_types_le_t = uint8_t;
 constexpr uint8_t EXTENT_TYPES_MAX = 19;
+static_assert(static_cast<uint8_t>(extent_types_t::NONE) == 17);
+static_assert(static_cast<uint8_t>(extent_types_t::VECTOR_NODE) == 18);
+static_assert(EXTENT_TYPES_MAX == 19);
 
 constexpr size_t BACKREF_NODE_SIZE = 4096;
 
@@ -3184,9 +3190,13 @@ void minus_srcs(counter_by_src_t<CounterT>& base,
 template <typename CounterT>
 using counter_by_extent_t = std::array<CounterT, EXTENT_TYPES_MAX>;
 
-constexpr bool is_valid_extent_counter_type(extent_types_t ext) {
+constexpr bool is_valid_extent_type(extent_types_t ext) {
   return ext != extent_types_t::NONE &&
          static_cast<uint8_t>(ext) < EXTENT_TYPES_MAX;
+}
+
+constexpr bool is_valid_extent_counter_type(extent_types_t ext) {
+  return is_valid_extent_type(ext);
 }
 
 template <typename CounterT>

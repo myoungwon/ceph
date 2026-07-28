@@ -450,7 +450,7 @@ struct LBACursor : BtreeCursor<laddr_t, lba::lba_map_val_t, LBALeafNode> {
   extent_types_t get_extent_type() const {
     assert(is_viewable());
     assert(!is_end());
-    assert(iter.get_val().type != extent_types_t::NONE);
+    assert(is_valid_extent_type(iter.get_val().type));
     return iter.get_val().type;
   }
 

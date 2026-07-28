@@ -2791,7 +2791,7 @@ cache_stats_t Cache::get_stats(
       auto& trans_io_per_src = get_by_src(trans_io_by_src, src);
       for (uint8_t _ext=0; _ext<EXTENT_TYPES_MAX; ++_ext) {
         auto ext = static_cast<extent_types_t>(_ext);
-        if (ext == extent_types_t::NONE) {
+        if (!is_valid_extent_type(ext)) {
           continue;
         }
         auto& extent_io = get_by_ext(io_by_ext, ext);
@@ -2808,7 +2808,7 @@ cache_stats_t Cache::get_stats(
     cache_size_stats_t phys_sizes;
     for (uint8_t _ext=0; _ext<EXTENT_TYPES_MAX; ++_ext) {
       auto ext = static_cast<extent_types_t>(_ext);
-      if (ext == extent_types_t::NONE) {
+      if (!is_valid_extent_type(ext)) {
         continue;
       }
       const auto& extent_sizes = get_by_ext(stats.dirty_sizes_by_ext, ext);
@@ -2839,7 +2839,7 @@ cache_stats_t Cache::get_stats(
       const auto& io_by_ext = get_by_src(_trans_io_by_src_ext, src);
       for (uint8_t _ext=0; _ext<EXTENT_TYPES_MAX; ++_ext) {
         auto ext = static_cast<extent_types_t>(_ext);
-        if (ext == extent_types_t::NONE) {
+        if (!is_valid_extent_type(ext)) {
           continue;
         }
         const auto& extent_io = get_by_ext(io_by_ext, ext);
@@ -2892,7 +2892,7 @@ cache_stats_t Cache::get_stats(
       const auto& last_access_by_ext = get_by_src(last_access_by_src_ext, src);
       for (uint8_t _ext=0; _ext<EXTENT_TYPES_MAX; ++_ext) {
         auto ext = static_cast<extent_types_t>(_ext);
-        if (ext == extent_types_t::NONE) {
+        if (!is_valid_extent_type(ext)) {
           continue;
         }
         cache_access_stats_t& extent_access = get_by_ext(access_by_ext, ext);
@@ -2915,7 +2915,7 @@ cache_stats_t Cache::get_stats(
       const auto& access_by_ext = get_by_src(_access_by_src_ext, src);
       for (uint8_t _ext=0; _ext<EXTENT_TYPES_MAX; ++_ext) {
         auto ext = static_cast<extent_types_t>(_ext);
-        if (ext == extent_types_t::NONE) {
+        if (!is_valid_extent_type(ext)) {
           continue;
         }
         const auto& extent_access = get_by_ext(access_by_ext, ext);
