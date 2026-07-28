@@ -8,7 +8,9 @@
 #include "test/crimson/seastore/transaction_manager_test_state.h"
 
 #include "crimson/os/seastore/onode_manager/staged-fltree/fltree_onode_manager.h"
+#include "crimson/os/seastore/onode_manager/staged-fltree/node_extent_manager/dummy.h"
 #include "crimson/os/seastore/onode_manager/staged-fltree/tree_utils.h"
+#include "crimson/os/seastore/vector_node.h"
 
 using namespace crimson;
 using namespace crimson::os;
@@ -20,6 +22,25 @@ using namespace std;
 namespace {
   [[maybe_unused]] seastar::logger& logger() {
     return crimson::get_logger(ceph_subsys_test);
+  }
+
+  ceph::bufferlist make_vector_payload(const std::string &contents) {
+    ceph::bufferlist bl;
+    bl.append(contents);
+    return bl;
+  }
+
+  void expect_vector_entries(
+      const vector_node_t &node,
+      std::initializer_list<std::pair<std::string, std::string>> entries) {
+    ASSERT_EQ(entries.size(), node.entries.size());
+    auto expected = entries.begin();
+    for (const auto &actual : node.entries) {
+      EXPECT_EQ(expected->first, actual.entry_id);
+      EXPECT_TRUE(actual.vector_data.contents_equal(
+        make_vector_payload(expected->second)));
+      ++expected;
+    }
   }
 }
 
@@ -257,6 +278,152 @@ TEST_P(fltree_onode_manager_test_t, 1_single)
       }).unsafe_get();
     });
     validate_erased(iter);
+  });
+}
+
+TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
+{
+  run_async([this] {
+    auto pool = KVPool<onode_item_t>::create_range(
+      {0, 2}, {128, 256}, tm->get_block_size());
+    auto src_item = *pool.begin();
+    auto dst_item = *(pool.begin() + 1);
+    auto src_key = src_item->key;
+    auto dst_key = dst_item->key;
+    laddr_t vector_addr = L_ADDR_NULL;
+
+    {
+      VectorNodeManager vector_manager(*tm);
+      auto t = create_mutate_transaction();
+      auto onode = with_trans_intr(*t, [&](auto &trans) {
+        return manager->get_or_create_onode(trans, src_key);
+      }).unsafe_get();
+      auto &flonode = static_cast<FLTreeOnode&>(*onode);
+      src_item->value.initialize(*t, *onode);
+      EXPECT_EQ(sizeof(onode_layout_t), flonode.get_payload_size());
+      EXPECT_FALSE(onode->has_vector_node());
+
+      auto node = with_trans_intr(*t, [&](auto &trans) {
+        return vector_manager.create_vector_node(trans, 1, 4);
+      }).unsafe_get();
+      vector_addr = node->get_laddr();
+      node = with_trans_intr(*t, [&](auto &trans) {
+        return vector_manager.upsert_vector_entry(
+          trans, std::move(node), "vec-a", make_vector_payload("aaaa"));
+      }).unsafe_get();
+      ASSERT_NE(L_ADDR_NULL, vector_addr);
+      onode->update_vector_node_laddr(*t, vector_addr);
+      EXPECT_EQ(vector_addr, onode->get_vector_node_laddr());
+      auto offloaded = onode->offload_data_and_md(*t);
+      EXPECT_EQ(vector_addr, offloaded->get_vector_node_laddr());
+      EXPECT_EQ(vector_addr, onode->get_vector_node_laddr());
+      src_item->value.initialize(*t, *onode);
+      submit_transaction(std::move(t));
+    }
+
+    {
+      VectorNodeManager vector_manager(*tm);
+      auto t = create_read_transaction();
+      auto onode = with_trans_intr(*t, [&](auto &trans) {
+        return manager->get_onode(trans, src_key);
+      }).unsafe_get();
+      EXPECT_EQ(vector_addr, onode->get_vector_node_laddr());
+      auto node = with_trans_intr(*t, [&](auto &trans) {
+        return vector_manager.read_vector_node(trans, vector_addr);
+      }).unsafe_get();
+      expect_vector_entries(node->get_contents(), {{"vec-a", "aaaa"}});
+    }
+
+    restart();
+
+    {
+      VectorNodeManager vector_manager(*tm);
+      auto t = create_read_transaction();
+      auto onode = with_trans_intr(*t, [&](auto &trans) {
+        return manager->get_onode(trans, src_key);
+      }).unsafe_get();
+      EXPECT_EQ(vector_addr, onode->get_vector_node_laddr());
+      auto node = with_trans_intr(*t, [&](auto &trans) {
+        return vector_manager.read_vector_node(trans, vector_addr);
+      }).unsafe_get();
+      expect_vector_entries(node->get_contents(), {{"vec-a", "aaaa"}});
+    }
+
+    {
+      auto t = create_mutate_transaction();
+      auto src_onode = with_trans_intr(*t, [&](auto &trans) {
+        return manager->get_onode(trans, src_key);
+      }).unsafe_get();
+      auto dst_onode = with_trans_intr(*t, [&](auto &trans) {
+        return manager->get_or_create_onode(trans, dst_key);
+      }).unsafe_get();
+      dst_item->value.initialize(*t, *dst_onode);
+      src_onode->swap_layout(*t, *dst_onode);
+      EXPECT_FALSE(src_onode->has_vector_node());
+      EXPECT_EQ(vector_addr, dst_onode->get_vector_node_laddr());
+      submit_transaction(std::move(t));
+    }
+
+    {
+      auto t = create_read_transaction();
+      auto src_onode = with_trans_intr(*t, [&](auto &trans) {
+        return manager->get_onode(trans, src_key);
+      }).unsafe_get();
+      auto dst_onode = with_trans_intr(*t, [&](auto &trans) {
+        return manager->get_onode(trans, dst_key);
+      }).unsafe_get();
+      EXPECT_FALSE(src_onode->has_vector_node());
+      EXPECT_EQ(vector_addr, dst_onode->get_vector_node_laddr());
+    }
+
+    restart();
+
+    {
+      auto t = create_read_transaction();
+      auto src_onode = with_trans_intr(*t, [&](auto &trans) {
+        return manager->get_onode(trans, src_key);
+      }).unsafe_get();
+      auto dst_onode = with_trans_intr(*t, [&](auto &trans) {
+        return manager->get_onode(trans, dst_key);
+      }).unsafe_get();
+      EXPECT_FALSE(src_onode->has_vector_node());
+      EXPECT_EQ(vector_addr, dst_onode->get_vector_node_laddr());
+    }
+
+    {
+      VectorNodeManager vector_manager(*tm);
+      auto t = create_mutate_transaction();
+      auto onode = with_trans_intr(*t, [&](auto &trans) {
+        return manager->get_onode(trans, dst_key);
+      }).unsafe_get();
+      auto ret = with_trans_intr(*t, [&](auto &trans) {
+        return vector_manager.read_vector_node(trans, vector_addr
+        ).si_then([&](auto node) {
+          return vector_manager.remove_vector_entry(
+            trans, std::move(node), "vec-a");
+        });
+      }).unsafe_get();
+      EXPECT_TRUE(ret.second);
+      EXPECT_TRUE(ret.first->get_contents().entries.empty());
+      auto refcnt = with_trans_intr(*t, [&](auto &trans) {
+        return tm->remove(trans, ret.first->cast<LogicalChildNode>());
+      }).unsafe_get();
+      EXPECT_EQ(0u, refcnt);
+      onode->clear_vector_node_laddr(*t);
+      EXPECT_FALSE(onode->has_vector_node());
+      submit_transaction(std::move(t));
+    }
+
+    restart();
+
+    {
+      auto t = create_read_transaction();
+      auto onode = with_trans_intr(*t, [&](auto &trans) {
+        return manager->get_onode(trans, dst_key);
+      }).unsafe_get();
+      EXPECT_FALSE(onode->has_vector_node());
+      EXPECT_EQ(L_ADDR_NULL, onode->get_vector_node_laddr());
+    }
   });
 }
 

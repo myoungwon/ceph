@@ -12,6 +12,7 @@
 #include "crimson/os/seastore/transaction_manager.h"
 #include "crimson/os/seastore/segment_manager/ephemeral.h"
 #include "crimson/os/seastore/segment_manager.h"
+#include "crimson/os/seastore/vector_node.h"
 
 #include "test/crimson/seastore/test_block.h"
 #include "crimson/os/seastore/lba/lba_btree_node.h"
@@ -23,6 +24,32 @@ using namespace crimson::os::seastore;
 namespace {
   [[maybe_unused]] seastar::logger& logger() {
     return crimson::get_logger(ceph_subsys_test);
+  }
+
+  ceph::bufferlist make_vector_payload(std::string_view payload) {
+    ceph::bufferlist bl;
+    bl.append(payload.data(), payload.size());
+    return bl;
+  }
+
+  ceph::bufferlist get_extent_image(const VectorNodeRef &node) {
+    ceph::bufferlist bl;
+    ceph::bufferptr bptr(node->get_bptr(), 0, node->get_length());
+    bl.append(bptr);
+    return bl;
+  }
+
+  void expect_vector_entries(
+    const vector_node_t &node,
+    std::initializer_list<std::pair<std::string_view, std::string_view>> entries) {
+    ASSERT_EQ(entries.size(), node.entries.size());
+    auto expected = entries.begin();
+    for (const auto &entry : node.entries) {
+      EXPECT_EQ(expected->first, entry.entry_id);
+      auto expected_payload = make_vector_payload(expected->second);
+      EXPECT_TRUE(entry.vector_data.contents_equal(expected_payload));
+      ++expected;
+    }
   }
 }
 
@@ -1960,6 +1987,183 @@ TEST_P(tm_single_device_test_t, mutate)
     ASSERT_TRUE(check_usage());
     replay();
     check();
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_crud)
+{
+  run_async([this] {
+    VectorNodeManager manager(*tm);
+    laddr_t addr = L_ADDR_NULL;
+    {
+      auto t = create_transaction();
+      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_vector_node(trans, 1, 4
+        ).si_then([&](auto node) {
+          addr = node->get_laddr();
+          return manager.upsert_vector_entry(
+            trans, std::move(node), "vec-b", make_vector_payload("bbbb"));
+        }).si_then([&](auto node) {
+          return manager.upsert_vector_entry(
+            trans, std::move(node), "vec-a", make_vector_payload("aaaa"));
+        });
+      }).unsafe_get();
+      ASSERT_NE(L_ADDR_NULL, addr);
+      ASSERT_EQ(addr, node->get_laddr());
+      expect_vector_entries(
+        node->get_contents(),
+        {{"vec-a", "aaaa"}, {"vec-b", "bbbb"}});
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_read_test_transaction();
+      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, addr);
+      }).unsafe_get();
+      ASSERT_EQ(addr, node->get_laddr());
+      EXPECT_EQ(1u, node->get_contents().data_type);
+      EXPECT_EQ(4u, node->get_contents().dimension);
+      expect_vector_entries(
+        node->get_contents(),
+        {{"vec-a", "aaaa"}, {"vec-b", "bbbb"}});
+    }
+    {
+      auto t = create_transaction();
+      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, addr
+        ).si_then([&](auto node) {
+          return manager.upsert_vector_entry(
+            trans, std::move(node), "vec-a", make_vector_payload("zzzz"));
+        });
+      }).unsafe_get();
+      expect_vector_entries(
+        node->get_contents(),
+        {{"vec-a", "zzzz"}, {"vec-b", "bbbb"}});
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_transaction();
+      auto ret = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, addr
+        ).si_then([&](auto node) {
+          return manager.remove_vector_entry(
+            trans, std::move(node), "vec-a");
+        });
+      }).unsafe_get();
+      EXPECT_TRUE(ret.second);
+      expect_vector_entries(ret.first->get_contents(), {{"vec-b", "bbbb"}});
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_transaction();
+      auto ret = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, addr
+        ).si_then([&](auto node) {
+          return manager.remove_vector_entry(
+            trans, std::move(node), "missing");
+        });
+      }).unsafe_get();
+      EXPECT_FALSE(ret.second);
+      expect_vector_entries(ret.first->get_contents(), {{"vec-b", "bbbb"}});
+    }
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_capacity_limit)
+{
+  run_async([this] {
+    VectorNodeManager manager(*tm);
+    laddr_t addr = L_ADDR_NULL;
+    {
+      auto t = create_transaction();
+      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_vector_node(trans, 1, 4
+        ).si_then([&](auto node) {
+          addr = node->get_laddr();
+          return manager.upsert_vector_entry(
+            trans, std::move(node), "vec-a", make_vector_payload("aaaa"));
+        });
+      }).unsafe_get();
+      ASSERT_EQ(tm->get_block_size(), node->get_length());
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_transaction();
+      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, addr);
+      }).unsafe_get();
+      const auto before_image = get_extent_image(node);
+      expect_vector_entries(node->get_contents(), {{"vec-a", "aaaa"}});
+
+      std::string oversized(tm->get_block_size(), 'x');
+      using ertr = with_trans_ertr<VectorNodeManager::mutate_iertr>;
+      bool got_enospc = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.upsert_vector_entry(
+          trans, node, "oversized", make_vector_payload(oversized));
+      }).safe_then([](auto) -> ertr::future<bool> {
+        return ertr::make_ready_future<bool>(false);
+      }).handle_error(
+        crimson::ct_error::enospc::handle([] {
+          return seastar::make_ready_future<bool>(true);
+        }),
+        crimson::ct_error::assert_all{
+          "vector_node_capacity_limit got invalid error"
+        }
+      ).get();
+
+      EXPECT_TRUE(got_enospc);
+      expect_vector_entries(node->get_contents(), {{"vec-a", "aaaa"}});
+      EXPECT_TRUE(get_extent_image(node).contents_equal(before_image));
+    }
+    {
+      auto t = create_read_test_transaction();
+      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, addr);
+      }).unsafe_get();
+      expect_vector_entries(node->get_contents(), {{"vec-a", "aaaa"}});
+    }
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_delta_replay_image)
+{
+  run_async([this] {
+    VectorNodeManager manager(*tm);
+    laddr_t addr = L_ADDR_NULL;
+    {
+      auto t = create_transaction();
+      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_vector_node(trans, 7, 2
+        ).si_then([&](auto node) {
+          addr = node->get_laddr();
+          return manager.upsert_vector_entry(
+            trans, std::move(node), "vec-a", make_vector_payload("aabb"));
+        }).si_then([&](auto node) {
+          return manager.upsert_vector_entry(
+            trans, std::move(node), "vec-b", make_vector_payload("ccdd"));
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+
+    auto t = create_read_test_transaction();
+    auto node = with_trans_intr(*(t.t), [&](auto &trans) {
+      return manager.read_vector_node(trans, addr);
+    }).unsafe_get();
+    auto delta = node->get_delta();
+    auto image = get_extent_image(node);
+    ASSERT_TRUE(delta.contents_equal(image));
+
+    VectorNodeRef replayed(new VectorNode(
+      create_extent_ptr_zero(node->get_length())));
+    replayed->apply_delta_and_adjust_crc(P_ADDR_NULL, delta);
+    EXPECT_EQ(node->calc_crc32c(), replayed->calc_crc32c());
+    EXPECT_TRUE(get_extent_image(replayed).contents_equal(image));
+    EXPECT_EQ(7u, replayed->get_contents().data_type);
+    EXPECT_EQ(2u, replayed->get_contents().dimension);
+    expect_vector_entries(
+      replayed->get_contents(),
+      {{"vec-a", "aabb"}, {"vec-b", "ccdd"}});
   });
 }
 
