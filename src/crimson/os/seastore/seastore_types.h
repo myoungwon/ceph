@@ -1960,11 +1960,11 @@ enum class extent_types_t : uint8_t {
   BACKREF_INTERNAL = 14,
   BACKREF_LEAF = 15,
   LOG_NODE = 16,
-  // None and the number of valid extent_types_t
   NONE = 17,
+  VECTOR_NODE = 18,
 };
 using extent_types_le_t = uint8_t;
-constexpr auto EXTENT_TYPES_MAX = static_cast<uint8_t>(extent_types_t::NONE);
+constexpr uint8_t EXTENT_TYPES_MAX = 19;
 
 constexpr size_t BACKREF_NODE_SIZE = 4096;
 
@@ -1978,14 +1978,16 @@ constexpr bool is_data_type(extent_types_t type) {
 constexpr bool is_logical_metadata_type(extent_types_t type) {
   return (type >= extent_types_t::ROOT_META &&
          type <= extent_types_t::COLL_BLOCK) ||
-	 type == extent_types_t::LOG_NODE;
+	 type == extent_types_t::LOG_NODE ||
+         type == extent_types_t::VECTOR_NODE;
 }
 
 constexpr bool is_logical_type(extent_types_t type) {
   if ((type >= extent_types_t::ROOT_META &&
        type <= extent_types_t::OBJECT_DATA_BLOCK) ||
       type == extent_types_t::TEST_BLOCK ||
-      type == extent_types_t::LOG_NODE) {
+      type == extent_types_t::LOG_NODE ||
+      type == extent_types_t::VECTOR_NODE) {
     assert(is_logical_metadata_type(type) ||
            is_data_type(type));
     return true;
@@ -2036,7 +2038,8 @@ constexpr bool is_backref_mapped_type(extent_types_t type) {
        type <= extent_types_t::OBJECT_DATA_BLOCK) ||
       type == extent_types_t::TEST_BLOCK ||
       type == extent_types_t::TEST_BLOCK_PHYSICAL ||
-      type == extent_types_t::LOG_NODE) {
+      type == extent_types_t::LOG_NODE ||
+      type == extent_types_t::VECTOR_NODE) {
     assert(is_logical_type(type) ||
 	   is_lba_node(type) ||
 	   type == extent_types_t::TEST_BLOCK_PHYSICAL);
@@ -2052,7 +2055,8 @@ constexpr bool is_backref_mapped_type(extent_types_t type) {
 constexpr bool is_real_type(extent_types_t type) {
   if (type <= extent_types_t::OBJECT_DATA_BLOCK ||
       (type >= extent_types_t::TEST_BLOCK &&
-       type <= extent_types_t::LOG_NODE)) {
+       type <= extent_types_t::LOG_NODE) ||
+      type == extent_types_t::VECTOR_NODE) {
     assert(is_logical_type(type) ||
            is_physical_type(type));
     return true;
@@ -3180,12 +3184,17 @@ void minus_srcs(counter_by_src_t<CounterT>& base,
 template <typename CounterT>
 using counter_by_extent_t = std::array<CounterT, EXTENT_TYPES_MAX>;
 
+constexpr bool is_valid_extent_counter_type(extent_types_t ext) {
+  return ext != extent_types_t::NONE &&
+         static_cast<uint8_t>(ext) < EXTENT_TYPES_MAX;
+}
+
 template <typename CounterT>
 CounterT& get_by_ext(
     counter_by_extent_t<CounterT>& counters_by_ext,
     extent_types_t ext) {
   auto index = static_cast<uint8_t>(ext);
-  assert(index < EXTENT_TYPES_MAX);
+  assert(is_valid_extent_counter_type(ext));
   return counters_by_ext[index];
 }
 
@@ -3194,7 +3203,7 @@ const CounterT& get_by_ext(
     const counter_by_extent_t<CounterT>& counters_by_ext,
     extent_types_t ext) {
   auto index = static_cast<uint8_t>(ext);
-  assert(index < EXTENT_TYPES_MAX);
+  assert(is_valid_extent_counter_type(ext));
   return counters_by_ext[index];
 }
 

@@ -639,6 +639,8 @@ std::ostream &operator<<(std::ostream &out, extent_types_t t)
     return out << "LOG_NODE";
   case extent_types_t::NONE:
     return out << "NONE";
+  case extent_types_t::VECTOR_NODE:
+    return out << "VECTOR_NODE";
   default:
     return out << "UNKNOWN(" << (unsigned)t << ")";
   }

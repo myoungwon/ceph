@@ -193,6 +193,9 @@ void ExtentQueue::get_stats(
       auto& trans_io_per_src = get_by_src(trans_io_by_src, src);
       for (uint8_t _ext=0; _ext<EXTENT_TYPES_MAX; ++_ext) {
         auto ext = static_cast<extent_types_t>(_ext);
+        if (ext == extent_types_t::NONE) {
+          continue;
+        }
         auto& extent_io = get_by_ext(io_by_ext, ext);
         const auto& last_extent_io = get_by_ext(last_io_by_ext, ext);
         extent_io.minus(last_extent_io);
@@ -210,6 +213,9 @@ void ExtentQueue::get_stats(
     cache_size_stats_t phys_sizes;
     for (uint8_t _ext=0; _ext<EXTENT_TYPES_MAX; ++_ext) {
       auto ext = static_cast<extent_types_t>(_ext);
+      if (ext == extent_types_t::NONE) {
+        continue;
+      }
       const auto& extent_sizes = get_by_ext(sizes_by_ext, ext);
       if (is_data_type(ext)) {
         data_sizes.add(extent_sizes);
@@ -239,6 +245,9 @@ void ExtentQueue::get_stats(
       const auto& io_by_ext = get_by_src(_trans_io_by_src_ext, src);
       for (uint8_t _ext=0; _ext<EXTENT_TYPES_MAX; ++_ext) {
         auto ext = static_cast<extent_types_t>(_ext);
+        if (ext == extent_types_t::NONE) {
+          continue;
+        }
         const auto extent_io = get_by_ext(io_by_ext, ext);
         if (is_data_type(ext)) {
           data_io.add(extent_io);

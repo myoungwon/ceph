@@ -138,7 +138,8 @@ struct __attribute__((packed)) lba_map_val_le_t {
   pladdr_le_t pladdr;
   extent_ref_count_le_t refcount{0};
   checksum_le_t checksum{0};
-  extent_types_le_t type{EXTENT_TYPES_MAX};
+  extent_types_le_t type{
+    static_cast<extent_types_le_t>(extent_types_t::NONE)};
 
   lba_map_val_le_t() = default;
   lba_map_val_le_t(const lba_map_val_le_t &) = default;
