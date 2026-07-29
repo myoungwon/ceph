@@ -770,6 +770,151 @@ TEST(VectorPlacement, PgLshSubOidPreservesDistanceBucketBoundary) {
                 above_sub_oid, config));
 }
 
+TEST(VectorPlacement, PgLshIndexConfigRoundTripsAllPlacementState) {
+  librados::vector_pg_lsh::pool_pg_info_t pool_info = {
+    16, 16, 1,
+  };
+  auto original = make_pg_lsh_test_index_config(
+      4, pool_info, 10, 16, 12345, 4, 5, 6);
+  original.anchor_mode = librados::vector_pg_lsh::anchor_mode_centroid;
+  original.anchor = {0.5, -0.5, 0.5, -0.5};
+
+  bufferlist encoded;
+  original.encode(encoded);
+  librados::vector_pg_lsh::index_config_t decoded;
+  auto p = encoded.cbegin();
+  decoded.decode(p);
+  ASSERT_TRUE(p.end());
+
+  std::string mismatch_field;
+  EXPECT_EQ(0, librados::vector_pg_lsh::compare_index_configs(
+      original, decoded, &mismatch_field));
+  EXPECT_TRUE(mismatch_field.empty());
+}
+
+TEST(VectorPlacement, PgLshIndexConfigReportsImmutableMismatches) {
+  librados::vector_pg_lsh::pool_pg_info_t pool_info = {
+    16, 16, 1,
+  };
+  const auto stored = make_pg_lsh_test_index_config(
+      4, pool_info, 10, 16, 12345, 4, 5, 6);
+  std::string mismatch_field;
+
+  auto requested = stored;
+  requested.seed++;
+  EXPECT_EQ(-EINVAL, librados::vector_pg_lsh::compare_index_configs(
+      requested, stored, &mismatch_field));
+  EXPECT_EQ("seed", mismatch_field);
+
+  requested = stored;
+  requested.dimension++;
+  EXPECT_EQ(-EINVAL, librados::vector_pg_lsh::compare_index_configs(
+      requested, stored, &mismatch_field));
+  EXPECT_EQ("dimension", mismatch_field);
+
+  requested = stored;
+  requested.anchor[0] = -requested.anchor[0];
+  EXPECT_EQ(-EINVAL, librados::vector_pg_lsh::compare_index_configs(
+      requested, stored, &mismatch_field));
+  EXPECT_EQ("anchor", mismatch_field);
+
+  requested = stored;
+  requested.distance_bucket_bits++;
+  EXPECT_EQ(-EINVAL, librados::vector_pg_lsh::compare_index_configs(
+      requested, stored, &mismatch_field));
+  EXPECT_EQ("distance_bucket_bits", mismatch_field);
+
+  requested = stored;
+  requested.residual_bits++;
+  EXPECT_EQ(-EINVAL, librados::vector_pg_lsh::compare_index_configs(
+      requested, stored, &mismatch_field));
+  EXPECT_EQ("residual_bits", mismatch_field);
+}
+
+TEST(VectorPlacement, PgLshQueryValidatesOnlyExplicitImmutableOverrides) {
+  librados::vector_pg_lsh::pool_pg_info_t pool_info = {
+    16, 16, 1,
+  };
+  const auto stored = make_pg_lsh_test_index_config(
+      4, pool_info, 10, 16, 12345, 4, 5, 6);
+  std::string mismatch_field;
+
+  librados::vector_pg_lsh::index_config_overrides_t no_overrides;
+  EXPECT_EQ(0, librados::vector_pg_lsh::validate_index_config_overrides(
+      no_overrides, stored, &mismatch_field));
+  EXPECT_TRUE(mismatch_field.empty());
+
+  librados::vector_pg_lsh::index_config_overrides_t matching_overrides;
+  matching_overrides.k = stored.k;
+  matching_overrides.seed = stored.seed;
+  EXPECT_EQ(0, librados::vector_pg_lsh::validate_index_config_overrides(
+      matching_overrides, stored, &mismatch_field));
+
+  auto wrong_overrides = matching_overrides;
+  wrong_overrides.seed = stored.seed + 1;
+  EXPECT_EQ(-EINVAL,
+            librados::vector_pg_lsh::validate_index_config_overrides(
+                wrong_overrides, stored, &mismatch_field));
+  EXPECT_EQ("seed", mismatch_field);
+}
+
+TEST(VectorPlacement, PgLshRejectsPoolPgConfigurationChanges) {
+  const librados::vector_pg_lsh::pool_pg_info_t creation_pool = {
+    8, 8, 1,
+  };
+  const auto config = make_pg_lsh_test_index_config(
+      4, creation_pool, 4, 4, 12345, 2, 4, 4);
+  std::string mismatch_field;
+
+  auto changed_pool = creation_pool;
+  changed_pool.pg_num = 16;
+  EXPECT_EQ(-EINVAL, librados::vector_pg_lsh::validate_index_config(
+      config, changed_pool, &mismatch_field));
+  EXPECT_EQ("pg_num", mismatch_field);
+
+  changed_pool = creation_pool;
+  changed_pool.pgp_num = 16;
+  EXPECT_EQ(-EINVAL, librados::vector_pg_lsh::validate_index_config(
+      config, changed_pool, &mismatch_field));
+  EXPECT_EQ("pgp_num", mismatch_field);
+}
+
+TEST(VectorPlacement, StoredRandomAnchorReproducesSubOidRouting) {
+  librados::vector_pg_lsh::pool_pg_info_t pool_info = {
+    16, 16, 1,
+  };
+  const auto original = make_pg_lsh_test_index_config(
+      4, pool_info, 10, 16, 12345, 4, 4, 4);
+  float vector[] = {1.0, 2.0, 0.0, -1.0};
+  bufferlist vector_bl;
+  vector_bl.append(reinterpret_cast<const char *>(vector), sizeof(vector));
+
+  librados::vector_placement::pg_lsh_v0::sub_oid_t original_sub_oid;
+  ASSERT_EQ(0, librados::vector_pg_lsh::compute_sub_oid(
+      vector_bl, original, &original_sub_oid));
+
+  bufferlist encoded;
+  original.encode(encoded);
+  librados::vector_pg_lsh::index_config_t restored;
+  auto p = encoded.cbegin();
+  restored.decode(p);
+  ASSERT_TRUE(p.end());
+
+  librados::vector_placement::pg_lsh_v0::sub_oid_t restored_sub_oid;
+  ASSERT_EQ(0, librados::vector_pg_lsh::compute_sub_oid(
+      vector_bl, restored, &restored_sub_oid));
+  EXPECT_EQ(original_sub_oid.distance_bucket,
+            restored_sub_oid.distance_bucket);
+  EXPECT_EQ(original_sub_oid.residual_code, restored_sub_oid.residual_code);
+  EXPECT_EQ(
+      librados::vector_placement::pg_lsh_v0::format_sub_oid(
+          original_sub_oid,
+          librados::vector_pg_lsh::sub_oid_config_view(original)),
+      librados::vector_placement::pg_lsh_v0::format_sub_oid(
+          restored_sub_oid,
+          librados::vector_pg_lsh::sub_oid_config_view(restored)));
+}
+
 TEST(VectorPlacement, PgLshV0ManualCollisionSelection) {
   constexpr uint32_t seed = 12345;
   constexpr uint32_t pg_num = 16;
@@ -1209,6 +1354,133 @@ TEST_F(LibRadosIoPP, PgLshV0SubOidProbeLimitIsPerPg) {
   }
 }
 
+TEST_F(LibRadosIoPP, PgLshPersistedAnchorRoutesWithoutTrainingFile) {
+  librados::vector_pg_lsh::pool_pg_info_t pool_info;
+  ASSERT_EQ(0, pool_pg_info_for_test(cluster, pool_name, &pool_info));
+
+  const std::array<float, 4> vector = {1.0f, -2.0f, 3.0f, -4.0f};
+  bufferlist vector_bl;
+  vector_bl.append(reinterpret_cast<const char *>(vector.data()),
+                   vector.size() * sizeof(float));
+
+  const std::array<std::pair<uint32_t, std::vector<double>>, 3> anchors = {{
+    {
+      librados::vector_pg_lsh::anchor_mode_random,
+      {0.5, -0.5, 0.5, -0.5},
+    },
+    {
+      librados::vector_pg_lsh::anchor_mode_centroid,
+      {0.25, 0.5, -0.25, -0.5},
+    },
+    {
+      librados::vector_pg_lsh::anchor_mode_representative,
+      {1.0, 0.0, 0.0, 0.0},
+    },
+  }};
+
+  for (size_t mode_index = 0; mode_index < anchors.size(); ++mode_index) {
+    const std::string index_name =
+      "persisted-anchor-index-" + std::to_string(mode_index);
+    auto locator_state =
+      std::make_shared<librados::vector_pg_lsh::locator_state_t>();
+    librados::vector_pg_lsh::locator_cache_t locator_cache(
+        &ioctx, pool_info, pool_name, "persisted-anchor-bucket",
+        index_name, locator_state);
+    ASSERT_EQ(0, locator_cache.precompute_all());
+
+    auto create_config = make_pg_lsh_test_index_config(
+        4, pool_info, 4, 4, 12345, 1, 4, 4);
+    create_config.anchor_mode = anchors[mode_index].first;
+    create_config.anchor = anchors[mode_index].second;
+
+    std::vector<librados::vector_pg_lsh::put_target_t> create_targets;
+    ASSERT_EQ(0, librados::vector_pg_lsh::build_put_targets(
+        "persisted-anchor-bucket", index_name, vector_bl, create_config,
+        pool_info, &locator_cache, &create_targets));
+
+    std::string mismatch_field;
+    ASSERT_EQ(0, librados::vector_pg_lsh::create_index(
+        ioctx, "persisted-anchor-bucket", index_name, create_config,
+        pool_info, &mismatch_field));
+
+    librados::vector_pg_lsh::index_config_t loaded_config;
+    ASSERT_EQ(0, librados::vector_pg_lsh::load_index_config(
+        ioctx, "persisted-anchor-bucket", index_name, &loaded_config,
+        &mismatch_field));
+    ASSERT_EQ(0, librados::vector_pg_lsh::compare_index_configs(
+        create_config, loaded_config, &mismatch_field));
+
+    std::vector<librados::vector_pg_lsh::put_target_t> loaded_targets;
+    ASSERT_EQ(0, librados::vector_pg_lsh::build_put_targets(
+        "persisted-anchor-bucket", index_name, vector_bl, loaded_config,
+        pool_info, &locator_cache, &loaded_targets));
+    ASSERT_EQ(create_targets.size(), loaded_targets.size());
+    for (size_t target = 0; target < create_targets.size(); ++target) {
+      EXPECT_EQ(create_targets[target].pg, loaded_targets[target].pg);
+      EXPECT_EQ(create_targets[target].oid.name,
+                loaded_targets[target].oid.name);
+      EXPECT_EQ(create_targets[target].sub_oid_name,
+                loaded_targets[target].sub_oid_name);
+    }
+
+    librados::vector_pg_lsh::query_params_t query_params;
+    query_params.m = 1;
+    std::vector<librados::vector_pg_lsh::query_probe_t> probes;
+    uint64_t generated_group_count = 0;
+    ASSERT_EQ(0, librados::vector_pg_lsh::build_query_probes(
+        "persisted-anchor-bucket", index_name, vector_bl, loaded_config,
+        query_params, pool_info, &locator_cache, &probes,
+        &generated_group_count));
+    EXPECT_FALSE(probes.empty());
+    EXPECT_EQ(loaded_config.l, generated_group_count);
+
+    ceph::rados::put_vector_request_t put_req;
+    put_req.bucket_name = "persisted-anchor-bucket";
+    put_req.index_name = index_name;
+    put_req.key = "persisted-anchor-vector-" + std::to_string(mode_index);
+    put_req.data_type = loaded_config.data_type;
+    put_req.distance_metric = loaded_config.distance_metric;
+    put_req.dimension = loaded_config.dimension;
+    put_req.vector_data = vector_bl;
+    ASSERT_EQ(0, librados::vector_pg_lsh::put_vector(
+        ioctx, loaded_targets.front(), put_req));
+
+    ceph::rados::query_vectors_request_t query_req;
+    query_req.bucket_name = "persisted-anchor-bucket";
+    query_req.index_name = index_name;
+    query_req.data_type = loaded_config.data_type;
+    query_req.distance_metric = loaded_config.distance_metric;
+    query_req.dimension = loaded_config.dimension;
+    query_req.local_top_k = 1;
+    query_req.query_vector = vector_bl;
+    bufferlist reply;
+    int op_rval = 0;
+    ASSERT_EQ(0, librados::vector_pg_lsh::query_sync(
+        ioctx, probes.front(), query_req, &reply, &op_rval));
+    ASSERT_EQ(0, op_rval);
+    ceph::rados::query_vectors_result_t result;
+    auto reply_it = reply.cbegin();
+    decode(result, reply_it);
+    ASSERT_TRUE(reply_it.end());
+    ASSERT_EQ(1u, result.entries.size());
+    EXPECT_EQ(put_req.key, result.entries.front().key);
+  }
+
+  librados::vector_pg_lsh::index_config_t missing_config;
+  std::string mismatch_field;
+  EXPECT_EQ(-ENOENT, librados::vector_pg_lsh::load_index_config(
+      ioctx, "persisted-anchor-bucket", "missing-index", &missing_config,
+      &mismatch_field));
+  EXPECT_EQ("index_metadata", mismatch_field);
+
+  auto conflicting_config = make_pg_lsh_test_index_config(
+      4, pool_info, 4, 4, 54321, 1, 4, 4);
+  EXPECT_EQ(-EINVAL, librados::vector_pg_lsh::create_index(
+      ioctx, "persisted-anchor-bucket", "persisted-anchor-index-0",
+      conflicting_config, pool_info, &mismatch_field));
+  EXPECT_EQ("seed", mismatch_field);
+}
+
 TEST_F(LibRadosIoPP, PgLshV0RawOpsRouteAndMergeByEntryId) {
   librados::vector_pg_lsh::pool_pg_info_t pool_info;
   ASSERT_EQ(0, ensure_pool_pg_count_for_test(
@@ -1266,6 +1538,17 @@ TEST_F(LibRadosIoPP, PgLshV0RawOpsRouteAndMergeByEntryId) {
   librados::vector_pg_lsh::query_params_t query_params;
   query_params.hamming_radius = 0;
   query_params.m = 2;
+  std::string mismatch_field;
+  ASSERT_EQ(0, librados::vector_pg_lsh::create_index(
+      ioctx, "pg-lsh-bucket", "pg-lsh-index", index_config, pool_info,
+      &mismatch_field));
+  librados::vector_pg_lsh::index_config_t stored_index_config;
+  ASSERT_EQ(0, librados::vector_pg_lsh::load_index_config(
+      ioctx, "pg-lsh-bucket", "pg-lsh-index", &stored_index_config,
+      &mismatch_field));
+  ASSERT_EQ(0, librados::vector_pg_lsh::compare_index_configs(
+      index_config, stored_index_config, &mismatch_field));
+  index_config = std::move(stored_index_config);
   ASSERT_EQ(0, librados::vector_pg_lsh::validate_query_params(
       index_config, query_params, pool_info));
 
