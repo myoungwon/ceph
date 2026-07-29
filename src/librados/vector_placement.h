@@ -136,6 +136,15 @@ inline object_t make_pg_lsh_v0_oid(const std::string& bucket_name,
   return oid;
 }
 
+inline object_t make_pg_lsh_index_metadata_oid(
+    const std::string& bucket_name,
+    const std::string& index_name)
+{
+  return object_t(
+      ".rados.vector/v1/index/" + hash_string(bucket_name) + "/" +
+      hash_string(index_name));
+}
+
 inline hash_v0_placement_t compute_hash_v0_placement(
     const std::string& bucket_name,
     const std::string& index_name,
@@ -560,8 +569,9 @@ inline int build_probe_sub_oids(
   if (config.residual_bits == 0) {
     residual_masks.push_back(0);
   } else {
-    residual_masks = pg_lsh_v0_hamming_masks(
-        config.residual_bits, probe_config.residual_hamming_radius);
+    residual_masks =
+      pg_lsh_v0_hamming_masks(
+          config.residual_bits, probe_config.residual_hamming_radius);
   }
 
   out_probe_sub_oids->reserve(
