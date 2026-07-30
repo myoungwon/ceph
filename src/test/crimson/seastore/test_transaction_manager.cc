@@ -2075,6 +2075,38 @@ TEST(vector_node_format_t, rejects_malformed_record)
     ceph::buffer::malformed_input);
 }
 
+TEST(vector_node_format_t, preserves_complete_vector_record)
+{
+  vector_node_t leaf;
+  leaf.kind = vector_node_kind_t::LEAF;
+  leaf.logical_entry_count = 1;
+  leaf.entries.push_back(
+    make_vector_entry("00000000", "aabb", "application-metadata"));
+
+  const auto decoded =
+    VectorNode::decode_contents(VectorNode::encode_contents(leaf));
+  ASSERT_EQ(1u, decoded.entries.size());
+  const auto &entry = decoded.entries.front();
+  EXPECT_EQ("00000000", entry.entry_id);
+  EXPECT_EQ("bucket", entry.bucket_name);
+  EXPECT_EQ("index", entry.index_name);
+  EXPECT_EQ("key-00000000", entry.user_key);
+  EXPECT_EQ(ceph::rados::vector_data_type_float32, entry.data_type);
+  EXPECT_EQ(
+    ceph::rados::vector_distance_metric_euclidean,
+    entry.distance_metric);
+  EXPECT_EQ(1u, entry.dimension);
+  EXPECT_EQ(
+    ceph::rados::vector_placement_algorithm_hash_v0,
+    entry.placement_algorithm);
+  EXPECT_EQ("abcd", entry.placement_key);
+  EXPECT_EQ("01234567", entry.vector_hash);
+  EXPECT_TRUE(entry.metadata.contents_equal(
+    make_vector_payload("application-metadata")));
+  EXPECT_TRUE(entry.vector_data.contents_equal(
+    make_vector_payload("aabb")));
+}
+
 TEST_P(tm_single_device_test_t, vector_node_crud)
 {
   run_async([this] {
