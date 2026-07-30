@@ -32,6 +32,7 @@
 #include "crimson/os/seastore/onode_manager.h"
 #include "crimson/os/seastore/object_data_handler.h"
 #include "crimson/os/seastore/omap_manager/log/log_manager.h"
+#include "crimson/os/seastore/vector_node.h"
 
 #include "common/ceph_crypto.h"
 
@@ -1533,6 +1534,87 @@ SeaStore::Shard::omap_get_vectors(
   });
 }
 
+SeaStore::Shard::read_errorator::future<
+  std::optional<vector_store_query_result_t>>
+SeaStore::Shard::query_vectors(
+  CollectionRef ch,
+  const ghobject_t &oid,
+  const ceph::rados::query_vectors_request_t &request,
+  uint32_t op_flags)
+{
+  assert(store_active);
+  ++(shard_stats.read_num);
+  ++(shard_stats.pending_read_num);
+
+  return repeat_with_onode<std::optional<vector_store_query_result_t>>(
+    ch,
+    oid,
+    Transaction::src_t::READ,
+    "query_vectors",
+    op_type_t::OMAP_QUERY_VECTORS,
+    op_flags,
+    [this, request](auto &transaction, auto &onode)
+      -> base_iertr::future<
+        std::optional<vector_store_query_result_t>>
+  {
+    if (!onode.has_vector_node()) {
+      return base_iertr::make_ready_future<
+        std::optional<vector_store_query_result_t>>(std::nullopt);
+    }
+    if (!select_log_omap_root(onode).is_null()) {
+      return crimson::ct_error::input_output_error::make();
+    }
+
+    ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+    if (accumulator.prepare(request) < 0) {
+      return crimson::ct_error::input_output_error::make();
+    }
+
+    return seastar::do_with(
+      VectorNodeManager(*transaction_manager),
+      std::move(accumulator),
+      vector_store_query_result_t(),
+      [this, &transaction, &onode](
+        auto &manager,
+        auto &accumulator,
+        auto &result)
+    {
+      return manager.read_vector_node(
+        transaction, onode.get_vector_node_laddr()
+      ).si_then([&transaction, &manager, &accumulator](auto root) {
+        return manager.scan_vector_entries(
+          transaction, std::move(root),
+          [&accumulator](const auto &entry) {
+            std::ignore = accumulator.consume(
+              ceph::rados::vector_query_exec::make_vector_entry_view(entry));
+          });
+      }).si_then([&accumulator, &result](auto)
+          -> base_iertr::future<
+            std::optional<vector_store_query_result_t>> {
+        if (accumulator.finish(
+              &result.result, &result.filter_stats) < 0) {
+          return crimson::ct_error::input_output_error::make();
+        }
+        result.result.local_matching_entries =
+          result.filter_stats.matched_entries;
+        result.result.local_distance_computations =
+          result.filter_stats.distance_computations;
+        return base_iertr::make_ready_future<
+          std::optional<vector_store_query_result_t>>(result);
+      }).handle_error_interruptible(
+        crimson::ct_error::enoent::handle([] {
+          return base_iertr::future<
+            std::optional<vector_store_query_result_t>>(
+              crimson::ct_error::input_output_error::make());
+        }),
+        base_iertr::pass_further{});
+    });
+  }).finally([this] {
+    assert(shard_stats.pending_read_num);
+    --(shard_stats.pending_read_num);
+  });
+}
+
 SeaStore::Shard::read_errorator::future<SeaStore::Shard::omap_values_t>
 SeaStore::Shard::omap_query_vectors(
   CollectionRef ch,
@@ -2018,6 +2100,9 @@ SeaStore::Shard::_do_transaction_step(
       }
       case Transaction::OP_OMAP_SETKEYS:
       {
+        if (onode->has_vector_node()) {
+          return crimson::ct_error::input_output_error::make();
+        }
         std::map<std::string, ceph::bufferlist> aset;
         i.decode_attrset(aset);
 	auto root = select_log_omap_root(*onode);
@@ -2031,6 +2116,9 @@ SeaStore::Shard::_do_transaction_step(
       }
       case Transaction::OP_OMAP_SETHEADER:
       {
+        if (onode->has_vector_node()) {
+          return crimson::ct_error::input_output_error::make();
+        }
         ceph::bufferlist bl;
         i.decode_bl(bl);
         DEBUGT("op OMAP_SETHEADER, oid={}, length=0x{:x} ...",
@@ -2039,6 +2127,9 @@ SeaStore::Shard::_do_transaction_step(
       }
       case Transaction::OP_OMAP_RMKEYS:
       {
+        if (onode->has_vector_node()) {
+          return crimson::ct_error::input_output_error::make();
+        }
         omap_keys_t keys;
         i.decode_keyset(keys);
 	auto root = select_log_omap_root(*onode);
@@ -2052,6 +2143,9 @@ SeaStore::Shard::_do_transaction_step(
       }
       case Transaction::OP_OMAP_RMKEYRANGE:
       {
+        if (onode->has_vector_node()) {
+          return crimson::ct_error::input_output_error::make();
+        }
         std::string first, last;
         first = i.decode_string();
         last = i.decode_string();
@@ -2066,6 +2160,9 @@ SeaStore::Shard::_do_transaction_step(
       }
       case Transaction::OP_OMAP_CLEAR:
       {
+        if (onode->has_vector_node()) {
+          return crimson::ct_error::input_output_error::make();
+        }
         DEBUGT("op OMAP_CLEAR, oid={} ...", *ctx.transaction, oid);
         return _omap_clear(ctx, *onode);
       }
@@ -2133,18 +2230,61 @@ SeaStore::Shard::_do_transaction_step(
 	  onode.reset();
 	});
       }
-      case Transaction::OP_PUT_VECTOR:
+      case Transaction::OP_PUT_VECTOR_NODE:
       {
-        std::map<std::string, ceph::bufferlist> aset;
-        i.decode_attrset(aset);
-	auto root = select_log_omap_root(*onode);
-        DEBUGT("op PUT_VECTOR, oid={}, omap size={}, type={} ...",
-               *ctx.transaction, oid, aset.size(), root.get_type());
-        return omaptree_put_vectors(
-          *ctx.transaction,
-          std::move(root),
-          *onode,
-          std::move(aset));
+        ceph::bufferlist record_bl;
+        i.decode_bl(record_bl);
+        ceph::os::vector_record_t record;
+        auto record_iter = record_bl.cbegin();
+        record.decode(record_iter);
+        if (!record_iter.end() ||
+            ceph::os::validate_vector_record(record) < 0) {
+          return crimson::ct_error::input_output_error::make();
+        }
+
+        auto omap_root = select_log_omap_root(*onode);
+        if (!omap_root.is_null()) {
+          return crimson::ct_error::input_output_error::make();
+        }
+
+        DEBUGT("op PUT_VECTOR native, oid={}, entry_id={} ...",
+               *ctx.transaction, oid, record.entry_id);
+        return seastar::do_with(
+          VectorNodeManager(*transaction_manager),
+          std::move(record),
+          [this, &ctx, &onode](auto &manager, auto &record) {
+            auto upsert = [&ctx, &manager, &record](auto root) {
+              return manager.upsert_vector_entry(
+                *ctx.transaction, std::move(root), record
+              ).handle_error_interruptible(
+                crimson::ct_error::enoent::handle([] {
+                  return tm_iertr::future<VectorNodeRef>(
+                    crimson::ct_error::input_output_error::make());
+                }),
+                tm_iertr::pass_further{});
+            };
+
+            if (onode->has_vector_node()) {
+              return manager.read_vector_node(
+                *ctx.transaction, onode->get_vector_node_laddr()
+              ).si_then(std::move(upsert)
+              ).handle_error_interruptible(
+                crimson::ct_error::enoent::handle([] {
+                  return tm_iertr::future<VectorNodeRef>(
+                    crimson::ct_error::input_output_error::make());
+                }),
+                tm_iertr::pass_further{}
+              ).discard_result();
+            }
+
+            return manager.create_vector_root(*ctx.transaction
+            ).si_then([&ctx, &onode, upsert=std::move(upsert)](
+                auto root) mutable {
+              onode->update_vector_node_laddr(
+                *ctx.transaction, root->get_laddr());
+              return upsert(std::move(root));
+            }).discard_result();
+          });
       }
       default:
         ERROR("bad op {}", static_cast<unsigned>(op->op));
@@ -2166,7 +2306,7 @@ SeaStore::Shard::_do_transaction_step(
           op->op == Transaction::OP_SETATTRS ||
           op->op == Transaction::OP_RMATTR ||
           op->op == Transaction::OP_OMAP_SETKEYS ||
-          op->op == Transaction::OP_PUT_VECTOR ||
+          op->op == Transaction::OP_PUT_VECTOR_NODE ||
           op->op == Transaction::OP_OMAP_RMKEYS ||
           op->op == Transaction::OP_OMAP_RMKEYRANGE ||
           op->op == Transaction::OP_OMAP_SETHEADER) {
@@ -2215,6 +2355,13 @@ SeaStore::Shard::_rename(
   OnodeRef &onode,
   OnodeRef &d_onode)
 {
+  if (d_onode->has_vector_node() ||
+      (onode->has_vector_node() &&
+       !select_log_omap_root(*d_onode).is_null())) {
+    co_await tm_iertr::future<>(
+      crimson::ct_error::input_output_error::make());
+  }
+
   auto prefix = onode->get_clone_prefix();
   assert(prefix);
   prefix->set_pool(onode->get_hobj().get_logical_pool());
@@ -2238,6 +2385,11 @@ SeaStore::Shard::_rename(
   d_onode->update_object_info(*ctx.transaction, oi_bl);
   d_onode->update_snapset(*ctx.transaction, ss_bl);
   rename_onode_omap_metadata(*ctx.transaction, *onode, *d_onode);
+  if (onode->has_vector_node()) {
+    d_onode->update_vector_node_laddr(
+      *ctx.transaction, onode->get_vector_node_laddr());
+    onode->clear_vector_node_laddr(*ctx.transaction);
+  }
   co_await onode_manager->erase_onode(
     *ctx.transaction, onode
   ).handle_error_interruptible(
@@ -2247,14 +2399,46 @@ SeaStore::Shard::_rename(
 }
 
 SeaStore::Shard::tm_ret
+SeaStore::Shard::remove_vector_node(
+  Transaction &transaction,
+  Onode &onode)
+{
+  if (!onode.has_vector_node()) {
+    return tm_iertr::now();
+  }
+
+  return seastar::do_with(
+    VectorNodeManager(*transaction_manager),
+    [this, &transaction, &onode](auto &manager) {
+      return manager.read_vector_node(
+        transaction, onode.get_vector_node_laddr()
+      ).si_then([&transaction, &manager](auto root) {
+        return manager.remove_vector_tree(
+          transaction, std::move(root));
+      }).handle_error_interruptible(
+        crimson::ct_error::enoent::handle([] {
+          return tm_iertr::future<>(
+            crimson::ct_error::input_output_error::make());
+        }),
+        tm_iertr::pass_further{}
+      ).si_then([&transaction, &onode] {
+        onode.clear_vector_node_laddr(transaction);
+      });
+    });
+}
+
+SeaStore::Shard::tm_ret
 SeaStore::Shard::_remove(
   internal_context_t &ctx,
   OnodeRef &onode)
 {
-  return omaptree_clear_no_onode(
-    *ctx.transaction,
-    get_omap_root(omap_type_t::OMAP, *onode)
+  return remove_vector_node(
+    *ctx.transaction, *onode
   ).si_then([this, &ctx, &onode] {
+    return omaptree_clear_no_onode(
+      *ctx.transaction,
+      get_omap_root(omap_type_t::OMAP, *onode));
+  }).si_then([this, &ctx, &onode] {
     return omaptree_clear_no_onode(
       *ctx.transaction,
       get_omap_root(omap_type_t::XATTR, *onode));
@@ -2346,6 +2530,10 @@ SeaStore::Shard::_clone(
   Onode &onode,
   Onode &d_onode)
 {
+  if (onode.has_vector_node() || d_onode.has_vector_node()) {
+    return crimson::ct_error::input_output_error::make();
+  }
+
   return seastar::do_with(
     ObjectDataHandler(max_object_size),
     [this, &ctx, &onode, &d_onode](auto &objHandler)

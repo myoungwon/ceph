@@ -75,6 +75,26 @@ struct col_obj_ranges_t {
 
 class SeaStore final : public FuturizedStore {
 public:
+  bool supports_vector_nodes() const override final {
+    return true;
+  }
+
+  void enqueue_vector_put(
+    ceph::os::Transaction& transaction,
+    const coll_t& cid,
+    const ghobject_t& oid,
+    const ceph::os::vector_record_t& record,
+    bool use_vector_node) override final {
+    if (use_vector_node) {
+      ceph::bufferlist record_bl;
+      record.encode(record_bl);
+      transaction.put_vector_node(cid, oid, record_bl);
+    } else {
+      transaction.omap_setkeys(
+        cid, oid, ceph::os::make_vector_omap(record));
+    }
+  }
+
   class MDStore {
   public:
     using write_meta_ertr = base_ertr;
@@ -141,6 +161,13 @@ public:
       const ghobject_t& oid,
       const omap_keys_t& keys,
       uint32_t op_flags = 0) override final;
+
+    read_errorator::future<
+      std::optional<vector_store_query_result_t>> query_vectors(
+        CollectionRef c,
+        const ghobject_t& oid,
+        const ceph::rados::query_vectors_request_t& request,
+        uint32_t op_flags = 0) override final;
 
     read_errorator::future<omap_values_t> omap_get_vectors(
       CollectionRef c,
@@ -357,7 +384,8 @@ public:
       uint64_t len) const;
 
     using tm_iertr = base_iertr::extend<
-      crimson::ct_error::value_too_large>;
+      crimson::ct_error::value_too_large,
+      crimson::ct_error::enospc>;
     using tm_ret = tm_iertr::future<>;
     tm_ret _do_transaction_step(
       internal_context_t &ctx,
@@ -368,6 +396,9 @@ public:
     tm_ret _remove(
       internal_context_t &ctx,
       OnodeRef &onode);
+    tm_ret remove_vector_node(
+      Transaction& transaction,
+      Onode& onode);
     tm_ret _touch(
       internal_context_t &ctx,
       Onode &onode);

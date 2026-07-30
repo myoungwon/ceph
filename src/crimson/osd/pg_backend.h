@@ -460,6 +460,9 @@ protected:
   virtual seastar::future<> request_committed(
     const osd_reqid_t& reqid,
     const eversion_t& at_version) = 0;
+  virtual bool supports_vector_nodes() const {
+    return false;
+  }
   const shard_id_t& get_shard() const {
     return whoami.shard;
   }

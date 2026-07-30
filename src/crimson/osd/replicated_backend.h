@@ -40,6 +40,10 @@ public:
     std::string&& key) const final;
 
 private:
+  bool supports_vector_nodes() const final {
+    return store.f_store.supports_vector_nodes();
+  }
+
   ll_read_ierrorator::future<ceph::bufferlist>
   _read(const hobject_t& hoid,
         uint64_t object_size,
