@@ -45,6 +45,22 @@ struct omap_scan_state_t {
   std::map<std::string, ceph::bufferlist> contents;
 };
 
+struct vector_entry_view_t {
+  std::string_view entry_id;
+  std::string_view bucket_name;
+  std::string_view index_name;
+  std::string_view user_key;
+  std::string_view placement_key;
+  uint32_t data_type = 0;
+  uint32_t distance_metric = 0;
+  uint32_t dimension = 0;
+  bool has_data_type = false;
+  bool has_distance_metric = false;
+  bool has_dimension = false;
+  bool has_vector_reference = false;
+  const ceph::bufferlist* vector_data = nullptr;
+};
+
 struct query_filter_stats_t {
   uint64_t total_entries = 0;
   uint64_t incomplete_entries = 0;
@@ -305,7 +321,7 @@ inline int validate_query_request(const query_vectors_request_t& req,
 }
 
 inline bool probe_matches(const query_vectors_request_t& req,
-                          const omap_entry_t& entry)
+                          const vector_entry_view_t& entry)
 {
   if (req.probe_prefixes.empty()) {
     return true;
@@ -318,12 +334,13 @@ inline bool probe_matches(const query_vectors_request_t& req,
 }
 
 inline bool entry_matches_query(const query_vectors_request_t& req,
-                                const omap_entry_t& entry)
+                                const vector_entry_view_t& entry)
 {
   return !entry.bucket_name.empty() &&
     !entry.index_name.empty() &&
     !entry.user_key.empty() &&
-    !entry.content_key.empty() &&
+    entry.has_vector_reference &&
+    entry.vector_data != nullptr &&
     entry.has_data_type &&
     entry.has_distance_metric &&
     entry.has_dimension &&
@@ -536,127 +553,166 @@ inline void finalize_local_topk_results(
   }
 }
 
-inline int build_local_results(const query_vectors_request_t& req,
-                               const omap_scan_state_t& scan,
-                               query_vectors_result_t *result,
-                               query_filter_stats_t *stats = nullptr)
-{
-  if (result == nullptr) {
-    return -EINVAL;
-  }
-  result->entries.clear();
-  if (stats != nullptr) {
-    *stats = query_filter_stats_t();
-  }
-
-  int r = validate_query_request(req);
-  if (r < 0) {
-    return r;
-  }
-
-  std::vector<float> query_values;
-  r = copy_float32_values(
-      req.query_vector, req.dimension, &query_values);
-  if (r < 0) {
-    return r;
-  }
-  const double query_norm_squared = squared_l2_norm(query_values);
-
-  bool is_local_heapified = false;
-  for (const auto& [entry_id, entry] : scan.entries) {
-    (void)entry_id;
-    if (stats != nullptr) {
-      stats->total_entries++;
+class local_query_accumulator_t {
+public:
+  int prepare(const query_vectors_request_t& query)
+  {
+    int r = validate_query_request(query);
+    if (r < 0) {
+      return r;
     }
+
+    req = query;
+    r = copy_float32_values(
+        req.query_vector, req.dimension, &query_values);
+    if (r < 0) {
+      return r;
+    }
+    query_norm = squared_l2_norm(query_values);
+
+    entries.clear();
+    stats = query_filter_stats_t();
+    heapified = false;
+    prepared = true;
+    return 0;
+  }
+
+  int consume(const vector_entry_view_t& entry)
+  {
+    if (!prepared) {
+      return -EINVAL;
+    }
+    stats.total_entries++;
     if (entry.bucket_name.empty() ||
         entry.index_name.empty() ||
         entry.user_key.empty() ||
-        entry.content_key.empty() ||
+        !entry.has_vector_reference ||
         !entry.has_data_type ||
         !entry.has_distance_metric ||
         !entry.has_dimension) {
-      if (stats != nullptr) {
-        stats->incomplete_entries++;
-      }
-      continue;
+      stats.incomplete_entries++;
+      return 0;
     }
     if (entry.bucket_name != req.bucket_name) {
-      if (stats != nullptr) {
-        stats->bucket_mismatch++;
-      }
-      continue;
+      stats.bucket_mismatch++;
+      return 0;
     }
     if (entry.index_name != req.index_name) {
-      if (stats != nullptr) {
-        stats->index_mismatch++;
-      }
-      continue;
+      stats.index_mismatch++;
+      return 0;
     }
     if (entry.data_type != req.data_type) {
-      if (stats != nullptr) {
-        stats->data_type_mismatch++;
-      }
-      continue;
+      stats.data_type_mismatch++;
+      return 0;
     }
     if (entry.distance_metric != req.distance_metric) {
-      if (stats != nullptr) {
-        stats->distance_metric_mismatch++;
-      }
-      continue;
+      stats.distance_metric_mismatch++;
+      return 0;
     }
     if (entry.dimension != req.dimension) {
-      if (stats != nullptr) {
-        stats->dimension_mismatch++;
-      }
-      continue;
+      stats.dimension_mismatch++;
+      return 0;
     }
     if (!probe_matches(req, entry)) {
-      if (stats != nullptr) {
-        stats->probe_mismatch++;
-      }
-      continue;
+      stats.probe_mismatch++;
+      return 0;
     }
-    const auto content = scan.contents.find(entry.content_key);
-    if (content == scan.contents.end()) {
-      if (stats != nullptr) {
-        stats->missing_content++;
-      }
-      continue;
+    if (entry.vector_data == nullptr) {
+      stats.missing_content++;
+      return 0;
     }
 
     float distance = 0;
-    if (stats != nullptr) {
-      stats->distance_computations++;
-    }
-    r = compute_float32_distance(
-        req, query_values, query_norm_squared, content->second, &distance);
+    stats.distance_computations++;
+    int r = compute_float32_distance(
+        req, query_values, query_norm, *entry.vector_data, &distance);
     if (r < 0) {
-      if (stats != nullptr) {
-        stats->distance_error++;
-      }
-      continue;
+      stats.distance_error++;
+      return 0;
     }
-    if (stats != nullptr) {
-      stats->matched_entries++;
-    }
+    stats.matched_entries++;
 
     query_vectors_result_entry_t result_entry;
     result_entry.key = entry.user_key;
     result_entry.distance = distance;
     result_entry.entry_id = entry.entry_id;
     retain_local_topk_result(
-        &result->entries, result_entry, req.local_top_k, &is_local_heapified);
+        &entries, result_entry, req.local_top_k, &heapified);
+    return 0;
   }
 
-  if (stats != nullptr) {
-    stats->merged_entries = stats->matched_entries;
+  int finish(query_vectors_result_t *result,
+             query_filter_stats_t *out_stats = nullptr)
+  {
+    if (!prepared || result == nullptr) {
+      return -EINVAL;
+    }
+
+    stats.merged_entries = stats.matched_entries;
+    finalize_local_topk_results(&entries, req.local_top_k, heapified);
+    stats.final_entries = entries.size();
+    result->entries = entries;
+    if (out_stats != nullptr) {
+      *out_stats = stats;
+    }
+    return 0;
   }
-  finalize_local_topk_results(
-      &result->entries, req.local_top_k, is_local_heapified);
-  if (stats != nullptr) {
-    stats->final_entries = result->entries.size();
+
+private:
+  query_vectors_request_t req;
+  std::vector<float> query_values;
+  double query_norm = 0;
+  std::vector<query_vectors_result_entry_t> entries;
+  query_filter_stats_t stats;
+  bool heapified = false;
+  bool prepared = false;
+};
+
+inline vector_entry_view_t make_omap_entry_view(
+    const omap_entry_t& entry,
+    const omap_scan_state_t& scan)
+{
+  vector_entry_view_t view;
+  view.entry_id = entry.entry_id;
+  view.bucket_name = entry.bucket_name;
+  view.index_name = entry.index_name;
+  view.user_key = entry.user_key;
+  view.placement_key = entry.placement_key;
+  view.data_type = entry.data_type;
+  view.distance_metric = entry.distance_metric;
+  view.dimension = entry.dimension;
+  view.has_data_type = entry.has_data_type;
+  view.has_distance_metric = entry.has_distance_metric;
+  view.has_dimension = entry.has_dimension;
+  view.has_vector_reference = !entry.content_key.empty();
+  if (view.has_vector_reference) {
+    const auto content = scan.contents.find(entry.content_key);
+    if (content != scan.contents.end()) {
+      view.vector_data = &content->second;
+    }
   }
-  return 0;
+  return view;
+}
+
+inline int build_local_results(const query_vectors_request_t& req,
+                               const omap_scan_state_t& scan,
+                               query_vectors_result_t *result,
+                               query_filter_stats_t *stats = nullptr)
+{
+  local_query_accumulator_t accumulator;
+  int r = accumulator.prepare(req);
+  if (r < 0) {
+    return r;
+  }
+
+  for (const auto& [entry_id, entry] : scan.entries) {
+    (void)entry_id;
+    r = accumulator.consume(make_omap_entry_view(entry, scan));
+    if (r < 0) {
+      return r;
+    }
+  }
+  return accumulator.finish(result, stats);
 }
 
 } // namespace vector_query_exec

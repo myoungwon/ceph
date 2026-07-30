@@ -502,6 +502,96 @@ TEST(VectorQueryExecutor, LocalTopKKeepsBoundedSortedResults) {
   EXPECT_EQ(2u, stats.final_entries);
 }
 
+TEST(VectorQueryExecutor, StorageNeutralAccumulatorMatchesOmap) {
+  float query[] = {0.0, 0.0};
+  float left[] = {-1.0, 0.0};
+  float right[] = {1.0, 0.0};
+  bufferlist query_bl;
+  bufferlist left_bl;
+  bufferlist right_bl;
+  query_bl.append(reinterpret_cast<const char *>(query), sizeof(query));
+  left_bl.append(reinterpret_cast<const char *>(left), sizeof(left));
+  right_bl.append(reinterpret_cast<const char *>(right), sizeof(right));
+
+  ceph::rados::query_vectors_request_t req;
+  req.bucket_name = "bucket";
+  req.index_name = "index";
+  req.data_type = LIBRADOS_VECTOR_DATA_TYPE_FLOAT32;
+  req.distance_metric = LIBRADOS_VECTOR_DISTANCE_METRIC_EUCLIDEAN;
+  req.dimension = 2;
+  req.local_top_k = 2;
+  req.query_vector = query_bl;
+  req.probe_prefixes.push_back("abcd");
+
+  ceph::rados::vector_query_exec::omap_scan_state_t scan;
+  auto add_omap_entry = [&](const string& entry_id,
+                            const string& key,
+                            const string& content_key,
+                            const bufferlist& vector) {
+    ceph::rados::vector_query_exec::omap_entry_t entry;
+    entry.entry_id = entry_id;
+    entry.bucket_name = req.bucket_name;
+    entry.index_name = req.index_name;
+    entry.user_key = key;
+    entry.content_key = content_key;
+    entry.placement_key = "abcd";
+    entry.data_type = req.data_type;
+    entry.distance_metric = req.distance_metric;
+    entry.dimension = req.dimension;
+    entry.has_data_type = true;
+    entry.has_distance_metric = true;
+    entry.has_dimension = true;
+    scan.entries[entry_id] = entry;
+    scan.contents[content_key] = vector;
+  };
+  add_omap_entry("entry-left", "left", "_CONTENT_left", left_bl);
+  add_omap_entry("entry-right", "right", "_CONTENT_right", right_bl);
+
+  ceph::rados::query_vectors_result_t omap_result;
+  ceph::rados::vector_query_exec::query_filter_stats_t omap_stats;
+  ASSERT_EQ(0, ceph::rados::vector_query_exec::build_local_results(
+      req, scan, &omap_result, &omap_stats));
+
+  ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+  ASSERT_EQ(0, accumulator.prepare(req));
+  for (const auto& [entry_id, entry] : scan.entries) {
+    const auto& vector = scan.contents.at(entry.content_key);
+    ceph::rados::vector_query_exec::vector_entry_view_t view;
+    view.entry_id = entry_id;
+    view.bucket_name = entry.bucket_name;
+    view.index_name = entry.index_name;
+    view.user_key = entry.user_key;
+    view.placement_key = entry.placement_key;
+    view.data_type = entry.data_type;
+    view.distance_metric = entry.distance_metric;
+    view.dimension = entry.dimension;
+    view.has_data_type = true;
+    view.has_distance_metric = true;
+    view.has_dimension = true;
+    view.has_vector_reference = true;
+    view.vector_data = &vector;
+    ASSERT_EQ(0, accumulator.consume(view));
+  }
+
+  ceph::rados::query_vectors_result_t vector_result;
+  ceph::rados::vector_query_exec::query_filter_stats_t vector_stats;
+  ASSERT_EQ(0, accumulator.finish(&vector_result, &vector_stats));
+
+  ASSERT_EQ(omap_result.entries.size(), vector_result.entries.size());
+  for (size_t i = 0; i < omap_result.entries.size(); ++i) {
+    EXPECT_EQ(omap_result.entries[i].key, vector_result.entries[i].key);
+    EXPECT_EQ(omap_result.entries[i].entry_id,
+              vector_result.entries[i].entry_id);
+    EXPECT_EQ(omap_result.entries[i].distance,
+              vector_result.entries[i].distance);
+  }
+  EXPECT_EQ(omap_stats.total_entries, vector_stats.total_entries);
+  EXPECT_EQ(omap_stats.matched_entries, vector_stats.matched_entries);
+  EXPECT_EQ(omap_stats.distance_computations,
+            vector_stats.distance_computations);
+  EXPECT_EQ(omap_stats.final_entries, vector_stats.final_entries);
+}
+
 TEST(VectorQueryPlanner, HashV0SeparatesBucketAndIndex) {
   float query[] = {1.0, 2.0, 3.0, 4.0};
   bufferlist query_bl;
