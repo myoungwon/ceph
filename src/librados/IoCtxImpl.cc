@@ -24,6 +24,7 @@
 #include "librados/PoolAsyncCompletionImpl.h"
 #include "librados/RadosClient.h"
 #include "librados/vector_placement.h"
+#include "librados/vector_put.h"
 #include "librados/vector_query_planner.h"
 #include "include/ceph_assert.h"
 #include "include/ceph_hash.h"
@@ -305,6 +306,14 @@ static_assert(LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE ==
               ceph::rados::vector_distance_metric_cosine);
 static_assert(LIBRADOS_VECTOR_DISTANCE_METRIC_DOT ==
               ceph::rados::vector_distance_metric_dot);
+
+struct AioCompletionReleaser {
+  void operator()(librados::v14_2_0::AioCompletion *completion) const {
+    if (completion != nullptr) {
+      completion->release();
+    }
+  }
+};
 
 } // anonymous namespace
 
@@ -746,10 +755,16 @@ int librados::IoCtxImpl::put_vector(const std::string& vector_bucket_name,
 
   req.placement_algorithm = plan.placement_algorithm;
 
-  for (const auto& target : plan.targets) {
-    ::ObjectOperation op;
-    prepare_assert_ops(&op);
+  struct PendingVectorPut {
+    librados::vector_internal::put_op_state_t op_state;
+    std::unique_ptr<AioCompletion, AioCompletionReleaser> completion;
+    int submit_ret = 0;
+    int complete_ret = 0;
+  };
 
+  std::vector<std::unique_ptr<PendingVectorPut>> pending_puts;
+  pending_puts.reserve(plan.targets.size());
+  for (const auto& target : plan.targets) {
     ldout(client->cct, 20) << "vector-debug put computed oid="
 				  << target.oid
 				  << " algorithm=" << req.placement_algorithm
@@ -763,19 +778,33 @@ int librados::IoCtxImpl::put_vector(const std::string& vector_bucket_name,
 			  << " vector_hash=" << target.vector_hash
 			  << dendl;
 
-    req.placement_key = target.placement_key;
-    req.vector_hash = target.vector_hash;
+    auto pending = std::make_unique<PendingVectorPut>();
+    pending->completion.reset(librados::Rados::aio_create_completion());
+    prepare_assert_ops(&pending->op_state.op);
+    pending->submit_ret = librados::vector_internal::submit_put(
+        this, target.oid, std::string(), plan.placement_algorithm,
+        target.placement_key, target.vector_hash, req, &pending->op_state,
+        pending->completion.get());
+    pending_puts.push_back(std::move(pending));
+  }
 
-    bufferlist payload;
-    encode(req, payload);
-    op.put_vector(payload);
-
-    r = operate(target.oid, &op, NULL);
-    if (r < 0) {
-      return r;
+  // Fanout is non-atomic: collect every submitted op before reporting the
+  // first target-order error.
+  for (auto& pending : pending_puts) {
+    if (pending->submit_ret == 0) {
+      pending->completion->wait_for_complete();
+      pending->complete_ret = pending->completion->get_return_value();
     }
   }
 
+  for (const auto& pending : pending_puts) {
+    if (pending->submit_ret < 0) {
+      return pending->submit_ret;
+    }
+    if (pending->complete_ret < 0) {
+      return pending->complete_ret;
+    }
+  }
   return 0;
 }
 

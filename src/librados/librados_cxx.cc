@@ -38,6 +38,7 @@
 #include "librados/ListObjectImpl.h"
 #include "librados/librados_util.h"
 #include "librados/vector_pg_lsh.h"
+#include "librados/vector_put.h"
 #include "cls/lock/cls_lock_client.h"
 
 #include <string>
@@ -91,6 +92,12 @@ static TracepointProvider::Traits tracepoint_traits("librados_tp.so", "rados_tra
  * |          RadosClient                 |
  * +--------------------------------------+
  */
+
+librados::IoCtxImpl *librados::vector_internal::IoCtxAccess::get(
+    librados::v14_2_0::IoCtx& ioctx)
+{
+  return ioctx.io_ctx_impl;
+}
 
 size_t librados::ObjectOperation::size()
 {
@@ -489,28 +496,81 @@ int librados::v14_2_0::vector_pg_lsh::put_vector(
     const librados::v14_2_0::vector_pg_lsh::put_target_t& target,
     ceph::rados::put_vector_request_t req)
 {
+  struct CompletionReleaser {
+    void operator()(librados::v14_2_0::AioCompletion *completion) const {
+      if (completion != nullptr) {
+        completion->release();
+      }
+    }
+  };
+
+  std::unique_ptr<librados::v14_2_0::AioCompletion, CompletionReleaser> completion(
+      librados::v14_2_0::Rados::aio_create_completion());
+  put_op_state_t op_state;
+  int ret = submit_put(ioctx, target, std::move(req), &op_state,
+                       completion.get());
+  if (ret == 0) {
+    completion->wait_for_complete();
+    ret = completion->get_return_value();
+  }
+  return ret;
+}
+
+int librados::vector_internal::submit_put(
+    librados::IoCtxImpl *ioctx_impl,
+    const object_t& oid,
+    const std::string& locator_key,
+    const std::string& placement_algorithm,
+    const std::string& placement_key,
+    const std::string& vector_hash,
+    ceph::rados::put_vector_request_t req,
+    librados::vector_internal::put_op_state_t *op_state,
+    librados::v14_2_0::AioCompletion *completion)
+{
+  if (op_state == nullptr || completion == nullptr ||
+      ioctx_impl == nullptr ||
+      placement_algorithm.empty() || placement_key.empty() ||
+      vector_hash.empty()) {
+    return -EINVAL;
+  }
+
+  req.placement_algorithm = placement_algorithm;
+  req.placement_key = placement_key;
+  req.vector_hash = vector_hash;
+
+  op_state->payload.clear();
+  encode(req, op_state->payload);
+  op_state->op.put_vector(op_state->payload);
+
+  op_state->routed_ioctx.reset(new IoCtxImpl());
+  op_state->routed_ioctx->get();
+  op_state->routed_ioctx->dup(*ioctx_impl);
+  if (!locator_key.empty()) {
+    op_state->routed_ioctx->oloc.key = locator_key;
+  }
+
+  return op_state->routed_ioctx->aio_operate(
+      oid, &op_state->op, completion->pc, op_state->routed_ioctx->snapc,
+      nullptr, 0);
+}
+
+int librados::v14_2_0::vector_pg_lsh::submit_put(
+    librados::v14_2_0::IoCtx& ioctx,
+    const librados::v14_2_0::vector_pg_lsh::put_target_t& target,
+    ceph::rados::put_vector_request_t req,
+    librados::v14_2_0::vector_pg_lsh::put_op_state_t *op_state,
+    librados::v14_2_0::AioCompletion *completion)
+{
   int ret = verify_probe_locator(ioctx, target.pg, target.locator_key);
   if (ret < 0) {
     return ret;
   }
 
-  req.placement_algorithm =
-    ceph::rados::vector_placement_algorithm_pg_lsh_v0;
-  req.placement_key = target.placement_key;
-  req.vector_hash = target.vector_hash;
-
-  bufferlist payload;
-  encode(req, payload);
-
-  ::ObjectOperation op;
-  op.put_vector(payload);
-
-  librados::v14_2_0::IoCtx routed_ioctx;
-  routed_ioctx.dup(ioctx);
-  routed_ioctx.locator_set_key(target.locator_key);
-
-  IoCtxImpl *impl = vector_internal::IoCtxAccess::get(routed_ioctx);
-  return impl->operate(target.oid, &op, nullptr);
+  return vector_internal::submit_put(
+      vector_internal::IoCtxAccess::get(ioctx), target.oid, target.locator_key,
+      ceph::rados::vector_placement_algorithm_pg_lsh_v0,
+      target.placement_key, target.vector_hash, std::move(req), op_state,
+      completion);
 }
 
 int librados::v14_2_0::vector_pg_lsh::submit_query(
@@ -532,8 +592,9 @@ int librados::v14_2_0::vector_pg_lsh::submit_query(
     return ret;
   }
 
+  // PG-LSH already selected the exact routing OID. Scan that object's entries
+  // without applying the placement-key prefix used by generic planners.
   req.probe_prefixes.clear();
-  req.local_top_k = std::numeric_limits<uint32_t>::max();
 
   op_state->payload.clear();
   encode(req, op_state->payload);
@@ -565,8 +626,9 @@ int librados::v14_2_0::vector_pg_lsh::query_sync(
     return ret;
   }
 
+  // PG-LSH already selected the exact routing OID. Scan that object's entries
+  // without applying the placement-key prefix used by generic planners.
   req.probe_prefixes.clear();
-  req.local_top_k = std::numeric_limits<uint32_t>::max();
 
   bufferlist payload;
   encode(req, payload);

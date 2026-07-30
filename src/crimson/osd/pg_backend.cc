@@ -1843,12 +1843,15 @@ PGBackend::query_vectors(
   }
 
   ceph::rados::query_vectors_result_t query_result;
+  ceph::rados::vector_query_exec::query_filter_stats_t filter_stats;
   r = ceph::rados::vector_query_exec::build_local_results(
-      req, scan, &query_result);
+      req, scan, &query_result, &filter_stats);
   if (r < 0) {
     throw crimson::osd::invalid_argument{};
   }
-
+  query_result.local_matching_entries = filter_stats.matched_entries;
+  query_result.local_distance_computations =
+    filter_stats.distance_computations;
   encode(query_result, osd_op.outdata);
   delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
   delta_stats.num_rd++;

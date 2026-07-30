@@ -342,15 +342,37 @@ inline float read_float32(const char *data, size_t index)
   return value;
 }
 
-inline void copy_bufferlist_bytes(const ceph::bufferlist& bl,
-                                  char *out,
-                                  size_t len)
+inline int copy_float32_values(const ceph::bufferlist& data,
+                               uint32_t dimension,
+                               std::vector<float> *out_values)
 {
-  auto p = bl.cbegin();
-  p.copy(len, out);
+  if (out_values == nullptr || dimension == 0) {
+    return -EINVAL;
+  }
+  const size_t expected_len =
+    static_cast<size_t>(dimension) * sizeof(float);
+  if (data.length() != expected_len) {
+    return -EINVAL;
+  }
+
+  out_values->resize(dimension);
+  auto p = data.cbegin();
+  p.copy(expected_len, reinterpret_cast<char*>(out_values->data()));
+  return 0;
+}
+
+inline double squared_l2_norm(const std::vector<float>& values)
+{
+  double norm_squared = 0;
+  for (const float value : values) {
+    norm_squared += static_cast<double>(value) * value;
+  }
+  return norm_squared;
 }
 
 inline int compute_float32_distance(const query_vectors_request_t& req,
+                                    const std::vector<float>& query_values,
+                                    double query_norm_squared,
                                     const ceph::bufferlist& candidate,
                                     float *distance)
 {
@@ -360,24 +382,21 @@ inline int compute_float32_distance(const query_vectors_request_t& req,
   const size_t expected_len =
     static_cast<size_t>(req.dimension) * sizeof(float);
   if (req.data_type != vector_data_type_float32 ||
-      req.query_vector.length() != expected_len ||
+      query_values.size() != req.dimension ||
       candidate.length() != expected_len) {
     return -EINVAL;
   }
 
-  std::vector<char> query_data(expected_len);
-  std::vector<char> candidate_data(expected_len);
-  copy_bufferlist_bytes(req.query_vector, query_data.data(), expected_len);
-  copy_bufferlist_bytes(candidate, candidate_data.data(), expected_len);
+  ceph::bufferlist candidate_copy = candidate;
+  const char *candidate_data = candidate_copy.c_str();
+
   double dot = 0;
-  double query_norm = 0;
   double candidate_norm = 0;
   double sum_sq = 0;
   for (uint32_t i = 0; i < req.dimension; ++i) {
-    const double q = read_float32(query_data.data(), i);
-    const double c = read_float32(candidate_data.data(), i);
+    const double q = query_values[i];
+    const double c = read_float32(candidate_data, i);
     dot += q * c;
-    query_norm += q * q;
     candidate_norm += c * c;
     const double diff = q - c;
     sum_sq += diff * diff;
@@ -388,11 +407,12 @@ inline int compute_float32_distance(const query_vectors_request_t& req,
     *distance = static_cast<float>(std::sqrt(sum_sq));
     return 0;
   case vector_distance_metric_cosine:
-    if (query_norm == 0 || candidate_norm == 0) {
+    if (query_norm_squared == 0 || candidate_norm == 0) {
       *distance = std::numeric_limits<float>::infinity();
     } else {
       *distance = static_cast<float>(
-          1.0 - dot / (std::sqrt(query_norm) * std::sqrt(candidate_norm)));
+          1.0 - dot /
+          (std::sqrt(query_norm_squared) * std::sqrt(candidate_norm)));
     }
     return 0;
   case vector_distance_metric_dot:
@@ -414,8 +434,8 @@ inline bool result_entry_valid(const query_vectors_result_entry_t& entry)
   return !entry.key.empty() && !entry.entry_id.empty();
 }
 
-inline bool result_entry_better(const query_vectors_result_entry_t& lhs,
-                                const query_vectors_result_entry_t& rhs)
+inline bool is_better_query_result(const query_vectors_result_entry_t& lhs,
+                                   const query_vectors_result_entry_t& rhs)
 {
   if (lhs.distance != rhs.distance) {
     return lhs.distance < rhs.distance;
@@ -423,37 +443,96 @@ inline bool result_entry_better(const query_vectors_result_entry_t& lhs,
   return lhs.key < rhs.key;
 }
 
-inline void merge_result_entry(std::vector<query_vectors_result_entry_t> *entries,
-                               const query_vectors_result_entry_t& candidate)
+inline void merge_result_entry(
+    std::vector<query_vectors_result_entry_t> *retained_results,
+    const query_vectors_result_entry_t& new_result)
 {
-  if (entries == nullptr) {
+  if (retained_results == nullptr) {
     return;
   }
-  const std::string& candidate_id = result_entry_identity(candidate);
-  if (candidate_id.empty()) {
-    entries->push_back(candidate);
+  const std::string& new_result_id = result_entry_identity(new_result);
+  if (new_result_id.empty()) {
+    retained_results->push_back(new_result);
     return;
   }
-  for (auto& entry : *entries) {
-    if (result_entry_identity(entry) == candidate_id) {
-      if (result_entry_better(candidate, entry)) {
-        entry = candidate;
+  for (auto& retained_result : *retained_results) {
+    if (result_entry_identity(retained_result) == new_result_id) {
+      if (is_better_query_result(new_result, retained_result)) {
+        retained_result = new_result;
       }
       return;
     }
   }
-  entries->push_back(candidate);
+  retained_results->push_back(new_result);
 }
 
-inline void sort_and_trim_results(std::vector<query_vectors_result_entry_t> *entries,
-                                  uint32_t top_k)
+inline void sort_and_trim_results(
+    std::vector<query_vectors_result_entry_t> *retained_results,
+    uint32_t top_k)
 {
-  if (entries == nullptr) {
+  if (retained_results == nullptr) {
     return;
   }
-  std::sort(entries->begin(), entries->end(), result_entry_better);
-  if (top_k != 0 && entries->size() > top_k) {
-    entries->resize(top_k);
+  std::sort(retained_results->begin(), retained_results->end(),
+            is_better_query_result);
+  if (top_k != 0 && retained_results->size() > top_k) {
+    retained_results->resize(top_k);
+  }
+}
+
+inline void retain_local_topk_result(
+    std::vector<query_vectors_result_entry_t> *retained_results,
+    const query_vectors_result_entry_t& new_result,
+    uint32_t top_k,
+    bool *is_heapified)
+{
+  if (retained_results == nullptr || is_heapified == nullptr) {
+    return;
+  }
+  if (top_k == 0) {
+    retained_results->push_back(new_result);
+    return;
+  }
+
+  const size_t limit = top_k;
+  if (retained_results->size() < limit) {
+    retained_results->push_back(new_result);
+    if (retained_results->size() == limit) {
+      std::make_heap(retained_results->begin(), retained_results->end(),
+                     is_better_query_result);
+      *is_heapified = true;
+    }
+    return;
+  }
+
+  // With the "better" comparator, the heap front is the worst retained
+  // result. Replace it only when the newly scanned result ranks better.
+  if (is_better_query_result(new_result, retained_results->front())) {
+    std::pop_heap(retained_results->begin(), retained_results->end(),
+                  is_better_query_result);
+    retained_results->back() = new_result;
+    std::push_heap(retained_results->begin(), retained_results->end(),
+                   is_better_query_result);
+  }
+}
+
+inline void finalize_local_topk_results(
+    std::vector<query_vectors_result_entry_t> *retained_results,
+    uint32_t top_k,
+    bool is_heapified)
+{
+  if (retained_results == nullptr) {
+    return;
+  }
+  if (is_heapified) {
+    std::sort_heap(retained_results->begin(), retained_results->end(),
+                   is_better_query_result);
+  } else {
+    std::sort(retained_results->begin(), retained_results->end(),
+              is_better_query_result);
+  }
+  if (top_k != 0 && retained_results->size() > top_k) {
+    retained_results->resize(top_k);
   }
 }
 
@@ -475,6 +554,15 @@ inline int build_local_results(const query_vectors_request_t& req,
     return r;
   }
 
+  std::vector<float> query_values;
+  r = copy_float32_values(
+      req.query_vector, req.dimension, &query_values);
+  if (r < 0) {
+    return r;
+  }
+  const double query_norm_squared = squared_l2_norm(query_values);
+
+  bool is_local_heapified = false;
   for (const auto& [entry_id, entry] : scan.entries) {
     (void)entry_id;
     if (stats != nullptr) {
@@ -540,7 +628,8 @@ inline int build_local_results(const query_vectors_request_t& req,
     if (stats != nullptr) {
       stats->distance_computations++;
     }
-    r = compute_float32_distance(req, content->second, &distance);
+    r = compute_float32_distance(
+        req, query_values, query_norm_squared, content->second, &distance);
     if (r < 0) {
       if (stats != nullptr) {
         stats->distance_error++;
@@ -555,13 +644,15 @@ inline int build_local_results(const query_vectors_request_t& req,
     result_entry.key = entry.user_key;
     result_entry.distance = distance;
     result_entry.entry_id = entry.entry_id;
-    merge_result_entry(&result->entries, result_entry);
+    retain_local_topk_result(
+        &result->entries, result_entry, req.local_top_k, &is_local_heapified);
   }
 
   if (stats != nullptr) {
-    stats->merged_entries = result->entries.size();
+    stats->merged_entries = stats->matched_entries;
   }
-  sort_and_trim_results(&result->entries, req.local_top_k);
+  finalize_local_topk_results(
+      &result->entries, req.local_top_k, is_local_heapified);
   if (stats != nullptr) {
     stats->final_entries = result->entries.size();
   }
