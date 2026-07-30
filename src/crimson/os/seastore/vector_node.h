@@ -3,9 +3,11 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
+#include "common/vector_record.h"
 #include "include/buffer.h"
 #include "include/ceph_assert.h"
 
@@ -14,20 +16,35 @@
 namespace crimson::os::seastore {
 
 static constexpr uint32_t VECTOR_NODE_FORMAT_VERSION = 1;
-// Upper bound for future resize/split support. PR1 allocates one
-// tm.get_block_size() extent and returns enospc when that extent is full.
 static constexpr extent_len_t VECTOR_NODE_MAX_BYTES = 64 << 10;
 
-struct vector_node_entry_t {
-  std::string entry_id;
-  ceph::bufferlist vector_data;
+enum class vector_node_kind_t : uint8_t {
+  ROOT = 1,
+  LEAF = 2,
+};
+
+using vector_node_entry_t = ceph::os::vector_record_t;
+
+struct vector_leaf_descriptor_t {
+  std::string first_entry_id;
+  std::string last_entry_id;
+  laddr_t laddr = L_ADDR_NULL;
+  uint32_t entry_count = 0;
+  uint32_t encoded_bytes = 0;
 };
 
 struct vector_node_t {
   uint32_t format_version = VECTOR_NODE_FORMAT_VERSION;
-  uint32_t data_type = 0;
-  uint32_t dimension = 0;
+  vector_node_kind_t kind = vector_node_kind_t::ROOT;
+  uint64_t logical_entry_count = 0;
+  std::vector<vector_leaf_descriptor_t> leaves;
   std::vector<vector_node_entry_t> entries;
+};
+
+struct vector_scan_stats_t {
+  uint64_t logical_entries = 0;
+  uint64_t leaf_extents = 0;
+  uint64_t encoded_bytes = 0;
 };
 
 class VectorNode : public LogicalChildNode {
@@ -51,16 +68,21 @@ public:
   ceph::bufferlist get_delta() final;
   void clear_delta() final;
 
-  void initialize(uint32_t data_type, uint32_t dimension);
+  void initialize_root();
+  void initialize_leaf(std::vector<vector_node_entry_t> entries);
 
   const vector_node_t &get_contents() const {
     ceph_assert(decoded);
     return contents;
   }
 
+  size_t get_encoded_length() const;
+
   static ceph::bufferlist encode_contents(const vector_node_t &node);
   static vector_node_t decode_contents(const ceph::bufferlist &bl);
   static bool is_sorted(const std::vector<vector_node_entry_t> &entries);
+  static bool is_sorted(
+    const std::vector<vector_leaf_descriptor_t> &leaves);
 
 private:
   vector_node_t contents;
@@ -79,14 +101,17 @@ using VectorNodeRef = VectorNode::Ref;
 
 class VectorNodeManager {
 public:
-  explicit VectorNodeManager(TransactionManager &tm) : tm(tm) {}
+  using scan_visitor_t =
+    std::function<void(const vector_node_entry_t&)>;
+
+  explicit VectorNodeManager(
+    TransactionManager &tm,
+    extent_len_t node_bytes = VECTOR_NODE_MAX_BYTES)
+    : tm(tm), node_bytes(node_bytes) {}
 
   using create_iertr = TransactionManager::alloc_extent_iertr;
   using create_ret = create_iertr::future<VectorNodeRef>;
-  create_ret create_vector_node(
-    Transaction &t,
-    uint32_t data_type,
-    uint32_t dimension);
+  create_ret create_vector_root(Transaction &t);
 
   using read_iertr = TransactionManager::read_extent_iertr;
   using read_ret = read_iertr::future<VectorNodeRef>;
@@ -94,24 +119,38 @@ public:
     Transaction &t,
     laddr_t addr);
 
-  using mutate_iertr = TransactionManager::alloc_extent_iertr;
+  using mutate_iertr = TransactionManager::alloc_extent_iertr::extend<
+    crimson::ct_error::enoent>;
   using upsert_ret = mutate_iertr::future<VectorNodeRef>;
   upsert_ret upsert_vector_entry(
     Transaction &t,
-    VectorNodeRef node,
-    const std::string &entry_id,
-    const ceph::bufferlist &vector_data);
+    VectorNodeRef root,
+    const vector_node_entry_t &entry);
 
-  using remove_ret = mutate_iertr::future<std::pair<VectorNodeRef, bool>>;
-  remove_ret remove_vector_entry(
+  using scan_ret = read_iertr::future<vector_scan_stats_t>;
+  scan_ret scan_vector_entries(
     Transaction &t,
-    VectorNodeRef node,
-    const std::string &entry_id);
+    VectorNodeRef root,
+    scan_visitor_t visitor);
+
+  using remove_iertr = TransactionManager::ref_iertr;
+  using remove_ret = remove_iertr::future<>;
+  remove_ret remove_vector_tree(
+    Transaction &t,
+    VectorNodeRef root);
 
 private:
   TransactionManager &tm;
+  extent_len_t node_bytes;
 
   bool is_valid_extent_size(extent_len_t length) const;
+  create_ret create_vector_leaf(
+    Transaction &t,
+    std::vector<vector_node_entry_t> entries);
+  upsert_ret replace_contents(
+    Transaction &t,
+    VectorNodeRef node,
+    vector_node_t contents);
 };
 
 } // namespace crimson::os::seastore

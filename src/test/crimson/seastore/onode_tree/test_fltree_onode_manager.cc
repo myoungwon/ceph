@@ -30,6 +30,26 @@ namespace {
     return bl;
   }
 
+  vector_node_entry_t make_vector_entry(
+      std::string entry_id,
+      const std::string &payload) {
+    vector_node_entry_t entry;
+    entry.entry_id = std::move(entry_id);
+    entry.bucket_name = "bucket";
+    entry.index_name = "index";
+    entry.user_key = "key";
+    entry.data_type = ceph::rados::vector_data_type_float32;
+    entry.distance_metric =
+      ceph::rados::vector_distance_metric_euclidean;
+    entry.dimension = payload.size() / sizeof(float);
+    entry.placement_algorithm =
+      ceph::rados::vector_placement_algorithm_hash_v0;
+    entry.placement_key = "abcd";
+    entry.vector_hash = "01234567";
+    entry.vector_data = make_vector_payload(payload);
+    return entry;
+  }
+
   void expect_vector_entries(
       const vector_node_t &node,
       std::initializer_list<std::pair<std::string, std::string>> entries) {
@@ -304,12 +324,13 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
       EXPECT_FALSE(onode->has_vector_node());
 
       auto node = with_trans_intr(*t, [&](auto &trans) {
-        return vector_manager.create_vector_node(trans, 1, 4);
+        return vector_manager.create_vector_root(trans);
       }).unsafe_get();
       vector_addr = node->get_laddr();
       node = with_trans_intr(*t, [&](auto &trans) {
         return vector_manager.upsert_vector_entry(
-          trans, std::move(node), "vec-a", make_vector_payload("aaaa"));
+          trans, std::move(node),
+          make_vector_entry("0000000a", "aaaa"));
       }).unsafe_get();
       ASSERT_NE(L_ADDR_NULL, vector_addr);
       onode->update_vector_node_laddr(*t, vector_addr);
@@ -328,10 +349,21 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
         return manager->get_onode(trans, src_key);
       }).unsafe_get();
       EXPECT_EQ(vector_addr, onode->get_vector_node_laddr());
-      auto node = with_trans_intr(*t, [&](auto &trans) {
-        return vector_manager.read_vector_node(trans, vector_addr);
+      std::vector<vector_node_entry_t> entries;
+      auto stats = with_trans_intr(*t, [&](auto &trans) {
+        return vector_manager.read_vector_node(trans, vector_addr
+        ).si_then([&](auto root) {
+          return vector_manager.scan_vector_entries(
+            trans, std::move(root), [&](const auto &entry) {
+              entries.push_back(entry);
+            });
+        });
       }).unsafe_get();
-      expect_vector_entries(node->get_contents(), {{"vec-a", "aaaa"}});
+      EXPECT_EQ(1u, stats.logical_entries);
+      vector_node_t leaf;
+      leaf.kind = vector_node_kind_t::LEAF;
+      leaf.entries = std::move(entries);
+      expect_vector_entries(leaf, {{"0000000a", "aaaa"}});
     }
 
     restart();
@@ -343,10 +375,21 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
         return manager->get_onode(trans, src_key);
       }).unsafe_get();
       EXPECT_EQ(vector_addr, onode->get_vector_node_laddr());
-      auto node = with_trans_intr(*t, [&](auto &trans) {
-        return vector_manager.read_vector_node(trans, vector_addr);
+      std::vector<vector_node_entry_t> entries;
+      auto stats = with_trans_intr(*t, [&](auto &trans) {
+        return vector_manager.read_vector_node(trans, vector_addr
+        ).si_then([&](auto root) {
+          return vector_manager.scan_vector_entries(
+            trans, std::move(root), [&](const auto &entry) {
+              entries.push_back(entry);
+            });
+        });
       }).unsafe_get();
-      expect_vector_entries(node->get_contents(), {{"vec-a", "aaaa"}});
+      EXPECT_EQ(1u, stats.logical_entries);
+      vector_node_t leaf;
+      leaf.kind = vector_node_kind_t::LEAF;
+      leaf.entries = std::move(entries);
+      expect_vector_entries(leaf, {{"0000000a", "aaaa"}});
     }
 
     {
@@ -396,19 +439,13 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
       auto onode = with_trans_intr(*t, [&](auto &trans) {
         return manager->get_onode(trans, dst_key);
       }).unsafe_get();
-      auto ret = with_trans_intr(*t, [&](auto &trans) {
+      with_trans_intr(*t, [&](auto &trans) {
         return vector_manager.read_vector_node(trans, vector_addr
-        ).si_then([&](auto node) {
-          return vector_manager.remove_vector_entry(
-            trans, std::move(node), "vec-a");
+        ).si_then([&](auto root) {
+          return vector_manager.remove_vector_tree(
+            trans, std::move(root));
         });
       }).unsafe_get();
-      EXPECT_TRUE(ret.second);
-      EXPECT_TRUE(ret.first->get_contents().entries.empty());
-      auto refcnt = with_trans_intr(*t, [&](auto &trans) {
-        return tm->remove(trans, ret.first->cast<LogicalChildNode>());
-      }).unsafe_get();
-      EXPECT_EQ(0u, refcnt);
       onode->clear_vector_node_laddr(*t);
       EXPECT_FALSE(onode->has_vector_node());
       submit_transaction(std::move(t));

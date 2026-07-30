@@ -1,6 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
 // vim: ts=8 sw=2 sts=2 expandtab
 
+#include <cstdio>
 #include <random>
 
 #include <boost/iterator/counting_iterator.hpp>
@@ -30,6 +31,28 @@ namespace {
     ceph::bufferlist bl;
     bl.append(payload.data(), payload.size());
     return bl;
+  }
+
+  vector_node_entry_t make_vector_entry(
+    std::string entry_id,
+    std::string payload = "aaaa",
+    std::string metadata = {}) {
+    vector_node_entry_t entry;
+    entry.entry_id = std::move(entry_id);
+    entry.bucket_name = "bucket";
+    entry.index_name = "index";
+    entry.user_key = "key-" + entry.entry_id;
+    entry.data_type = ceph::rados::vector_data_type_float32;
+    entry.distance_metric =
+      ceph::rados::vector_distance_metric_euclidean;
+    entry.dimension = payload.size() / sizeof(float);
+    entry.placement_algorithm =
+      ceph::rados::vector_placement_algorithm_hash_v0;
+    entry.placement_key = "abcd";
+    entry.vector_hash = "01234567";
+    entry.metadata = make_vector_payload(metadata);
+    entry.vector_data = make_vector_payload(payload);
+    return entry;
   }
 
   ceph::bufferlist get_extent_image(const VectorNodeRef &node) {
@@ -1990,6 +2013,68 @@ TEST_P(tm_single_device_test_t, mutate)
   });
 }
 
+TEST(vector_node_format_t, represents_40000_float32_vectors)
+{
+  auto entry = make_vector_entry(
+    "00000000", std::string(128 * sizeof(float), 'v'));
+  entry.user_key = "key-00000000";
+  ceph::bufferlist encoded_entry;
+  entry.encode(encoded_entry);
+
+  vector_node_t empty_leaf;
+  empty_leaf.kind = vector_node_kind_t::LEAF;
+  const auto leaf_header_bytes =
+    VectorNode::encode_contents(empty_leaf).length();
+  const size_t entries_per_leaf =
+    (VECTOR_NODE_MAX_BYTES - leaf_header_bytes) / encoded_entry.length();
+  ASSERT_GT(entries_per_leaf, 0u);
+
+  constexpr uint32_t entry_count = 40000;
+  const size_t leaf_count =
+    (entry_count + entries_per_leaf - 1) / entries_per_leaf;
+  vector_node_t root;
+  root.kind = vector_node_kind_t::ROOT;
+  root.logical_entry_count = entry_count;
+  for (size_t i = 0; i < leaf_count; ++i) {
+    const uint32_t first = i * entries_per_leaf;
+    const uint32_t count = std::min<size_t>(
+      entries_per_leaf, entry_count - first);
+    char first_id[9];
+    char last_id[9];
+    std::snprintf(first_id, sizeof(first_id), "%08x", first);
+    std::snprintf(
+      last_id, sizeof(last_id), "%08x", first + count - 1);
+    root.leaves.push_back(vector_leaf_descriptor_t{
+      first_id,
+      last_id,
+      laddr_t::from_byte_offset(
+        RootMetaBlock::SIZE + (i + 1) * laddr_t::UNIT_SIZE),
+      count,
+      static_cast<uint32_t>(
+        leaf_header_bytes + count * encoded_entry.length())
+    });
+  }
+
+  EXPECT_TRUE(VectorNode::is_sorted(root.leaves));
+  EXPECT_LE(
+    VectorNode::encode_contents(root).length(), VECTOR_NODE_MAX_BYTES);
+  EXPECT_GT(root.leaves.size(), 1u);
+}
+
+TEST(vector_node_format_t, rejects_malformed_record)
+{
+  vector_node_t leaf;
+  leaf.kind = vector_node_kind_t::LEAF;
+  leaf.logical_entry_count = 1;
+  leaf.entries.push_back(make_vector_entry("00000000", "aaaa"));
+  leaf.entries.front().dimension = ceph::rados::vector_max_dimension + 1;
+
+  const auto encoded = VectorNode::encode_contents(leaf);
+  EXPECT_THROW(
+    VectorNode::decode_contents(encoded),
+    ceph::buffer::malformed_input);
+}
+
 TEST_P(tm_single_device_test_t, vector_node_crud)
 {
   run_async([this] {
@@ -1997,130 +2082,139 @@ TEST_P(tm_single_device_test_t, vector_node_crud)
     laddr_t addr = L_ADDR_NULL;
     {
       auto t = create_transaction();
-      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
-        return manager.create_vector_node(trans, 1, 4
-        ).si_then([&](auto node) {
-          addr = node->get_laddr();
+      auto root = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_vector_root(trans
+        ).si_then([&](auto root) {
+          addr = root->get_laddr();
           return manager.upsert_vector_entry(
-            trans, std::move(node), "vec-b", make_vector_payload("bbbb"));
-        }).si_then([&](auto node) {
+            trans, std::move(root),
+            make_vector_entry("0000000b", "bbbb"));
+        }).si_then([&](auto root) {
           return manager.upsert_vector_entry(
-            trans, std::move(node), "vec-a", make_vector_payload("aaaa"));
+            trans, std::move(root),
+            make_vector_entry("0000000a", "aaaa"));
         });
       }).unsafe_get();
       ASSERT_NE(L_ADDR_NULL, addr);
-      ASSERT_EQ(addr, node->get_laddr());
-      expect_vector_entries(
-        node->get_contents(),
-        {{"vec-a", "aaaa"}, {"vec-b", "bbbb"}});
+      ASSERT_EQ(addr, root->get_laddr());
+      EXPECT_EQ(vector_node_kind_t::ROOT, root->get_contents().kind);
+      EXPECT_EQ(2u, root->get_contents().logical_entry_count);
+      EXPECT_EQ(1u, root->get_contents().leaves.size());
       submit_transaction(std::move(t));
     }
     {
       auto t = create_read_test_transaction();
-      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
-        return manager.read_vector_node(trans, addr);
+      std::vector<std::pair<std::string, ceph::bufferlist>> entries;
+      auto stats = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, addr
+        ).si_then([&](auto root) {
+          return manager.scan_vector_entries(
+            trans, std::move(root), [&](const auto &entry) {
+              entries.emplace_back(entry.entry_id, entry.vector_data);
+            });
+          });
       }).unsafe_get();
-      ASSERT_EQ(addr, node->get_laddr());
-      EXPECT_EQ(1u, node->get_contents().data_type);
-      EXPECT_EQ(4u, node->get_contents().dimension);
-      expect_vector_entries(
-        node->get_contents(),
-        {{"vec-a", "aaaa"}, {"vec-b", "bbbb"}});
+      ASSERT_EQ(2u, entries.size());
+      EXPECT_EQ("0000000a", entries[0].first);
+      EXPECT_EQ("0000000b", entries[1].first);
+      EXPECT_TRUE(entries[0].second.contents_equal(
+          make_vector_payload("aaaa")));
+      EXPECT_TRUE(entries[1].second.contents_equal(
+          make_vector_payload("bbbb")));
+      EXPECT_EQ(2u, stats.logical_entries);
+      EXPECT_EQ(1u, stats.leaf_extents);
     }
     {
       auto t = create_transaction();
-      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
+      auto root = with_trans_intr(*(t.t), [&](auto &trans) {
         return manager.read_vector_node(trans, addr
-        ).si_then([&](auto node) {
+        ).si_then([&](auto root) {
           return manager.upsert_vector_entry(
-            trans, std::move(node), "vec-a", make_vector_payload("zzzz"));
+            trans, std::move(root),
+            make_vector_entry("0000000a", "zzzz"));
         });
       }).unsafe_get();
-      expect_vector_entries(
-        node->get_contents(),
-        {{"vec-a", "zzzz"}, {"vec-b", "bbbb"}});
+      EXPECT_EQ(2u, root->get_contents().logical_entry_count);
       submit_transaction(std::move(t));
     }
     {
-      auto t = create_transaction();
-      auto ret = with_trans_intr(*(t.t), [&](auto &trans) {
+      auto t = create_read_test_transaction();
+      std::vector<vector_node_entry_t> entries;
+      auto stats = with_trans_intr(*(t.t), [&](auto &trans) {
         return manager.read_vector_node(trans, addr
-        ).si_then([&](auto node) {
-          return manager.remove_vector_entry(
-            trans, std::move(node), "vec-a");
+        ).si_then([&](auto root) {
+          return manager.scan_vector_entries(
+            trans, std::move(root), [&](const auto &entry) {
+              entries.push_back(entry);
+            });
         });
       }).unsafe_get();
-      EXPECT_TRUE(ret.second);
-      expect_vector_entries(ret.first->get_contents(), {{"vec-b", "bbbb"}});
-      submit_transaction(std::move(t));
-    }
-    {
-      auto t = create_transaction();
-      auto ret = with_trans_intr(*(t.t), [&](auto &trans) {
-        return manager.read_vector_node(trans, addr
-        ).si_then([&](auto node) {
-          return manager.remove_vector_entry(
-            trans, std::move(node), "missing");
-        });
-      }).unsafe_get();
-      EXPECT_FALSE(ret.second);
-      expect_vector_entries(ret.first->get_contents(), {{"vec-b", "bbbb"}});
+      ASSERT_EQ(2u, entries.size());
+      EXPECT_TRUE(entries[0].vector_data.contents_equal(
+          make_vector_payload("zzzz")));
+      EXPECT_EQ(2u, stats.logical_entries);
     }
   });
 }
 
-TEST_P(tm_single_device_test_t, vector_node_capacity_limit)
+TEST_P(tm_single_device_test_t, vector_node_split_and_replay)
 {
   run_async([this] {
-    VectorNodeManager manager(*tm);
     laddr_t addr = L_ADDR_NULL;
     {
+      VectorNodeManager manager(*tm, tm->get_block_size());
       auto t = create_transaction();
-      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
-        return manager.create_vector_node(trans, 1, 4
-        ).si_then([&](auto node) {
-          addr = node->get_laddr();
-          return manager.upsert_vector_entry(
-            trans, std::move(node), "vec-a", make_vector_payload("aaaa"));
-        });
+      auto root = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_vector_root(trans);
       }).unsafe_get();
-      ASSERT_EQ(tm->get_block_size(), node->get_length());
+      addr = root->get_laddr();
+      for (uint32_t i = 0; i < 24; ++i) {
+        char id[9];
+        std::snprintf(id, sizeof(id), "%08x", i);
+        root = with_trans_intr(*(t.t), [&](auto &trans) {
+          return manager.upsert_vector_entry(
+            trans, std::move(root),
+            make_vector_entry(id, "aaaa", std::string(700, 'm')));
+        }).unsafe_get();
+      }
+      EXPECT_EQ(24u, root->get_contents().logical_entry_count);
+      EXPECT_GE(root->get_contents().leaves.size(), 3u);
+      EXPECT_TRUE(VectorNode::is_sorted(root->get_contents().leaves));
       submit_transaction(std::move(t));
     }
+    replay();
+    VectorNodeManager manager(*tm, tm->get_block_size());
     {
       auto t = create_transaction();
-      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
-        return manager.read_vector_node(trans, addr);
+      auto root = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, addr
+        ).si_then([&](auto root) {
+          return manager.upsert_vector_entry(
+            trans, std::move(root),
+            make_vector_entry(
+              "00000018", "aaaa", std::string(700, 'm')));
+        });
       }).unsafe_get();
-      const auto before_image = get_extent_image(node);
-      expect_vector_entries(node->get_contents(), {{"vec-a", "aaaa"}});
-
-      std::string oversized(tm->get_block_size(), 'x');
-      using ertr = with_trans_ertr<VectorNodeManager::mutate_iertr>;
-      bool got_enospc = with_trans_intr(*(t.t), [&](auto &trans) {
-        return manager.upsert_vector_entry(
-          trans, node, "oversized", make_vector_payload(oversized));
-      }).safe_then([](auto) -> ertr::future<bool> {
-        return ertr::make_ready_future<bool>(false);
-      }).handle_error(
-        crimson::ct_error::enospc::handle([] {
-          return seastar::make_ready_future<bool>(true);
-        }),
-        crimson::ct_error::assert_all{
-          "vector_node_capacity_limit got invalid error"
-        }
-      ).get();
-
-      EXPECT_TRUE(got_enospc);
-      expect_vector_entries(node->get_contents(), {{"vec-a", "aaaa"}});
-      EXPECT_TRUE(get_extent_image(node).contents_equal(before_image));
+      EXPECT_EQ(25u, root->get_contents().logical_entry_count);
     }
     {
       auto t = create_read_test_transaction();
-      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
-        return manager.read_vector_node(trans, addr);
+      std::vector<std::string> ids;
+      auto stats = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, addr
+        ).si_then([&](auto root) {
+          EXPECT_GE(root->get_contents().leaves.size(), 3u);
+          EXPECT_TRUE(VectorNode::is_sorted(root->get_contents().leaves));
+          return manager.scan_vector_entries(
+            trans, std::move(root), [&](const auto &entry) {
+              ids.push_back(entry.entry_id);
+            });
+        });
       }).unsafe_get();
-      expect_vector_entries(node->get_contents(), {{"vec-a", "aaaa"}});
+      EXPECT_EQ(24u, ids.size());
+      EXPECT_TRUE(std::is_sorted(ids.begin(), ids.end()));
+      EXPECT_EQ(24u, stats.logical_entries);
+      EXPECT_GE(stats.leaf_extents, 3u);
     }
   });
 }
@@ -2129,26 +2223,28 @@ TEST_P(tm_single_device_test_t, vector_node_delta_replay_image)
 {
   run_async([this] {
     VectorNodeManager manager(*tm);
-    laddr_t addr = L_ADDR_NULL;
+    laddr_t leaf_addr = L_ADDR_NULL;
     {
       auto t = create_transaction();
-      auto node = with_trans_intr(*(t.t), [&](auto &trans) {
-        return manager.create_vector_node(trans, 7, 2
-        ).si_then([&](auto node) {
-          addr = node->get_laddr();
+      auto root = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_vector_root(trans
+        ).si_then([&](auto root) {
           return manager.upsert_vector_entry(
-            trans, std::move(node), "vec-a", make_vector_payload("aabb"));
-        }).si_then([&](auto node) {
+            trans, std::move(root),
+            make_vector_entry("0000000a", "aabb"));
+        }).si_then([&](auto root) {
           return manager.upsert_vector_entry(
-            trans, std::move(node), "vec-b", make_vector_payload("ccdd"));
+            trans, std::move(root),
+            make_vector_entry("0000000b", "ccdd"));
         });
       }).unsafe_get();
+      leaf_addr = root->get_contents().leaves.front().laddr;
       submit_transaction(std::move(t));
     }
 
     auto t = create_read_test_transaction();
     auto node = with_trans_intr(*(t.t), [&](auto &trans) {
-      return manager.read_vector_node(trans, addr);
+      return manager.read_vector_node(trans, leaf_addr);
     }).unsafe_get();
     auto delta = node->get_delta();
     auto image = get_extent_image(node);
@@ -2159,11 +2255,10 @@ TEST_P(tm_single_device_test_t, vector_node_delta_replay_image)
     replayed->apply_delta_and_adjust_crc(P_ADDR_NULL, delta);
     EXPECT_EQ(node->calc_crc32c(), replayed->calc_crc32c());
     EXPECT_TRUE(get_extent_image(replayed).contents_equal(image));
-    EXPECT_EQ(7u, replayed->get_contents().data_type);
-    EXPECT_EQ(2u, replayed->get_contents().dimension);
+    EXPECT_EQ(vector_node_kind_t::LEAF, replayed->get_contents().kind);
     expect_vector_entries(
       replayed->get_contents(),
-      {{"vec-a", "aabb"}, {"vec-b", "ccdd"}});
+      {{"0000000a", "aabb"}, {"0000000b", "ccdd"}});
   });
 }
 
