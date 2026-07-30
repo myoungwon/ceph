@@ -6,7 +6,7 @@
 #include "common/vector_query_exec.h"
 
 #include <charconv>
-#include <optional>
+#include <chrono>
 #include <boost/range/adaptor/filtered.hpp>
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/algorithm/copy.hpp>
@@ -1716,21 +1716,25 @@ PGBackend::put_vector(
     throw crimson::osd::invalid_argument{};
   }
 
-  const bool vector_node =
+  if (os.oi.has_vector_node() && os.oi.is_omap()) {
+    throw crimson::osd::error(std::errc::io_error);
+  }
+
+  const bool use_vector_node =
     os.oi.has_vector_node() ||
-    (supports_vector_nodes() && !os.oi.is_omap());
+    (vector_nodes_enabled() && !os.exists);
   maybe_create_new_object(os, txn, delta_stats);
-  if (vector_node) {
+  if (use_vector_node) {
     os.oi.set_flag(object_info_t::FLAG_VECTOR_NODE);
   }
   store.f_store.enqueue_vector_put(
-    txn, coll->get_cid(), ghobject_t{os.oi.soid}, record, vector_node);
+    txn, coll->get_cid(), ghobject_t{os.oi.soid}, record, use_vector_node);
 
   ceph::bufferlist encoded_record;
   record.encode(encoded_record);
   delta_stats.num_wr++;
   delta_stats.num_wr_kb += shift_round_up(encoded_record.length(), 10);
-  if (!vector_node) {
+  if (!use_vector_node) {
     osd_op_params.clean_regions.mark_omap_dirty();
     if (!os.oi.is_omap()) {
       os.oi.set_flag(object_info_t::FLAG_OMAP);
@@ -1764,32 +1768,43 @@ PGBackend::query_vectors(
     throw crimson::osd::invalid_argument{};
   }
 
-  std::optional<crimson::os::vector_store_query_result_t> native_result;
-  if (os.exists && !os.oi.is_whiteout() &&
-      os.oi.has_vector_node()) {
-    native_result = co_await crimson::os::with_store<
-      &crimson::os::FuturizedStore::Shard::query_vectors>(
-      store, coll, ghobject_t{os.oi.soid}, req, 0
-    ).handle_error(
-      crimson::ct_error::enoent::handle([] {
-        return ll_read_errorator::make_ready_future<
-          std::optional<crimson::os::vector_store_query_result_t>>(
-            std::nullopt);
-      }),
-      ll_read_errorator::pass_further{});
+  if (os.oi.has_vector_node() && os.oi.is_omap()) {
+    throw crimson::osd::error(std::errc::io_error);
   }
 
   ceph::rados::query_vectors_result_t query_result;
-  ceph::rados::vector_query_exec::query_filter_stats_t filter_stats;
-  if (native_result) {
-    query_result = std::move(native_result->result);
+  if (os.exists && !os.oi.is_whiteout() &&
+      os.oi.has_vector_node()) {
+    auto native_result = co_await crimson::os::with_store<
+      &crimson::os::FuturizedStore::Shard::query_vectors>(
+      store, coll, ghobject_t{os.oi.soid}, req, 0);
+    if (!native_result) {
+      // FLAG_VECTOR_NODE selects exactly one storage format. A backend that
+      // cannot find that format is inconsistent; it must not fall back to
+      // an unrelated OMAP representation.
+      co_await ll_read_ierrorator::future<>(
+        crimson::ct_error::input_output_error::make());
+    }
+    ceph_assert(native_result);
+    query_result = std::move(*native_result);
   } else {
+    const bool measure =
+      logger().is_enabled(seastar::log_level::debug);
+    const auto begin = measure
+      ? std::chrono::steady_clock::now()
+      : std::chrono::steady_clock::time_point();
+    ceph::rados::vector_query_exec::query_filter_stats_t filter_stats;
+    uint64_t logical_kv_bytes = 0;
     ceph::rados::vector_query_exec::omap_scan_state_t scan;
     if (os.exists && !os.oi.is_whiteout() && os.oi.is_omap()) {
       ObjectStore::omap_iter_seek_t start_from =
         ObjectStore::omap_iter_seek_t::min_lower_bound();
       omap_iterate_cb_t callback =
-        [&scan](std::string_view key, std::string_view value) {
+        [&scan, &logical_kv_bytes, measure](
+            std::string_view key, std::string_view value) {
+          if (measure) {
+            logical_kv_bytes += key.size() + value.size();
+          }
           ceph::rados::vector_query_exec::consume_omap_key_value(
             key, value, scan);
           return ObjectStore::omap_iter_ret_t::NEXT;
@@ -1807,6 +1822,9 @@ PGBackend::query_vectors(
       );
     }
 
+    const auto query_exec_begin = measure
+      ? std::chrono::steady_clock::now()
+      : std::chrono::steady_clock::time_point();
     r = ceph::rados::vector_query_exec::build_local_results(
       req, scan, &query_result, &filter_stats);
     if (r < 0) {
@@ -1815,6 +1833,26 @@ PGBackend::query_vectors(
     query_result.local_matching_entries = filter_stats.matched_entries;
     query_result.local_distance_computations =
       filter_stats.distance_computations;
+    if (measure) {
+      const auto now = std::chrono::steady_clock::now();
+      const auto storage_path_ns = std::chrono::duration_cast<
+        std::chrono::nanoseconds>(query_exec_begin - begin).count();
+      const auto query_exec_ns = std::chrono::duration_cast<
+        std::chrono::nanoseconds>(now - query_exec_begin).count();
+      const auto total_ns = std::chrono::duration_cast<
+        std::chrono::nanoseconds>(now - begin).count();
+      logger().debug(
+        "query_vectors storage=omap logical_entries={} matched_entries={} "
+        "distance_computations={} leaf_extents=0 logical_kv_bytes={} "
+        "storage_path_ns={} query_exec_ns={} total_ns={}",
+        filter_stats.total_entries,
+        filter_stats.matched_entries,
+        filter_stats.distance_computations,
+        logical_kv_bytes,
+        storage_path_ns,
+        query_exec_ns,
+        total_ns);
+    }
   }
   encode(query_result, osd_op.outdata);
   delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);

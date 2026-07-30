@@ -4,6 +4,7 @@
 #include "crimson/os/seastore/vector_node.h"
 
 #include <algorithm>
+#include <chrono>
 #include <numeric>
 #include <optional>
 
@@ -576,7 +577,8 @@ VectorNodeManager::upsert_ret VectorNodeManager::upsert_vector_entry(
 VectorNodeManager::scan_ret VectorNodeManager::scan_vector_entries(
   Transaction &t,
   VectorNodeRef root,
-  scan_visitor_t visitor)
+  scan_visitor_t visitor,
+  bool measure_visitor)
 {
   if (!root ||
       root->get_contents().kind != vector_node_kind_t::ROOT) {
@@ -587,12 +589,14 @@ VectorNodeManager::scan_ret VectorNodeManager::scan_vector_entries(
     std::move(root),
     std::move(visitor),
     vector_scan_stats_t(),
-    [this, &t](auto &root, auto &visitor, auto &stats) {
+    [this, &t, measure_visitor](auto &root, auto &visitor, auto &stats) {
+      stats.extent_bytes_read = root->get_length();
       return trans_intr::do_for_each(
         root->get_contents().leaves,
-        [this, &t, &visitor, &stats](const auto &descriptor) {
+        [this, &t, &visitor, &stats, measure_visitor](
+            const auto &descriptor) {
           return read_vector_node(t, descriptor.laddr
-          ).si_then([&visitor, &stats, &descriptor](auto leaf)
+          ).si_then([&visitor, &stats, &descriptor, measure_visitor](auto leaf)
               -> read_iertr::future<> {
             const auto &contents = leaf->get_contents();
             if (contents.kind != vector_node_kind_t::LEAF ||
@@ -601,16 +605,23 @@ VectorNodeManager::scan_ret VectorNodeManager::scan_vector_entries(
                   descriptor.first_entry_id ||
                 contents.entries.back().entry_id !=
                   descriptor.last_entry_id ||
-                leaf->get_encoded_length() !=
-                  descriptor.encoded_bytes ||
+                descriptor.encoded_bytes > leaf->get_length() ||
                 contents.entries.size() != descriptor.entry_count) {
               return crimson::ct_error::input_output_error::make();
             }
             stats.leaf_extents++;
-            stats.encoded_bytes += leaf->get_encoded_length();
+            stats.extent_bytes_read += leaf->get_length();
+            const auto visitor_begin = measure_visitor
+              ? std::chrono::steady_clock::now()
+              : std::chrono::steady_clock::time_point();
             for (const auto &entry : contents.entries) {
               visitor(entry);
               stats.logical_entries++;
+            }
+            if (measure_visitor) {
+              stats.visitor_ns += std::chrono::duration_cast<
+                std::chrono::nanoseconds>(
+                  std::chrono::steady_clock::now() - visitor_begin).count();
             }
             return read_iertr::now();
           });

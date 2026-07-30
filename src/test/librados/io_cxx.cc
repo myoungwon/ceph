@@ -743,6 +743,54 @@ TEST(VectorQueryExecutor, OmapAndVectorRecordAdaptersMatchMalformedEntries) {
   EXPECT_EQ(0u, omap.stats.matched_entries);
 }
 
+TEST(VectorQueryExecutor, AccumulatorPrepareAndFinishAreOneShot) {
+  const auto metric = ceph::rados::vector_distance_metric_euclidean;
+  auto req = make_local_query(metric, 1);
+  auto record = make_query_record(
+    "00000001", "vector", 1.0, 0.0, metric);
+
+  ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+  ASSERT_EQ(0, accumulator.prepare(req));
+  ASSERT_EQ(0, accumulator.consume(
+      ceph::rados::vector_query_exec::make_vector_entry_view(record)));
+
+  auto invalid_req = req;
+  invalid_req.local_top_k = 0;
+  EXPECT_EQ(-EINVAL, accumulator.prepare(invalid_req));
+
+  ceph::rados::query_vectors_result_t result;
+  EXPECT_EQ(-EINVAL, accumulator.finish(&result));
+
+  ASSERT_EQ(0, accumulator.prepare(req));
+  ASSERT_EQ(0, accumulator.consume(
+      ceph::rados::vector_query_exec::make_vector_entry_view(record)));
+  ASSERT_EQ(0, accumulator.finish(&result));
+  ASSERT_EQ(1u, result.entries.size());
+  EXPECT_EQ("00000001", result.entries.front().entry_id);
+  EXPECT_EQ(-EINVAL, accumulator.finish(&result));
+}
+
+TEST(VectorQueryExecutor, AccumulatorRejectsEmptyEntryId) {
+  const auto metric = ceph::rados::vector_distance_metric_euclidean;
+  auto req = make_local_query(metric, 1);
+  auto record = make_query_record(
+    "00000001", "vector", 1.0, 0.0, metric);
+  record.entry_id.clear();
+
+  ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+  ASSERT_EQ(0, accumulator.prepare(req));
+  ASSERT_EQ(0, accumulator.consume(
+      ceph::rados::vector_query_exec::make_vector_entry_view(record)));
+
+  ceph::rados::query_vectors_result_t result;
+  ceph::rados::vector_query_exec::query_filter_stats_t stats;
+  ASSERT_EQ(0, accumulator.finish(&result, &stats));
+  EXPECT_TRUE(result.entries.empty());
+  EXPECT_EQ(1u, stats.total_entries);
+  EXPECT_EQ(1u, stats.incomplete_entries);
+  EXPECT_EQ(0u, stats.matched_entries);
+}
+
 TEST(VectorQueryPlanner, HashV0SeparatesBucketAndIndex) {
   float query[] = {1.0, 2.0, 3.0, 4.0};
   bufferlist query_bl;

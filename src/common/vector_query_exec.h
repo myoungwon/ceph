@@ -46,6 +46,8 @@ struct omap_scan_state_t {
   std::map<std::string, ceph::bufferlist> contents;
 };
 
+// Non-owning view. The backing strings and vector data must remain valid
+// until consume() returns.
 struct vector_entry_view_t {
   std::string_view entry_id;
   std::string_view bucket_name;
@@ -334,25 +336,6 @@ inline bool probe_matches(const query_vectors_request_t& req,
                    entry.placement_key) != req.probe_prefixes.end();
 }
 
-inline bool entry_matches_query(const query_vectors_request_t& req,
-                                const vector_entry_view_t& entry)
-{
-  return !entry.bucket_name.empty() &&
-    !entry.index_name.empty() &&
-    !entry.user_key.empty() &&
-    entry.has_vector_reference &&
-    entry.vector_data != nullptr &&
-    entry.has_data_type &&
-    entry.has_distance_metric &&
-    entry.has_dimension &&
-    entry.bucket_name == req.bucket_name &&
-    entry.index_name == req.index_name &&
-    entry.data_type == req.data_type &&
-    entry.distance_metric == req.distance_metric &&
-    entry.dimension == req.dimension &&
-    probe_matches(req, entry);
-}
-
 inline float read_float32(const char *data, size_t index)
 {
   float value = 0;
@@ -558,6 +541,13 @@ class local_query_accumulator_t {
 public:
   int prepare(const query_vectors_request_t& query)
   {
+    prepared = false;
+    heapified = false;
+    entries.clear();
+    stats = query_filter_stats_t();
+    query_values.clear();
+    query_norm = 0;
+
     int r = validate_query_request(query);
     if (r < 0) {
       return r;
@@ -571,9 +561,6 @@ public:
     }
     query_norm = squared_l2_norm(query_values);
 
-    entries.clear();
-    stats = query_filter_stats_t();
-    heapified = false;
     prepared = true;
     return 0;
   }
@@ -584,61 +571,14 @@ public:
       return -EINVAL;
     }
     stats.total_entries++;
-    if (entry.bucket_name.empty() ||
-        entry.index_name.empty() ||
-        entry.user_key.empty() ||
-        !entry.has_vector_reference ||
-        !entry.has_data_type ||
-        !entry.has_distance_metric ||
-        !entry.has_dimension) {
+    if (!has_required_fields(entry)) {
       stats.incomplete_entries++;
       return 0;
     }
-    if (entry.bucket_name != req.bucket_name) {
-      stats.bucket_mismatch++;
+    if (!matches_request(entry)) {
       return 0;
     }
-    if (entry.index_name != req.index_name) {
-      stats.index_mismatch++;
-      return 0;
-    }
-    if (entry.data_type != req.data_type) {
-      stats.data_type_mismatch++;
-      return 0;
-    }
-    if (entry.distance_metric != req.distance_metric) {
-      stats.distance_metric_mismatch++;
-      return 0;
-    }
-    if (entry.dimension != req.dimension) {
-      stats.dimension_mismatch++;
-      return 0;
-    }
-    if (!probe_matches(req, entry)) {
-      stats.probe_mismatch++;
-      return 0;
-    }
-    if (entry.vector_data == nullptr) {
-      stats.missing_content++;
-      return 0;
-    }
-
-    float distance = 0;
-    stats.distance_computations++;
-    int r = compute_float32_distance(
-        req, query_values, query_norm, *entry.vector_data, &distance);
-    if (r < 0) {
-      stats.distance_error++;
-      return 0;
-    }
-    stats.matched_entries++;
-
-    query_vectors_result_entry_t result_entry;
-    result_entry.key = entry.user_key;
-    result_entry.distance = distance;
-    result_entry.entry_id = entry.entry_id;
-    retain_local_topk_result(
-        &entries, result_entry, req.local_top_k, &heapified);
+    accumulate_result(entry);
     return 0;
   }
 
@@ -649,17 +589,88 @@ public:
       return -EINVAL;
     }
 
+    // VectorNode leaves and the OMAP adapter both expose at most one record
+    // per entry_id, so the post-merge count equals the matched count here.
     stats.merged_entries = stats.matched_entries;
     finalize_local_topk_results(&entries, req.local_top_k, heapified);
     stats.final_entries = entries.size();
-    result->entries = entries;
+    result->entries = std::move(entries);
     if (out_stats != nullptr) {
       *out_stats = stats;
     }
+    prepared = false;
     return 0;
   }
 
 private:
+  static bool has_required_fields(const vector_entry_view_t& entry)
+  {
+    return !entry.entry_id.empty() &&
+      !entry.bucket_name.empty() &&
+      !entry.index_name.empty() &&
+      !entry.user_key.empty() &&
+      entry.has_vector_reference &&
+      entry.has_data_type &&
+      entry.has_distance_metric &&
+      entry.has_dimension;
+  }
+
+  bool matches_request(const vector_entry_view_t& entry)
+  {
+    if (entry.bucket_name != req.bucket_name) {
+      stats.bucket_mismatch++;
+      return false;
+    }
+    if (entry.index_name != req.index_name) {
+      stats.index_mismatch++;
+      return false;
+    }
+    if (entry.data_type != req.data_type) {
+      stats.data_type_mismatch++;
+      return false;
+    }
+    if (entry.distance_metric != req.distance_metric) {
+      stats.distance_metric_mismatch++;
+      return false;
+    }
+    if (entry.dimension != req.dimension) {
+      stats.dimension_mismatch++;
+      return false;
+    }
+    if (!probe_matches(req, entry)) {
+      stats.probe_mismatch++;
+      return false;
+    }
+    return true;
+  }
+
+  void accumulate_result(const vector_entry_view_t& entry)
+  {
+    if (entry.vector_data == nullptr) {
+      stats.missing_content++;
+      return;
+    }
+
+    float distance = 0;
+    stats.distance_computations++;
+    int r = compute_float32_distance(
+        req, query_values, query_norm, *entry.vector_data, &distance);
+    if (r < 0) {
+      // prepare() has already validated the request and query state. The
+      // remaining failure is local to this record's vector payload.
+      stats.distance_error++;
+      return;
+    }
+    stats.matched_entries++;
+
+    query_vectors_result_entry_t result_entry;
+    result_entry.key = entry.user_key;
+    result_entry.distance = distance;
+    result_entry.entry_id = entry.entry_id;
+    retain_local_topk_result(
+        &entries, result_entry, req.local_top_k, &heapified);
+  }
+
   query_vectors_request_t req;
   std::vector<float> query_values;
   double query_norm = 0;

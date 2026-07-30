@@ -1164,6 +1164,8 @@ OpsExecuter::OpsExecuter(Ref<PG> _pg,
 {
   if (op_info.may_write() && should_clone(*obc, snapc)) {
     if (obc->obs.oi.has_vector_node()) {
+      // Cloning only the object metadata would leave the snapshot pointing at
+      // a VectorNode tree whose ownership and lifetime were not cloned.
       vector_node_clone_unsupported = true;
     } else {
       do_write_op([this](auto& backend, auto& os, auto& txn) {

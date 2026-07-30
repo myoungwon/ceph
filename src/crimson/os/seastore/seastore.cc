@@ -16,6 +16,7 @@
 
 #include "common/JSONFormatter.h"
 #include "common/safe_io.h"
+#include "common/vector_query_exec.h"
 #include "include/stringify.h"
 #include "os/Transaction.h"
 #include "osd/osd_types_fmt.h"
@@ -1535,76 +1536,122 @@ SeaStore::Shard::omap_get_vectors(
 }
 
 SeaStore::Shard::read_errorator::future<
-  std::optional<vector_store_query_result_t>>
+  std::optional<ceph::rados::query_vectors_result_t>>
 SeaStore::Shard::query_vectors(
   CollectionRef ch,
   const ghobject_t &oid,
   const ceph::rados::query_vectors_request_t &request,
   uint32_t op_flags)
 {
+  LOG_PREFIX(SeaStoreS::query_vectors);
   assert(store_active);
+  const bool measure =
+    LOCAL_LOGGER.is_enabled(seastar::log_level::debug);
+  const auto begin = measure
+    ? std::chrono::steady_clock::now()
+    : std::chrono::steady_clock::time_point();
   ++(shard_stats.read_num);
   ++(shard_stats.pending_read_num);
 
-  return repeat_with_onode<std::optional<vector_store_query_result_t>>(
+  return repeat_with_onode<
+    std::optional<ceph::rados::query_vectors_result_t>>(
     ch,
     oid,
     Transaction::src_t::READ,
     "query_vectors",
     op_type_t::OMAP_QUERY_VECTORS,
     op_flags,
-    [this, request](auto &transaction, auto &onode)
+    [this, request, begin, measure, FNAME](auto &transaction, auto &onode)
       -> base_iertr::future<
-        std::optional<vector_store_query_result_t>>
+        std::optional<ceph::rados::query_vectors_result_t>>
   {
     if (!onode.has_vector_node()) {
-      return base_iertr::make_ready_future<
-        std::optional<vector_store_query_result_t>>(std::nullopt);
+      return crimson::ct_error::input_output_error::make();
     }
     if (!select_log_omap_root(onode).is_null()) {
       return crimson::ct_error::input_output_error::make();
     }
 
     ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+    const auto prepare_begin = measure
+      ? std::chrono::steady_clock::now()
+      : std::chrono::steady_clock::time_point();
     if (accumulator.prepare(request) < 0) {
       return crimson::ct_error::input_output_error::make();
     }
+    const uint64_t prepare_ns = measure
+      ? static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - prepare_begin).count())
+      : 0;
 
     return seastar::do_with(
       VectorNodeManager(*transaction_manager),
       std::move(accumulator),
-      vector_store_query_result_t(),
-      [this, &transaction, &onode](
+      ceph::rados::query_vectors_result_t(),
+      [this, &transaction, &onode, begin, measure, prepare_ns, FNAME](
         auto &manager,
         auto &accumulator,
         auto &result)
     {
       return manager.read_vector_node(
         transaction, onode.get_vector_node_laddr()
-      ).si_then([&transaction, &manager, &accumulator](auto root) {
+      ).si_then([&transaction, &manager, &accumulator, measure](auto root) {
         return manager.scan_vector_entries(
           transaction, std::move(root),
           [&accumulator](const auto &entry) {
-            std::ignore = accumulator.consume(
+            const int r = accumulator.consume(
               ceph::rados::vector_query_exec::make_vector_entry_view(entry));
-          });
-      }).si_then([&accumulator, &result](auto)
+            ceph_assert(r == 0);
+          },
+          measure);
+      }).si_then([&accumulator, &result, begin, measure, prepare_ns, FNAME](
+          auto scan_stats)
           -> base_iertr::future<
-            std::optional<vector_store_query_result_t>> {
+            std::optional<ceph::rados::query_vectors_result_t>> {
+        const auto finish_begin = measure
+          ? std::chrono::steady_clock::now()
+          : std::chrono::steady_clock::time_point();
+        ceph::rados::vector_query_exec::query_filter_stats_t filter_stats;
         if (accumulator.finish(
-              &result.result, &result.filter_stats) < 0) {
+              &result, &filter_stats) < 0) {
           return crimson::ct_error::input_output_error::make();
         }
-        result.result.local_matching_entries =
-          result.filter_stats.matched_entries;
-        result.result.local_distance_computations =
-          result.filter_stats.distance_computations;
+        result.local_matching_entries = filter_stats.matched_entries;
+        result.local_distance_computations =
+          filter_stats.distance_computations;
+        if (measure) {
+          const auto now = std::chrono::steady_clock::now();
+          const uint64_t finish_ns = std::chrono::duration_cast<
+            std::chrono::nanoseconds>(now - finish_begin).count();
+          const uint64_t query_exec_ns =
+            prepare_ns + scan_stats.visitor_ns + finish_ns;
+          const uint64_t total_ns = std::chrono::duration_cast<
+            std::chrono::nanoseconds>(now - begin).count();
+          const uint64_t storage_path_ns = total_ns > query_exec_ns
+            ? total_ns - query_exec_ns
+            : 0;
+          DEBUG(
+            "storage=vector_node logical_entries={} matched_entries={} "
+            "distance_computations={} leaf_extents={} "
+            "extent_bytes_scanned={} storage_path_ns={} query_exec_ns={} "
+            "total_ns={}",
+            scan_stats.logical_entries,
+            filter_stats.matched_entries,
+            filter_stats.distance_computations,
+            scan_stats.leaf_extents,
+            scan_stats.extent_bytes_scanned,
+            storage_path_ns,
+            query_exec_ns,
+            total_ns);
+        }
         return base_iertr::make_ready_future<
-          std::optional<vector_store_query_result_t>>(result);
+          std::optional<ceph::rados::query_vectors_result_t>>(
+            std::move(result));
       }).handle_error_interruptible(
         crimson::ct_error::enoent::handle([] {
           return base_iertr::future<
-            std::optional<vector_store_query_result_t>>(
+            std::optional<ceph::rados::query_vectors_result_t>>(
               crimson::ct_error::input_output_error::make());
         }),
         base_iertr::pass_further{});
@@ -2410,6 +2457,8 @@ SeaStore::Shard::_remove(
   internal_context_t &ctx,
   OnodeRef &onode)
 {
+  // The VectorNode extents and ONode laddr are removed in this transaction.
+  // object_info_t, including FLAG_VECTOR_NODE, disappears with the object.
   return remove_vector_node(
     *ctx.transaction, *onode
   ).si_then([this, &ctx, &onode] {

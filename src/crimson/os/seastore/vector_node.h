@@ -44,7 +44,8 @@ struct vector_node_t {
 struct vector_scan_stats_t {
   uint64_t logical_entries = 0;
   uint64_t leaf_extents = 0;
-  uint64_t encoded_bytes = 0;
+  uint64_t extent_bytes_read = 0;
+  uint64_t visitor_ns = 0;
 };
 
 class VectorNode : public LogicalChildNode {
@@ -131,7 +132,8 @@ public:
   scan_ret scan_vector_entries(
     Transaction &t,
     VectorNodeRef root,
-    scan_visitor_t visitor);
+    scan_visitor_t visitor,
+    bool measure_visitor = false);
 
   using remove_iertr = TransactionManager::ref_iertr;
   using remove_ret = remove_iertr::future<>;

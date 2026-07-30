@@ -156,7 +156,6 @@ public:
 #ifdef WITH_CRIMSON
     OP_TOUCH_TEMP = 44, // cid, temp_oid, target_oid
 #endif
-    OP_PUT_VECTOR = 45, // vector OMAP attrset
     OP_PUT_VECTOR_NODE = 46, // opaque native VectorNode record
   };
 
@@ -431,7 +430,6 @@ public:
     case OP_COLL_REMOVE:
     case OP_OMAP_CLEAR:
     case OP_OMAP_SETKEYS:
-    case OP_PUT_VECTOR:
     case OP_PUT_VECTOR_NODE:
     case OP_OMAP_RMKEYS:
     case OP_OMAP_RMKEYRANGE:
@@ -1191,35 +1189,6 @@ public:
     ) {
     Op* _op = _get_next_op();
     _op->op = OP_OMAP_SETKEYS;
-    _op->cid = _get_coll_id(cid);
-    _op->oid = _get_object_id(oid);
-    data_misaligned_bl.append(attrset_bl);
-    data.ops = data.ops + 1;
-  }
-
-  /// Put vector keys on oid omap.
-  void put_vector(
-    const coll_t& cid,
-    const ghobject_t &oid,
-    const std::map<std::string, ceph::buffer::list> &attrset
-    ) {
-    using ceph::encode;
-    Op* _op = _get_next_op();
-    _op->op = OP_PUT_VECTOR;
-    _op->cid = _get_coll_id(cid);
-    _op->oid = _get_object_id(oid);
-    encode(attrset, data_misaligned_bl);
-    data.ops = data.ops + 1;
-  }
-
-  /// Put pre-encoded vector keys on oid omap.
-  void put_vector(
-    const coll_t& cid,
-    const ghobject_t &oid,
-    const ceph::buffer::list& attrset_bl
-    ) {
-    Op* _op = _get_next_op();
-    _op->op = OP_PUT_VECTOR;
     _op->cid = _get_coll_id(cid);
     _op->oid = _get_object_id(oid);
     data_misaligned_bl.append(attrset_bl);

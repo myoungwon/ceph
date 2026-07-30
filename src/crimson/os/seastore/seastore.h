@@ -75,7 +75,7 @@ struct col_obj_ranges_t {
 
 class SeaStore final : public FuturizedStore {
 public:
-  bool supports_vector_nodes() const override final {
+  bool vector_nodes_enabled() const override final {
     return crimson::common::local_conf().get_val<bool>(
       "seastore_experimental_vector_node");
   }
@@ -164,7 +164,7 @@ public:
       uint32_t op_flags = 0) override final;
 
     read_errorator::future<
-      std::optional<vector_store_query_result_t>> query_vectors(
+      std::optional<ceph::rados::query_vectors_result_t>> query_vectors(
         CollectionRef c,
         const ghobject_t& oid,
         const ceph::rados::query_vectors_request_t& request,

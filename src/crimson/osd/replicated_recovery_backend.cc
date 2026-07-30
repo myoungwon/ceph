@@ -1217,6 +1217,7 @@ ReplicatedRecoveryBackend::prep_push_target(
   if (first) {
     incoming_oi.decode(attrs.at(OI_ATTR));
     if (incoming_oi.has_vector_node()) {
+      // Recovery does not yet transfer the native root/leaf extent tree.
       throw crimson::osd::error(std::errc::operation_not_supported);
     }
   }
