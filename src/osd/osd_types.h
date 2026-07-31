@@ -6296,6 +6296,7 @@ struct object_info_t {
     FLAG_MANIFEST    = 1<<7, // has manifest
     FLAG_USES_TMAP   = 1<<8, // deprecated; no longer used
     FLAG_REDIRECT_HAS_REFERENCE = 1<<9, // has reference
+    FLAG_VECTOR_NODE = 1<<10, // vector records are in a SeaStore VectorNode
   } flag_t;
 
   flag_t flags;
@@ -6332,6 +6333,8 @@ struct object_info_t {
       sv.insert(sv.end(), "manifest");
     if (flags & FLAG_REDIRECT_HAS_REFERENCE)
       sv.insert(sv.end(), "redirect_has_reference");
+    if (flags & FLAG_VECTOR_NODE)
+      sv.insert(sv.end(), "vector_node");
     return sv;
   }
   std::string get_flag_string() const {
@@ -6388,6 +6391,9 @@ struct object_info_t {
   }
   bool has_manifest() const {
     return test_flag(FLAG_MANIFEST);
+  }
+  bool has_vector_node() const {
+    return test_flag(FLAG_VECTOR_NODE);
   }
   void set_data_digest(__u32 d) {
     set_flag(FLAG_DATA_DIGEST);

@@ -76,7 +76,8 @@ struct col_obj_ranges_t {
 class SeaStore final : public FuturizedStore {
 public:
   bool supports_vector_nodes() const override final {
-    return true;
+    return crimson::common::local_conf().get_val<bool>(
+      "seastore_experimental_vector_node");
   }
 
   void enqueue_vector_put(

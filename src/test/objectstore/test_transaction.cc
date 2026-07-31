@@ -117,6 +117,23 @@ TEST(Transaction, VectorPayloadsRemainDistinct)
   ASSERT_FALSE(iter.have_op());
 }
 
+TEST(ObjectInfo, VectorNodeFlagRoundTrip)
+{
+  object_info_t source(hobject_t("vector", "", CEPH_NOSNAP, 0, 1, ""));
+  source.set_flag(object_info_t::FLAG_VECTOR_NODE);
+
+  bufferlist encoded;
+  source.encode(encoded, CEPH_FEATURES_ALL);
+  auto encoded_iter = encoded.cbegin();
+  object_info_t decoded;
+  decoded.decode(encoded_iter);
+
+  EXPECT_TRUE(decoded.has_vector_node());
+  EXPECT_NE(
+    std::string::npos,
+    decoded.get_flag_string().find("vector_node"));
+}
+
 ObjectStore::Transaction generate_transaction()
 {
   auto a = ObjectStore::Transaction{};

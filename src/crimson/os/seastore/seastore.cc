@@ -2100,9 +2100,6 @@ SeaStore::Shard::_do_transaction_step(
       }
       case Transaction::OP_OMAP_SETKEYS:
       {
-        if (onode->has_vector_node()) {
-          return crimson::ct_error::input_output_error::make();
-        }
         std::map<std::string, ceph::bufferlist> aset;
         i.decode_attrset(aset);
 	auto root = select_log_omap_root(*onode);
@@ -2116,9 +2113,6 @@ SeaStore::Shard::_do_transaction_step(
       }
       case Transaction::OP_OMAP_SETHEADER:
       {
-        if (onode->has_vector_node()) {
-          return crimson::ct_error::input_output_error::make();
-        }
         ceph::bufferlist bl;
         i.decode_bl(bl);
         DEBUGT("op OMAP_SETHEADER, oid={}, length=0x{:x} ...",
@@ -2127,9 +2121,6 @@ SeaStore::Shard::_do_transaction_step(
       }
       case Transaction::OP_OMAP_RMKEYS:
       {
-        if (onode->has_vector_node()) {
-          return crimson::ct_error::input_output_error::make();
-        }
         omap_keys_t keys;
         i.decode_keyset(keys);
 	auto root = select_log_omap_root(*onode);
@@ -2143,9 +2134,6 @@ SeaStore::Shard::_do_transaction_step(
       }
       case Transaction::OP_OMAP_RMKEYRANGE:
       {
-        if (onode->has_vector_node()) {
-          return crimson::ct_error::input_output_error::make();
-        }
         std::string first, last;
         first = i.decode_string();
         last = i.decode_string();
@@ -2160,9 +2148,6 @@ SeaStore::Shard::_do_transaction_step(
       }
       case Transaction::OP_OMAP_CLEAR:
       {
-        if (onode->has_vector_node()) {
-          return crimson::ct_error::input_output_error::make();
-        }
         DEBUGT("op OMAP_CLEAR, oid={} ...", *ctx.transaction, oid);
         return _omap_clear(ctx, *onode);
       }
@@ -2355,13 +2340,6 @@ SeaStore::Shard::_rename(
   OnodeRef &onode,
   OnodeRef &d_onode)
 {
-  if (d_onode->has_vector_node() ||
-      (onode->has_vector_node() &&
-       !select_log_omap_root(*d_onode).is_null())) {
-    co_await tm_iertr::future<>(
-      crimson::ct_error::input_output_error::make());
-  }
-
   auto prefix = onode->get_clone_prefix();
   assert(prefix);
   prefix->set_pool(onode->get_hobj().get_logical_pool());
@@ -2530,10 +2508,6 @@ SeaStore::Shard::_clone(
   Onode &onode,
   Onode &d_onode)
 {
-  if (onode.has_vector_node() || d_onode.has_vector_node()) {
-    return crimson::ct_error::input_output_error::make();
-  }
-
   return seastar::do_with(
     ObjectDataHandler(max_object_size),
     [this, &ctx, &onode, &d_onode](auto &objHandler)

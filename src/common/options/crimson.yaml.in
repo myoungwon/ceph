@@ -188,6 +188,15 @@ options:
   level: dev
   desc: default logical address space reservation for seastore objects' data
   default: 16777216
+- name: seastore_experimental_vector_node
+  type: bool
+  level: dev
+  desc: Enable experimental native VectorNode storage for new vector objects
+  long_desc: VectorNode recovery, backfill, snapshots, and scrub are not yet
+             supported. Enable only for explicit tests and benchmarks.
+  default: false
+  flags:
+  - startup
 # TODO: implement sub-extent checksum and deprecate this configuration.
 - name: seastore_full_integrity_check
   type: bool

@@ -1717,8 +1717,12 @@ PGBackend::put_vector(
   }
 
   const bool vector_node =
-    supports_vector_nodes() && !os.oi.is_omap();
+    os.oi.has_vector_node() ||
+    (supports_vector_nodes() && !os.oi.is_omap());
   maybe_create_new_object(os, txn, delta_stats);
+  if (vector_node) {
+    os.oi.set_flag(object_info_t::FLAG_VECTOR_NODE);
+  }
   store.f_store.enqueue_vector_put(
     txn, coll->get_cid(), ghobject_t{os.oi.soid}, record, vector_node);
 
@@ -1762,7 +1766,7 @@ PGBackend::query_vectors(
 
   std::optional<crimson::os::vector_store_query_result_t> native_result;
   if (os.exists && !os.oi.is_whiteout() &&
-      supports_vector_nodes()) {
+      os.oi.has_vector_node()) {
     native_result = co_await crimson::os::with_store<
       &crimson::os::FuturizedStore::Shard::query_vectors>(
       store, coll, ghobject_t{os.oi.soid}, req, 0
