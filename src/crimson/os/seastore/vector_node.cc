@@ -5,7 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
-#include <numeric>
+#include <limits>
 #include <optional>
 
 #include "common/error_code.h"
@@ -90,8 +90,63 @@ vector_leaf_descriptor_t make_descriptor(
     contents.entries.back().entry_id,
     leaf->get_laddr(),
     static_cast<uint32_t>(contents.entries.size()),
-    static_cast<uint32_t>(leaf->get_encoded_length())
+    static_cast<uint32_t>(VectorNode::encode_contents(contents).length())
   };
+}
+
+bool valid_descriptor(const vector_leaf_descriptor_t &descriptor)
+{
+  return ceph::os::is_lower_hex_string(descriptor.first_entry_id, 8) &&
+    ceph::os::is_lower_hex_string(descriptor.last_entry_id, 8) &&
+    descriptor.first_entry_id <= descriptor.last_entry_id &&
+    descriptor.laddr != L_ADDR_NULL &&
+    descriptor.entry_count != 0 &&
+    descriptor.encoded_bytes != 0 &&
+    descriptor.encoded_bytes <= VECTOR_NODE_MAX_BYTES;
+}
+
+bool valid_node_contents(const vector_node_t &node)
+{
+  if (node.format_version != VECTOR_NODE_FORMAT_VERSION) {
+    return false;
+  }
+  if (node.kind == vector_node_kind_t::ROOT) {
+    if (!node.entries.empty() || !VectorNode::is_sorted(node.leaves)) {
+      return false;
+    }
+    uint64_t entry_count = 0;
+    for (const auto &descriptor : node.leaves) {
+      if (!valid_descriptor(descriptor) ||
+          entry_count > std::numeric_limits<uint64_t>::max() -
+            descriptor.entry_count) {
+        return false;
+      }
+      entry_count += descriptor.entry_count;
+    }
+    return entry_count == node.logical_entry_count;
+  }
+  if (node.kind == vector_node_kind_t::LEAF) {
+    return node.leaves.empty() &&
+      !node.entries.empty() &&
+      node.logical_entry_count == node.entries.size() &&
+      VectorNode::is_sorted(node.entries) &&
+      std::all_of(
+        node.entries.begin(), node.entries.end(), [](const auto &entry) {
+          return ceph::os::validate_vector_record(entry) == 0;
+        });
+  }
+  return false;
+}
+
+bool leaf_matches_descriptor(
+  const vector_node_t &leaf,
+  const vector_leaf_descriptor_t &descriptor)
+{
+  return leaf.kind == vector_node_kind_t::LEAF &&
+    !leaf.entries.empty() &&
+    leaf.entries.front().entry_id == descriptor.first_entry_id &&
+    leaf.entries.back().entry_id == descriptor.last_entry_id &&
+    leaf.entries.size() == descriptor.entry_count;
 }
 
 std::optional<size_t> find_split_position(
@@ -183,15 +238,7 @@ vector_node_t VectorNode::decode_contents(const ceph::bufferlist &bl)
     uint64_t entry_count = 0;
     for (uint32_t i = 0; i < item_count; ++i) {
       auto descriptor = decode_descriptor(p);
-      if (!ceph::os::is_lower_hex_string(
-            descriptor.first_entry_id, 8) ||
-          !ceph::os::is_lower_hex_string(
-            descriptor.last_entry_id, 8) ||
-          descriptor.last_entry_id < descriptor.first_entry_id ||
-          descriptor.laddr == L_ADDR_NULL ||
-          descriptor.entry_count == 0 ||
-          descriptor.encoded_bytes == 0 ||
-          descriptor.encoded_bytes > VECTOR_NODE_MAX_BYTES) {
+      if (!valid_descriptor(descriptor)) {
         throw ceph::buffer::malformed_input(
             "invalid VectorNode leaf descriptor");
       }
@@ -296,12 +343,6 @@ void VectorNode::initialize_leaf(
   decoded = true;
   dirty = true;
   materialize();
-}
-
-size_t VectorNode::get_encoded_length() const
-{
-  ceph_assert(decoded);
-  return encode_contents(contents).length();
 }
 
 bool VectorNode::is_sorted(
@@ -409,6 +450,9 @@ VectorNodeManager::create_ret VectorNodeManager::create_vector_leaf(
   candidate.kind = vector_node_kind_t::LEAF;
   candidate.logical_entry_count = entries.size();
   candidate.entries = entries;
+  if (!valid_node_contents(candidate)) {
+    return crimson::ct_error::input_output_error::make();
+  }
   if (!is_valid_extent_size(node_bytes) ||
       VectorNode::encode_contents(candidate).length() > node_bytes) {
     return crimson::ct_error::enospc::make();
@@ -440,9 +484,12 @@ VectorNodeManager::upsert_ret VectorNodeManager::replace_contents(
   VectorNodeRef node,
   vector_node_t contents)
 {
-  if (VectorNode::encode_contents(contents).length() > node->get_length() ||
-      VectorNode::encode_contents(contents).length() >
-        VECTOR_NODE_MAX_BYTES) {
+  if (!valid_node_contents(contents)) {
+    return crimson::ct_error::input_output_error::make();
+  }
+  const auto encoded_length = VectorNode::encode_contents(contents).length();
+  if (encoded_length > node->get_length() ||
+      encoded_length > VECTOR_NODE_MAX_BYTES) {
     return crimson::ct_error::enospc::make();
   }
 
@@ -497,7 +544,8 @@ VectorNodeManager::upsert_ret VectorNodeManager::upsert_vector_entry(
   ).si_then([this, &t, root=std::move(root), entry,
              root_contents=std::move(root_contents),
              descriptor_index](auto leaf) mutable -> upsert_ret {
-    if (leaf->get_contents().kind != vector_node_kind_t::LEAF) {
+    if (!leaf_matches_descriptor(
+          leaf->get_contents(), root_contents.leaves[descriptor_index])) {
       return crimson::ct_error::input_output_error::make();
     }
 
@@ -590,27 +638,22 @@ VectorNodeManager::scan_ret VectorNodeManager::scan_vector_entries(
     std::move(visitor),
     vector_scan_stats_t(),
     [this, &t, measure_visitor](auto &root, auto &visitor, auto &stats) {
-      stats.extent_bytes_read = root->get_length();
+      stats.extent_bytes_scanned = root->get_length();
       return trans_intr::do_for_each(
         root->get_contents().leaves,
         [this, &t, &visitor, &stats, measure_visitor](
             const auto &descriptor) {
           return read_vector_node(t, descriptor.laddr
-          ).si_then([&visitor, &stats, &descriptor, measure_visitor](auto leaf)
+          ).si_then([&visitor, &stats, descriptor, measure_visitor](auto leaf)
               -> read_iertr::future<> {
             const auto &contents = leaf->get_contents();
-            if (contents.kind != vector_node_kind_t::LEAF ||
-                contents.entries.empty() ||
-                contents.entries.front().entry_id !=
-                  descriptor.first_entry_id ||
-                contents.entries.back().entry_id !=
-                  descriptor.last_entry_id ||
-                descriptor.encoded_bytes > leaf->get_length() ||
-                contents.entries.size() != descriptor.entry_count) {
+            if (!leaf_matches_descriptor(contents, descriptor) ||
+                VectorNode::encode_contents(contents).length() !=
+                  descriptor.encoded_bytes) {
               return crimson::ct_error::input_output_error::make();
             }
             stats.leaf_extents++;
-            stats.extent_bytes_read += leaf->get_length();
+            stats.extent_bytes_scanned += leaf->get_length();
             const auto visitor_begin = measure_visitor
               ? std::chrono::steady_clock::now()
               : std::chrono::steady_clock::time_point();

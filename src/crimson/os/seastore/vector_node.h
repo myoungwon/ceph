@@ -44,7 +44,7 @@ struct vector_node_t {
 struct vector_scan_stats_t {
   uint64_t logical_entries = 0;
   uint64_t leaf_extents = 0;
-  uint64_t extent_bytes_read = 0;
+  uint64_t extent_bytes_scanned = 0;
   uint64_t visitor_ns = 0;
 };
 
@@ -69,15 +69,10 @@ public:
   ceph::bufferlist get_delta() final;
   void clear_delta() final;
 
-  void initialize_root();
-  void initialize_leaf(std::vector<vector_node_entry_t> entries);
-
   const vector_node_t &get_contents() const {
     ceph_assert(decoded);
     return contents;
   }
-
-  size_t get_encoded_length() const;
 
   static ceph::bufferlist encode_contents(const vector_node_t &node);
   static vector_node_t decode_contents(const ceph::bufferlist &bl);
@@ -90,6 +85,8 @@ private:
   bool decoded = false;
   bool dirty = false;
 
+  void initialize_root();
+  void initialize_leaf(std::vector<vector_node_entry_t> entries);
   void decode_from_buffer();
   void materialize();
   void apply_delta(const ceph::bufferlist &bl) final;

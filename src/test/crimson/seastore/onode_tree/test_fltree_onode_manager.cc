@@ -454,12 +454,28 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
     restart();
 
     {
+      VectorNodeManager vector_manager(*tm);
       auto t = create_read_transaction();
       auto onode = with_trans_intr(*t, [&](auto &trans) {
         return manager->get_onode(trans, dst_key);
       }).unsafe_get();
       EXPECT_FALSE(onode->has_vector_node());
       EXPECT_EQ(L_ADDR_NULL, onode->get_vector_node_laddr());
+
+      using read_ertr = with_trans_ertr<VectorNodeManager::read_iertr>;
+      const bool root_missing = with_trans_intr(*t, [&](auto &trans) {
+        return vector_manager.read_vector_node(trans, vector_addr);
+      }).safe_then([](auto) {
+        return read_ertr::make_ready_future<bool>(false);
+      }).handle_error(
+        crimson::ct_error::enoent::handle([] {
+          return read_ertr::make_ready_future<bool>(true);
+        }),
+        crimson::ct_error::assert_all{
+          "removed VectorNode root returned an unexpected error"
+        }
+      ).unsafe_get();
+      EXPECT_TRUE(root_missing);
     }
   });
 }
