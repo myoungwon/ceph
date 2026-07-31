@@ -411,11 +411,23 @@ void Transaction::dump(ceph::Formatter *f)
 	f->dump_stream("collection") << cid;
 	f->dump_stream("oid") << oid;
 	f->open_object_section("attr_lens");
-	for (map<string, bufferlist>::iterator p = aset.begin();
-	    p != aset.end(); ++p) {
-	  f->dump_unsigned(p->first.c_str(), p->second.length());
+	for (const auto& [key, value] : aset) {
+	  f->dump_unsigned(key.c_str(), value.length());
 	}
 	f->close_section();
+      }
+      break;
+
+    case Transaction::OP_PUT_VECTOR_NODE:
+      {
+        coll_t cid = i.get_cid(op->cid);
+        ghobject_t oid = i.get_oid(op->oid);
+	bufferlist record_bl;
+	i.decode_bl(record_bl);
+	f->dump_string("op_name", "put_vector_node");
+	f->dump_stream("collection") << cid;
+	f->dump_stream("oid") << oid;
+	f->dump_unsigned("record_length", record_bl.length());
       }
       break;
 

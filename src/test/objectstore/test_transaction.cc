@@ -80,6 +80,43 @@ TEST(Transaction, Swap)
   ASSERT_FALSE(b.empty());
 }
 
+TEST(Transaction, VectorPayloadsRemainDistinct)
+{
+  const coll_t cid(spg_t(pg_t(1, 2), shard_id_t::NO_SHARD));
+  const ghobject_t oid(hobject_t("vector", "", CEPH_NOSNAP, 0, 1, ""));
+
+  std::map<std::string, bufferlist> omap;
+  omap["_ENTRY_00000000.user_key"].append("old-format");
+  bufferlist native_record;
+  native_record.append("versioned-native-record");
+
+  ObjectStore::Transaction source;
+  source.put_vector(cid, oid, omap);
+  source.put_vector_node(cid, oid, native_record);
+
+  bufferlist encoded;
+  encode(source, encoded);
+  auto encoded_iter = encoded.cbegin();
+  ObjectStore::Transaction decoded;
+  decode(decoded, encoded_iter);
+
+  auto iter = decoded.begin();
+  ASSERT_TRUE(iter.have_op());
+  auto op = iter.decode_op();
+  ASSERT_EQ(ObjectStore::Transaction::OP_PUT_VECTOR, op->op);
+  std::map<std::string, bufferlist> decoded_omap;
+  iter.decode_attrset(decoded_omap);
+  ASSERT_EQ(omap, decoded_omap);
+
+  ASSERT_TRUE(iter.have_op());
+  op = iter.decode_op();
+  ASSERT_EQ(ObjectStore::Transaction::OP_PUT_VECTOR_NODE, op->op);
+  bufferlist decoded_record;
+  iter.decode_bl(decoded_record);
+  ASSERT_EQ(native_record, decoded_record);
+  ASSERT_FALSE(iter.have_op());
+}
+
 ObjectStore::Transaction generate_transaction()
 {
   auto a = ObjectStore::Transaction{};
