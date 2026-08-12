@@ -85,22 +85,30 @@ inline bool is_lower_hex_string(std::string_view value, size_t length)
   return true;
 }
 
-inline bool valid_vector_placement(const vector_record_t& record)
+inline bool valid_vector_placement(
+    std::string_view algorithm,
+    std::string_view placement_key)
 {
   using namespace ceph::rados;
-  if (record.placement_algorithm == vector_placement_algorithm_hash_v0) {
+  if (algorithm == vector_placement_algorithm_hash_v0) {
     return is_lower_hex_string(
-        record.placement_key, vector_hash_v0_placement_key_len);
+        placement_key, vector_hash_v0_placement_key_len);
   }
-  if (record.placement_algorithm == vector_placement_algorithm_lsh_v0) {
+  if (algorithm == vector_placement_algorithm_lsh_v0) {
     return is_lower_hex_string(
-        record.placement_key, vector_lsh_v0_placement_key_len);
+        placement_key, vector_lsh_v0_placement_key_len);
   }
-  if (record.placement_algorithm == vector_placement_algorithm_pg_lsh_v0) {
+  if (algorithm == vector_placement_algorithm_pg_lsh_v0) {
     return is_lower_hex_string(
-        record.placement_key, vector_hash_v0_vector_hash_len);
+        placement_key, vector_hash_v0_vector_hash_len);
   }
   return false;
+}
+
+inline bool valid_vector_placement(const vector_record_t& record)
+{
+  return valid_vector_placement(
+      record.placement_algorithm, record.placement_key);
 }
 
 inline int validate_vector_record(const vector_record_t& record)
@@ -186,6 +194,45 @@ inline void set_vector_omap_value(
   (*omap)[key] = std::move(bl);
 }
 
+// Every _ENTRY_<entry_id>.* field except the vector payload itself: logical
+// identity (bucket_name/index_name/user_key), routing/placement info, and
+// any application metadata. Shared by make_vector_omap() (which also
+// stores the vector bytes, for backends with no separate native vector
+// storage) and make_vector_omap_identity() (which does not, for backends
+// -- VectorNode -- that already store the vector bytes elsewhere and must
+// not duplicate them into OMAP).
+inline void set_vector_omap_identity_fields(
+    std::map<std::string, ceph::bufferlist> *omap,
+    const std::string& entry_prefix,
+    const vector_record_t& record)
+{
+  set_vector_omap_value(
+      omap, entry_prefix + "bucket_name", record.bucket_name);
+  set_vector_omap_value(
+      omap, entry_prefix + "index_name", record.index_name);
+  set_vector_omap_value(
+      omap, entry_prefix + "user_key", record.user_key);
+  set_vector_omap_value(
+      omap, entry_prefix + "data_type", record.data_type);
+  set_vector_omap_value(
+      omap, entry_prefix + "distance_metric", record.distance_metric);
+  set_vector_omap_value(
+      omap, entry_prefix + "dimension", record.dimension);
+  set_vector_omap_value(
+      omap, entry_prefix + "layout_version",
+      ceph::rados::vector_layout_version);
+  set_vector_omap_value(
+      omap, entry_prefix + "placement_algorithm",
+      record.placement_algorithm);
+  set_vector_omap_value(
+      omap, entry_prefix + "placement_key", record.placement_key);
+  set_vector_omap_value(
+      omap, entry_prefix + "vector_hash", record.vector_hash);
+  if (record.metadata.length() > 0) {
+    (*omap)[entry_prefix + "metadata"] = record.metadata;
+  }
+}
+
 inline std::map<std::string, ceph::bufferlist> make_vector_omap(
     const vector_record_t& record)
 {
@@ -194,32 +241,21 @@ inline std::map<std::string, ceph::bufferlist> make_vector_omap(
   std::map<std::string, ceph::bufferlist> omap;
 
   omap[content_key] = record.vector_data;
-  set_vector_omap_value(
-      &omap, entry_prefix + "bucket_name", record.bucket_name);
-  set_vector_omap_value(
-      &omap, entry_prefix + "index_name", record.index_name);
-  set_vector_omap_value(
-      &omap, entry_prefix + "user_key", record.user_key);
+  set_vector_omap_identity_fields(&omap, entry_prefix, record);
   set_vector_omap_value(&omap, entry_prefix + "content_key", content_key);
-  set_vector_omap_value(
-      &omap, entry_prefix + "data_type", record.data_type);
-  set_vector_omap_value(
-      &omap, entry_prefix + "distance_metric", record.distance_metric);
-  set_vector_omap_value(
-      &omap, entry_prefix + "dimension", record.dimension);
-  set_vector_omap_value(
-      &omap, entry_prefix + "layout_version",
-      ceph::rados::vector_layout_version);
-  set_vector_omap_value(
-      &omap, entry_prefix + "placement_algorithm",
-      record.placement_algorithm);
-  set_vector_omap_value(
-      &omap, entry_prefix + "placement_key", record.placement_key);
-  set_vector_omap_value(
-      &omap, entry_prefix + "vector_hash", record.vector_hash);
-  if (record.metadata.length() > 0) {
-    omap[entry_prefix + "metadata"] = record.metadata;
-  }
+  return omap;
+}
+
+// Identity/metadata fields only -- no _CONTENT_<vector_hash> key and no
+// vector_data. For PUT paths where the vector payload already has a home
+// outside OMAP (VectorNode's LIST page vector plane): writing it here too
+// would duplicate the (potentially large) vector bytes in both places.
+inline std::map<std::string, ceph::bufferlist> make_vector_omap_identity(
+    const vector_record_t& record)
+{
+  const std::string entry_prefix = "_ENTRY_" + record.entry_id + ".";
+  std::map<std::string, ceph::bufferlist> omap;
+  set_vector_omap_identity_fields(&omap, entry_prefix, record);
   return omap;
 }
 

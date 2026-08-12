@@ -3,6 +3,7 @@ set(crimson_seastore_srcs
   lba_mapping.cc
   seastore_types.cc
   vector_node.cc
+  vector_node_layout.cc
   segment_manager.cc
   segment_manager/ephemeral.cc
   segment_manager/block.cc
