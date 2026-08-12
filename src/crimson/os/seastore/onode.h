@@ -47,7 +47,8 @@ struct onode_layout_t {
     * do_clone, do_clonerange
     */
   bool need_cow = false;
-  laddr_le_t vector_node_laddr = laddr_le_t(L_ADDR_NULL);
+  // Points at a VectorNode INDEX page, not directly at a vector list.
+  laddr_le_t vector_index_laddr = laddr_le_t(L_ADDR_NULL);
 
   onode_layout_t() : omap_root(omap_type_t::OMAP),
     xattr_root(omap_type_t::XATTR) {}
@@ -144,12 +145,13 @@ public:
   virtual void clear_snapset(Transaction&) = 0;
   virtual void set_need_cow(Transaction&) = 0;
   virtual void unset_need_cow(Transaction&) = 0;
-  bool has_vector_node() const {
-    return get_vector_node_laddr() != L_ADDR_NULL;
+  // True when this object has a VectorNode INDEX table.
+  bool has_vector_index() const {
+    return get_vector_index_laddr() != L_ADDR_NULL;
   }
-  virtual laddr_t get_vector_node_laddr() const = 0;
-  virtual void update_vector_node_laddr(Transaction&, laddr_t) = 0;
-  virtual void clear_vector_node_laddr(Transaction&) = 0;
+  virtual laddr_t get_vector_index_laddr() const = 0;
+  virtual void update_vector_index_laddr(Transaction&, laddr_t) = 0;
+  virtual void clear_vector_index_laddr(Transaction&) = 0;
   virtual void swap_layout(Transaction&, Onode&) = 0;
   virtual boost::intrusive_ptr<Onode> offload_data_and_md(Transaction&) = 0;
 

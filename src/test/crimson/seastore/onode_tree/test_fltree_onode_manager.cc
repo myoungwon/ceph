@@ -30,10 +30,10 @@ namespace {
     return bl;
   }
 
-  vector_node_entry_t make_vector_entry(
+  ceph::os::vector_record_t make_vector_entry(
       std::string entry_id,
       const std::string &payload) {
-    vector_node_entry_t entry;
+    ceph::os::vector_record_t entry;
     entry.entry_id = std::move(entry_id);
     entry.bucket_name = "bucket";
     entry.index_name = "index";
@@ -51,15 +51,14 @@ namespace {
   }
 
   void expect_vector_entries(
-      const vector_node_t &node,
-      std::initializer_list<std::pair<std::string, std::string>> entries) {
-    ASSERT_EQ(entries.size(), node.entries.size());
-    auto expected = entries.begin();
-    for (const auto &actual : node.entries) {
-      EXPECT_EQ(expected->first, actual.entry_id);
-      EXPECT_TRUE(actual.vector_data.contents_equal(
-        make_vector_payload(expected->second)));
-      ++expected;
+      const std::vector<std::pair<std::string, std::string>> &actual,
+      std::initializer_list<std::pair<std::string, std::string>> expected) {
+    ASSERT_EQ(expected.size(), actual.size());
+    auto exp = expected.begin();
+    for (const auto &entry : actual) {
+      EXPECT_EQ(exp->first, entry.first);
+      EXPECT_EQ(exp->second, entry.second);
+      ++exp;
     }
   }
 }
@@ -321,23 +320,23 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
       auto &flonode = static_cast<FLTreeOnode&>(*onode);
       src_item->value.initialize(*t, *onode);
       EXPECT_EQ(sizeof(onode_layout_t), flonode.get_payload_size());
-      EXPECT_FALSE(onode->has_vector_node());
+      EXPECT_FALSE(onode->has_vector_index());
 
-      auto node = with_trans_intr(*t, [&](auto &trans) {
-        return vector_manager.create_vector_root(trans);
+      auto index = with_trans_intr(*t, [&](auto &trans) {
+        return vector_manager.create_index_table(trans);
       }).unsafe_get();
-      vector_addr = node->get_laddr();
-      node = with_trans_intr(*t, [&](auto &trans) {
-        return vector_manager.upsert_vector_entry(
-          trans, std::move(node),
+      vector_addr = index->get_laddr();
+      with_trans_intr(*t, [&](auto &trans) {
+        return vector_manager.append_vector_entry(
+          trans, std::move(index),
           make_vector_entry("0000000a", "aaaa"));
       }).unsafe_get();
       ASSERT_NE(L_ADDR_NULL, vector_addr);
-      onode->update_vector_node_laddr(*t, vector_addr);
-      EXPECT_EQ(vector_addr, onode->get_vector_node_laddr());
+      onode->update_vector_index_laddr(*t, vector_addr);
+      EXPECT_EQ(vector_addr, onode->get_vector_index_laddr());
       auto offloaded = onode->offload_data_and_md(*t);
-      EXPECT_EQ(vector_addr, offloaded->get_vector_node_laddr());
-      EXPECT_EQ(vector_addr, onode->get_vector_node_laddr());
+      EXPECT_EQ(vector_addr, offloaded->get_vector_index_laddr());
+      EXPECT_EQ(vector_addr, onode->get_vector_index_laddr());
       src_item->value.initialize(*t, *onode);
       submit_transaction(std::move(t));
     }
@@ -348,22 +347,27 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
       auto onode = with_trans_intr(*t, [&](auto &trans) {
         return manager->get_onode(trans, src_key);
       }).unsafe_get();
-      EXPECT_EQ(vector_addr, onode->get_vector_node_laddr());
-      std::vector<vector_node_entry_t> entries;
+      EXPECT_EQ(vector_addr, onode->get_vector_index_laddr());
+      std::vector<std::pair<std::string, std::string>> entries;
       auto stats = with_trans_intr(*t, [&](auto &trans) {
         return vector_manager.read_vector_node(trans, vector_addr
-        ).si_then([&](auto root) {
-          return vector_manager.scan_vector_entries(
-            trans, std::move(root), [&](const auto &entry) {
-              entries.push_back(entry);
+        ).si_then([&](auto index) {
+          return vector_manager.find_group_head(
+            trans, std::move(index), 1u,
+            ceph::rados::vector_data_type_float32);
+        }).si_then([&](auto head) {
+          EXPECT_TRUE(head);
+          return vector_manager.scan_vector_group(
+            trans, *head, 1u, ceph::rados::vector_data_type_float32,
+            [&](const VectorNodeRecordView &record) {
+              entries.emplace_back(
+                std::string(record.entry_id()),
+                std::string(record.vector_data()));
             });
         });
       }).unsafe_get();
       EXPECT_EQ(1u, stats.logical_entries);
-      vector_node_t leaf;
-      leaf.kind = vector_node_kind_t::LEAF;
-      leaf.entries = std::move(entries);
-      expect_vector_entries(leaf, {{"0000000a", "aaaa"}});
+      expect_vector_entries(entries, {{"0000000a", "aaaa"}});
     }
 
     restart();
@@ -374,22 +378,27 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
       auto onode = with_trans_intr(*t, [&](auto &trans) {
         return manager->get_onode(trans, src_key);
       }).unsafe_get();
-      EXPECT_EQ(vector_addr, onode->get_vector_node_laddr());
-      std::vector<vector_node_entry_t> entries;
+      EXPECT_EQ(vector_addr, onode->get_vector_index_laddr());
+      std::vector<std::pair<std::string, std::string>> entries;
       auto stats = with_trans_intr(*t, [&](auto &trans) {
         return vector_manager.read_vector_node(trans, vector_addr
-        ).si_then([&](auto root) {
-          return vector_manager.scan_vector_entries(
-            trans, std::move(root), [&](const auto &entry) {
-              entries.push_back(entry);
+        ).si_then([&](auto index) {
+          return vector_manager.find_group_head(
+            trans, std::move(index), 1u,
+            ceph::rados::vector_data_type_float32);
+        }).si_then([&](auto head) {
+          EXPECT_TRUE(head);
+          return vector_manager.scan_vector_group(
+            trans, *head, 1u, ceph::rados::vector_data_type_float32,
+            [&](const VectorNodeRecordView &record) {
+              entries.emplace_back(
+                std::string(record.entry_id()),
+                std::string(record.vector_data()));
             });
         });
       }).unsafe_get();
       EXPECT_EQ(1u, stats.logical_entries);
-      vector_node_t leaf;
-      leaf.kind = vector_node_kind_t::LEAF;
-      leaf.entries = std::move(entries);
-      expect_vector_entries(leaf, {{"0000000a", "aaaa"}});
+      expect_vector_entries(entries, {{"0000000a", "aaaa"}});
     }
 
     {
@@ -402,8 +411,8 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
       }).unsafe_get();
       dst_item->value.initialize(*t, *dst_onode);
       src_onode->swap_layout(*t, *dst_onode);
-      EXPECT_FALSE(src_onode->has_vector_node());
-      EXPECT_EQ(vector_addr, dst_onode->get_vector_node_laddr());
+      EXPECT_FALSE(src_onode->has_vector_index());
+      EXPECT_EQ(vector_addr, dst_onode->get_vector_index_laddr());
       submit_transaction(std::move(t));
     }
 
@@ -415,8 +424,8 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
       auto dst_onode = with_trans_intr(*t, [&](auto &trans) {
         return manager->get_onode(trans, dst_key);
       }).unsafe_get();
-      EXPECT_FALSE(src_onode->has_vector_node());
-      EXPECT_EQ(vector_addr, dst_onode->get_vector_node_laddr());
+      EXPECT_FALSE(src_onode->has_vector_index());
+      EXPECT_EQ(vector_addr, dst_onode->get_vector_index_laddr());
     }
 
     restart();
@@ -429,8 +438,8 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
       auto dst_onode = with_trans_intr(*t, [&](auto &trans) {
         return manager->get_onode(trans, dst_key);
       }).unsafe_get();
-      EXPECT_FALSE(src_onode->has_vector_node());
-      EXPECT_EQ(vector_addr, dst_onode->get_vector_node_laddr());
+      EXPECT_FALSE(src_onode->has_vector_index());
+      EXPECT_EQ(vector_addr, dst_onode->get_vector_index_laddr());
     }
 
     {
@@ -441,13 +450,13 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
       }).unsafe_get();
       with_trans_intr(*t, [&](auto &trans) {
         return vector_manager.read_vector_node(trans, vector_addr
-        ).si_then([&](auto root) {
-          return vector_manager.remove_vector_tree(
-            trans, std::move(root));
+        ).si_then([&](auto index) {
+          return vector_manager.remove_index_table(
+            trans, std::move(index));
         });
       }).unsafe_get();
-      onode->clear_vector_node_laddr(*t);
-      EXPECT_FALSE(onode->has_vector_node());
+      onode->clear_vector_index_laddr(*t);
+      EXPECT_FALSE(onode->has_vector_index());
       submit_transaction(std::move(t));
     }
 
@@ -459,11 +468,11 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
       auto onode = with_trans_intr(*t, [&](auto &trans) {
         return manager->get_onode(trans, dst_key);
       }).unsafe_get();
-      EXPECT_FALSE(onode->has_vector_node());
-      EXPECT_EQ(L_ADDR_NULL, onode->get_vector_node_laddr());
+      EXPECT_FALSE(onode->has_vector_index());
+      EXPECT_EQ(L_ADDR_NULL, onode->get_vector_index_laddr());
 
       using read_ertr = with_trans_ertr<VectorNodeManager::read_iertr>;
-      const bool root_missing = with_trans_intr(*t, [&](auto &trans) {
+      const bool index_missing = with_trans_intr(*t, [&](auto &trans) {
         return vector_manager.read_vector_node(trans, vector_addr);
       }).safe_then([](auto) {
         return read_ertr::make_ready_future<bool>(false);
@@ -472,10 +481,10 @@ TEST_P(fltree_onode_manager_test_t, vector_node_link_lifecycle)
           return read_ertr::make_ready_future<bool>(true);
         }),
         crimson::ct_error::assert_all{
-          "removed VectorNode root returned an unexpected error"
+          "removed VectorNode index returned an unexpected error"
         }
       ).unsafe_get();
-      EXPECT_TRUE(root_missing);
+      EXPECT_TRUE(index_missing);
     }
   });
 }

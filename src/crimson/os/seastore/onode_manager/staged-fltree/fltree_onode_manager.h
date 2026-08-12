@@ -61,14 +61,14 @@ struct FakeOnode final : Onode {
   void clear_snapset(Transaction &) final { ceph_abort("impossible"); }
   void set_need_cow(Transaction &) final {}
   void unset_need_cow(Transaction &) final {}
-  laddr_t get_vector_node_laddr() const final {
-    return layout.vector_node_laddr;
+  laddr_t get_vector_index_laddr() const final {
+    return layout.vector_index_laddr;
   }
-  void update_vector_node_laddr(Transaction &, laddr_t addr) final {
-    layout.vector_node_laddr = addr;
+  void update_vector_index_laddr(Transaction &, laddr_t addr) final {
+    layout.vector_index_laddr = addr;
   }
-  void clear_vector_node_laddr(Transaction &) final {
-    layout.vector_node_laddr = L_ADDR_NULL;
+  void clear_vector_index_laddr(Transaction &) final {
+    layout.vector_index_laddr = L_ADDR_NULL;
   }
   void swap_layout(Transaction &, Onode &o) final { ceph_abort("impossible"); }
   boost::intrusive_ptr<Onode> offload_data_and_md(Transaction &t) final {
@@ -156,17 +156,17 @@ struct FLTreeOnode final : Onode, Value {
     layout_func(p.first, p.second);
   }
 
-  laddr_t get_vector_node_laddr() const final {
-    return get_layout().vector_node_laddr;
+  laddr_t get_vector_index_laddr() const final {
+    return get_layout().vector_index_laddr;
   }
 
-  void update_vector_node_laddr(Transaction &t, laddr_t addr) final {
+  void update_vector_index_laddr(Transaction &t, laddr_t addr) final {
     with_mutable_layout(
       t,
       [addr](NodeExtentMutable &payload_mut, Recorder *recorder) {
 	auto &mlayout = *reinterpret_cast<onode_layout_t*>(
 	  payload_mut.get_write());
-	mlayout.vector_node_laddr = addr;
+	mlayout.vector_index_laddr = addr;
 	if (recorder) {
 	  recorder->encode_update(
 	    payload_mut, Recorder::delta_op_t::UPDATE_VECTOR_NODE_LADDR);
@@ -174,8 +174,8 @@ struct FLTreeOnode final : Onode, Value {
       });
   }
 
-  void clear_vector_node_laddr(Transaction &t) final {
-    update_vector_node_laddr(t, L_ADDR_NULL);
+  void clear_vector_index_laddr(Transaction &t) final {
+    update_vector_index_laddr(t, L_ADDR_NULL);
   }
 
   void swap_layout(Transaction &t, Onode &onode) final {
@@ -210,7 +210,7 @@ struct FLTreeOnode final : Onode, Value {
     std::swap(mlayout.object_data, o_mlayout.object_data);
     std::swap(mlayout.omap_root, o_mlayout.omap_root);
     std::swap(mlayout.xattr_root, o_mlayout.xattr_root);
-    std::swap(mlayout.vector_node_laddr, o_mlayout.vector_node_laddr);
+    std::swap(mlayout.vector_index_laddr, o_mlayout.vector_index_laddr);
     if (recorder) {
       recorder->encode_update(
 	payload_mut, Recorder::delta_op_t::UPDATE_OBJECT_DATA);

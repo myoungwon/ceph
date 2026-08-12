@@ -41,7 +41,7 @@ public:
       std::swap(layout.object_data, o_mlayout.object_data);
       std::swap(layout.omap_root, o_mlayout.omap_root);
       std::swap(layout.xattr_root, o_mlayout.xattr_root);
-      std::swap(layout.vector_node_laddr, o_mlayout.vector_node_laddr);
+      std::swap(layout.vector_index_laddr, o_mlayout.vector_index_laddr);
     });
   }
   laddr_hint_t init_hint(
@@ -88,16 +88,16 @@ public:
     });
   }
 
-  laddr_t get_vector_node_laddr() const final {
-    return layout.vector_node_laddr;
+  laddr_t get_vector_index_laddr() const final {
+    return layout.vector_index_laddr;
   }
 
-  void update_vector_node_laddr(Transaction &, laddr_t addr) final {
-    layout.vector_node_laddr = addr;
+  void update_vector_index_laddr(Transaction &, laddr_t addr) final {
+    layout.vector_index_laddr = addr;
   }
 
-  void clear_vector_node_laddr(Transaction &) final {
-    layout.vector_node_laddr = L_ADDR_NULL;
+  void clear_vector_index_laddr(Transaction &) final {
+    layout.vector_index_laddr = L_ADDR_NULL;
   }
 
   void update_onode_size(Transaction &t, uint32_t size) final {
@@ -168,7 +168,7 @@ public:
       ret->update_omap_root(t, root);
       root = layout.xattr_root.get(LADDR_HINT_NULL);
       ret->update_xattr_root(t, root);
-      ret->update_vector_node_laddr(t, layout.vector_node_laddr);
+      ret->update_vector_index_laddr(t, layout.vector_index_laddr);
     }
     {
       auto data = object_data_t{L_ADDR_NULL, 0};
