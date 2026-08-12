@@ -1535,18 +1535,23 @@ SeaStore::Shard::omap_get_vectors(
   });
 }
 
+// LIST rows carry only entry_id and vector bytes (see
+// vector_node_layout.h); bucket_name/index_name/user_key/placement_key are
+// not LIST data any more and stay unset here. dimension/data_type/
+// distance_metric come from the query request itself, not the row: the
+// caller already scoped this scan to (request.dimension, request.data_type)
+// via find_group_head(), so every visited row inherently matches it.
 static ceph::rados::vector_query_exec::vector_entry_view_t
-make_query_entry_view(const VectorNodeRecordView &record)
+make_query_entry_view(
+  const ceph::rados::query_vectors_request_t &request,
+  const VectorNodeRecordView &record)
 {
   ceph::rados::vector_query_exec::vector_entry_view_t entry;
   entry.entry_id = record.entry_id();
-  entry.bucket_name = record.bucket_name();
-  entry.index_name = record.index_name();
-  entry.user_key = record.user_key();
-  entry.placement_key = record.placement_key();
-  entry.data_type = record.data_type();
-  entry.distance_metric = record.distance_metric();
-  entry.dimension = record.dimension();
+  entry.is_vector_node_native = true;
+  entry.data_type = request.data_type;
+  entry.distance_metric = request.distance_metric;
+  entry.dimension = request.dimension;
   entry.has_data_type = true;
   entry.has_distance_metric = true;
   entry.has_dimension = true;
@@ -1629,7 +1634,7 @@ SeaStore::Shard::query_vectors(
         return manager.find_group_head(
           transaction, std::move(index),
           request.dimension, request.data_type);
-      }).si_then([&transaction, &manager, &accumulator, measure](
+      }).si_then([&transaction, &manager, &accumulator, &request, measure](
           auto head_laddr) -> VectorNodeManager::scan_ret {
         if (!head_laddr) {
           // Exact (dimension, data_type) miss: empty result immediately,
@@ -1638,9 +1643,10 @@ SeaStore::Shard::query_vectors(
             vector_scan_stats_t>(vector_scan_stats_t());
         }
         return manager.scan_vector_group(
-          transaction, *head_laddr,
-          [&accumulator](const VectorNodeRecordView &entry) {
-            const int r = accumulator.consume(make_query_entry_view(entry));
+          transaction, *head_laddr, request.dimension, request.data_type,
+          [&accumulator, &request](const VectorNodeRecordView &entry) {
+            const int r = accumulator.consume(
+              make_query_entry_view(request, entry));
             ceph_assert(r == 0);
           },
           measure);
@@ -2455,10 +2461,10 @@ SeaStore::Shard::_rename(
   d_onode->update_object_info(*ctx.transaction, oi_bl);
   d_onode->update_snapset(*ctx.transaction, ss_bl);
   rename_onode_omap_metadata(*ctx.transaction, *onode, *d_onode);
-  if (onode->has_vector_node()) {
-    d_onode->update_vector_node_laddr(
-      *ctx.transaction, onode->get_vector_node_laddr());
-    onode->clear_vector_node_laddr(*ctx.transaction);
+  if (onode->has_vector_index()) {
+    d_onode->update_vector_index_laddr(
+      *ctx.transaction, onode->get_vector_index_laddr());
+    onode->clear_vector_index_laddr(*ctx.transaction);
   }
   co_await onode_manager->erase_onode(
     *ctx.transaction, onode
@@ -2473,18 +2479,24 @@ SeaStore::Shard::remove_vector_node(
   Transaction &transaction,
   Onode &onode)
 {
-  if (!onode.has_vector_node()) {
+  if (!onode.has_vector_index()) {
     return tm_iertr::now();
   }
 
   return seastar::do_with(
-    VectorNodeManager(*transaction_manager),
+    VectorNodeManager(
+      *transaction_manager,
+      crimson::common::get_conf<Option::size_t>(
+        "seastore_vector_node_list_block_bytes")),
     [this, &transaction, &onode](auto &manager) {
       return manager.read_vector_node(
-        transaction, onode.get_vector_node_laddr()
-      ).si_then([&transaction, &manager](auto root) {
-        return manager.remove_vector_tree(
-          transaction, std::move(root));
+        transaction, onode.get_vector_index_laddr()
+      ).si_then([&transaction, &manager](auto index) {
+        // Walks every index entry's LIST chain, freeing each LIST extent,
+        // then frees the INDEX extent itself. No ROOT/LEAF descriptor
+        // cleanup remains.
+        return manager.remove_index_table(
+          transaction, std::move(index));
       }).handle_error_interruptible(
         crimson::ct_error::enoent::handle([] {
           return tm_iertr::future<>(
@@ -2492,7 +2504,7 @@ SeaStore::Shard::remove_vector_node(
         }),
         tm_iertr::pass_further{}
       ).si_then([&transaction, &onode] {
-        onode.clear_vector_node_laddr(transaction);
+        onode.clear_vector_index_laddr(transaction);
       });
     });
 }
