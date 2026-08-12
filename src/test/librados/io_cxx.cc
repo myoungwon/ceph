@@ -20,6 +20,8 @@
 
 #include "gtest/gtest.h"
 
+#include "arch/intel.h"
+#include "arch/probe.h"
 #include "include/rados/librados.hpp"
 #include "include/ceph_hash.h"
 #include "include/encoding.h"
@@ -443,6 +445,58 @@ TEST(VectorQueryExecutor, DistanceHandlesFragmentedCandidateWithoutRebuild) {
   EXPECT_FALSE(candidate.is_contiguous());
   EXPECT_EQ(original_buffer_count, candidate.get_num_buffers());
 }
+
+#if defined(CEPH_VECTOR_QUERY_EXEC_HAVE_X86_SIMD)
+TEST(VectorQueryExecutor, ScalarAndAvx2KernelsAgreeOnDistanceTerms) {
+  ceph_arch_probe();
+  if (!ceph_arch_intel_avx2) {
+    GTEST_SKIP() << "host has no AVX2, cannot compare against the AVX2 kernel";
+  }
+
+  // 11 dimensions: two full 4-wide AVX2 blocks plus a 3-element tail, so
+  // both the vectorized loop and the scalar remainder run in the kernel.
+  const std::vector<float> query = {
+    0.1f, -1.25f, 3.75f, -0.5f, 2.0f, -3.25f, 0.75f, 1.5f, -2.75f, 4.25f, -0.1f};
+  const std::vector<float> candidate = {
+    -0.4f, 2.5f, -1.75f, 0.25f, -2.0f, 1.25f, -0.75f, 3.5f, 0.25f, -4.0f, 0.9f};
+  ASSERT_EQ(query.size(), candidate.size());
+  const uint32_t dimension = query.size();
+
+  const char *candidate_bytes = reinterpret_cast<const char *>(candidate.data());
+
+  ceph::rados::vector_query_exec::distance_terms_t scalar_terms;
+  ceph::rados::vector_query_exec::accumulate_distance_terms_scalar(
+      query.data(), candidate_bytes, dimension, &scalar_terms);
+
+  ceph::rados::vector_query_exec::distance_terms_t avx2_terms;
+  ceph::rados::vector_query_exec::accumulate_distance_terms_avx2(
+      query.data(), candidate_bytes, dimension, &avx2_terms);
+
+  EXPECT_NEAR(scalar_terms.dot, avx2_terms.dot, 1e-9);
+  EXPECT_NEAR(scalar_terms.candidate_norm_squared,
+              avx2_terms.candidate_norm_squared, 1e-9);
+  EXPECT_NEAR(scalar_terms.sum_sq, avx2_terms.sum_sq, 1e-9);
+
+  const double query_norm =
+      ceph::rados::vector_query_exec::squared_l2_norm(query);
+
+  // What top-k ranking actually observes is the float32 cast each metric
+  // produces in compute_float32_distance; both kernels must agree there.
+  EXPECT_FLOAT_EQ(static_cast<float>(std::sqrt(scalar_terms.sum_sq)),
+                   static_cast<float>(std::sqrt(avx2_terms.sum_sq)));
+  EXPECT_FLOAT_EQ(
+      static_cast<float>(
+          1.0 - scalar_terms.dot /
+          (std::sqrt(query_norm) *
+           std::sqrt(scalar_terms.candidate_norm_squared))),
+      static_cast<float>(
+          1.0 - avx2_terms.dot /
+          (std::sqrt(query_norm) *
+           std::sqrt(avx2_terms.candidate_norm_squared))));
+  EXPECT_FLOAT_EQ(static_cast<float>(-scalar_terms.dot),
+                   static_cast<float>(-avx2_terms.dot));
+}
+#endif // CEPH_VECTOR_QUERY_EXEC_HAVE_X86_SIMD
 
 TEST(VectorQueryExecutor, LocalTopKKeepsBoundedSortedResults) {
   float query[] = {0.0, 0.0};

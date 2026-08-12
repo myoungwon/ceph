@@ -21,6 +21,13 @@
 #include "include/rados/vector_ops.h"
 #include "common/vector_record.h"
 
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#include "arch/probe.h"
+#include "arch/intel.h"
+#define CEPH_VECTOR_QUERY_EXEC_HAVE_X86_SIMD 1
+#endif
+
 namespace ceph {
 namespace rados {
 namespace vector_query_exec {
@@ -63,6 +70,19 @@ struct vector_entry_view_t {
   // True when metadata references vector content. OMAP may still be missing
   // that payload; VectorNode records always provide it inline.
   bool has_vector_reference = false;
+  // True for a row scanned directly out of a VectorNode LIST page: LIST
+  // rows carry only entry_id and vector bytes (see vector_node_layout.h's
+  // vector_list_entry_le_t), so bucket_name/index_name/user_key/
+  // placement_key are never populated for this source. That is safe to
+  // match on anyway: object-name placement already scopes one object to
+  // one (bucket_name, index_name) pair (see
+  // librados/vector_placement.h's make_*_oid()), and the caller already
+  // scoped the scanned LIST chain to this exact (dimension, data_type) via
+  // find_group_head() before ever visiting a row, so re-checking those
+  // fields per row would be redundant. user_key (and any application
+  // metadata) is restored afterwards, by entry_id, from OMAP -- but only
+  // for the entries that survive top-k selection, not every scanned row.
+  bool is_vector_node_native = false;
   // Fixed-layout VectorNode records expose a contiguous, non-owning range.
   // It is valid only while the pinned LIST extent remains alive.
   std::string_view contiguous_vector_data;
@@ -358,6 +378,96 @@ inline float read_float32(const char *data, size_t index)
   return value;
 }
 
+// Running sums for one query/candidate pair, shared by every kernel.
+struct distance_terms_t {
+  double dot = 0;
+  double candidate_norm_squared = 0;
+  double sum_sq = 0;
+};
+
+inline void accumulate_distance_terms_scalar(const float *query,
+                                             const char *candidate_bytes,
+                                             uint32_t dimension,
+                                             distance_terms_t *terms)
+{
+  for (uint32_t i = 0; i < dimension; ++i) {
+    const double q = query[i];
+    const double c = read_float32(candidate_bytes, i);
+    terms->dot += q * c;
+    terms->candidate_norm_squared += c * c;
+    const double diff = q - c;
+    terms->sum_sq += diff * diff;
+  }
+}
+
+#if defined(CEPH_VECTOR_QUERY_EXEC_HAVE_X86_SIMD)
+// Converts each 4-wide float32 group to double before accumulating, using
+// a separate multiply and add instead of fused multiply-add, so
+// per-element arithmetic matches accumulate_distance_terms_scalar. The
+// cross-lane reduction still sums in a different order than the scalar
+// loop; the resulting difference is far below float32 precision.
+__attribute__((__target__("avx2")))
+inline void accumulate_distance_terms_avx2(const float *query,
+                                           const char *candidate_bytes,
+                                           uint32_t dimension,
+                                           distance_terms_t *terms)
+{
+  __m256d dot_acc = _mm256_setzero_pd();
+  __m256d norm_acc = _mm256_setzero_pd();
+  __m256d sq_acc = _mm256_setzero_pd();
+
+  uint32_t i = 0;
+  for (; i + 4 <= dimension; i += 4) {
+    const __m256d q = _mm256_cvtps_pd(_mm_loadu_ps(query + i));
+    const __m256d c = _mm256_cvtps_pd(_mm_loadu_ps(
+        reinterpret_cast<const float*>(candidate_bytes + i * sizeof(float))));
+    dot_acc = _mm256_add_pd(dot_acc, _mm256_mul_pd(q, c));
+    norm_acc = _mm256_add_pd(norm_acc, _mm256_mul_pd(c, c));
+    const __m256d diff = _mm256_sub_pd(q, c);
+    sq_acc = _mm256_add_pd(sq_acc, _mm256_mul_pd(diff, diff));
+  }
+
+  alignas(32) double dot_lanes[4];
+  alignas(32) double norm_lanes[4];
+  alignas(32) double sq_lanes[4];
+  _mm256_store_pd(dot_lanes, dot_acc);
+  _mm256_store_pd(norm_lanes, norm_acc);
+  _mm256_store_pd(sq_lanes, sq_acc);
+  for (int lane = 0; lane < 4; ++lane) {
+    terms->dot += dot_lanes[lane];
+    terms->candidate_norm_squared += norm_lanes[lane];
+    terms->sum_sq += sq_lanes[lane];
+  }
+
+  for (; i < dimension; ++i) {
+    const double q = query[i];
+    const double c = read_float32(candidate_bytes, i);
+    terms->dot += q * c;
+    terms->candidate_norm_squared += c * c;
+    const double diff = q - c;
+    terms->sum_sq += diff * diff;
+  }
+}
+#endif // CEPH_VECTOR_QUERY_EXEC_HAVE_X86_SIMD
+
+inline void accumulate_distance_terms(const float *query,
+                                      const char *candidate_bytes,
+                                      uint32_t dimension,
+                                      distance_terms_t *terms)
+{
+#if defined(CEPH_VECTOR_QUERY_EXEC_HAVE_X86_SIMD)
+  static const bool has_avx2 = [] {
+    ceph_arch_probe();
+    return ceph_arch_intel_avx2 != 0;
+  }();
+  if (has_avx2) {
+    accumulate_distance_terms_avx2(query, candidate_bytes, dimension, terms);
+    return;
+  }
+#endif
+  accumulate_distance_terms_scalar(query, candidate_bytes, dimension, terms);
+}
+
 inline int copy_float32_values(const ceph::bufferlist& data,
                                uint32_t dimension,
                                std::vector<float> *out_values)
@@ -403,33 +513,26 @@ inline int compute_float32_distance(const query_vectors_request_t& req,
     return -EINVAL;
   }
 
-  double dot = 0;
-  double candidate_norm = 0;
-  double sum_sq = 0;
-  for (uint32_t i = 0; i < req.dimension; ++i) {
-    const double q = query_values[i];
-    const double c = read_float32(candidate.data(), i);
-    dot += q * c;
-    candidate_norm += c * c;
-    const double diff = q - c;
-    sum_sq += diff * diff;
-  }
+  distance_terms_t terms;
+  accumulate_distance_terms(
+      query_values.data(), candidate.data(), req.dimension, &terms);
 
   switch (req.distance_metric) {
   case vector_distance_metric_euclidean:
-    *distance = static_cast<float>(std::sqrt(sum_sq));
+    *distance = static_cast<float>(std::sqrt(terms.sum_sq));
     return 0;
   case vector_distance_metric_cosine:
-    if (query_norm_squared == 0 || candidate_norm == 0) {
+    if (query_norm_squared == 0 || terms.candidate_norm_squared == 0) {
       *distance = std::numeric_limits<float>::infinity();
     } else {
       *distance = static_cast<float>(
-          1.0 - dot /
-          (std::sqrt(query_norm_squared) * std::sqrt(candidate_norm)));
+          1.0 - terms.dot /
+          (std::sqrt(query_norm_squared) *
+           std::sqrt(terms.candidate_norm_squared)));
     }
     return 0;
   case vector_distance_metric_dot:
-    *distance = static_cast<float>(-dot);
+    *distance = static_cast<float>(-terms.dot);
     return 0;
   default:
     return -EINVAL;
@@ -635,25 +738,35 @@ public:
 private:
   static bool has_required_fields(const vector_entry_view_t& entry)
   {
-    return !entry.entry_id.empty() &&
-      !entry.bucket_name.empty() &&
-      !entry.index_name.empty() &&
-      !entry.user_key.empty() &&
-      entry.has_vector_reference &&
-      entry.has_data_type &&
-      entry.has_distance_metric &&
-      entry.has_dimension;
+    if (entry.entry_id.empty() ||
+        !entry.has_vector_reference ||
+        !entry.has_data_type ||
+        !entry.has_distance_metric ||
+        !entry.has_dimension) {
+      return false;
+    }
+    // VectorNode-native rows never carry these (see is_vector_node_native);
+    // every other source must have them.
+    return entry.is_vector_node_native ||
+      (!entry.bucket_name.empty() &&
+       !entry.index_name.empty() &&
+       !entry.user_key.empty());
   }
 
   bool matches_request(const vector_entry_view_t& entry)
   {
-    if (entry.bucket_name != req.bucket_name) {
-      stats.bucket_mismatch++;
-      return false;
-    }
-    if (entry.index_name != req.index_name) {
-      stats.index_mismatch++;
-      return false;
+    // bucket_name/index_name/placement_key are unavailable for
+    // VectorNode-native rows and redundant to check for them anyway (see
+    // is_vector_node_native's comment).
+    if (!entry.is_vector_node_native) {
+      if (entry.bucket_name != req.bucket_name) {
+        stats.bucket_mismatch++;
+        return false;
+      }
+      if (entry.index_name != req.index_name) {
+        stats.index_mismatch++;
+        return false;
+      }
     }
     if (entry.data_type != req.data_type) {
       stats.data_type_mismatch++;
@@ -667,7 +780,7 @@ private:
       stats.dimension_mismatch++;
       return false;
     }
-    if (!probe_matches(req, entry)) {
+    if (!entry.is_vector_node_native && !probe_matches(req, entry)) {
       stats.probe_mismatch++;
       return false;
     }
