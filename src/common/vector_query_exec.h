@@ -60,8 +60,23 @@ struct vector_entry_view_t {
   bool has_data_type = false;
   bool has_distance_metric = false;
   bool has_dimension = false;
+  // True when metadata references vector content. OMAP may still be missing
+  // that payload; VectorNode records always provide it inline.
   bool has_vector_reference = false;
+  // Fixed-layout VectorNode records expose a contiguous, non-owning range.
+  // It is valid only while the pinned LIST extent remains alive.
+  std::string_view contiguous_vector_data;
+  // OMAP content can remain fragmented and continues to use bufferlist.
+  // At most one of the two payload sources may be populated.
   const ceph::bufferlist* vector_data = nullptr;
+
+  bool has_vector_payload() const {
+    return !contiguous_vector_data.empty() || vector_data != nullptr;
+  }
+
+  bool has_ambiguous_vector_payload() const {
+    return !contiguous_vector_data.empty() && vector_data != nullptr;
+  }
 };
 
 struct query_filter_stats_t {
@@ -374,7 +389,7 @@ inline double squared_l2_norm(const std::vector<float>& values)
 inline int compute_float32_distance(const query_vectors_request_t& req,
                                     const std::vector<float>& query_values,
                                     double query_norm_squared,
-                                    const ceph::bufferlist& candidate,
+                                    std::string_view candidate,
                                     float *distance)
 {
   if (distance == nullptr) {
@@ -384,19 +399,16 @@ inline int compute_float32_distance(const query_vectors_request_t& req,
     static_cast<size_t>(req.dimension) * sizeof(float);
   if (req.data_type != vector_data_type_float32 ||
       query_values.size() != req.dimension ||
-      candidate.length() != expected_len) {
+      candidate.size() != expected_len) {
     return -EINVAL;
   }
-
-  ceph::bufferlist candidate_copy = candidate;
-  const char *candidate_data = candidate_copy.c_str();
 
   double dot = 0;
   double candidate_norm = 0;
   double sum_sq = 0;
   for (uint32_t i = 0; i < req.dimension; ++i) {
     const double q = query_values[i];
-    const double c = read_float32(candidate_data, i);
+    const double c = read_float32(candidate.data(), i);
     dot += q * c;
     candidate_norm += c * c;
     const double diff = q - c;
@@ -424,10 +436,28 @@ inline int compute_float32_distance(const query_vectors_request_t& req,
   }
 }
 
-inline const std::string& result_entry_identity(
+inline int compute_float32_distance(const query_vectors_request_t& req,
+                                    const std::vector<float>& query_values,
+                                    double query_norm_squared,
+                                    const ceph::bufferlist& candidate,
+                                    float *distance)
+{
+  ceph::bufferlist candidate_copy = candidate;
+  const char *candidate_data = candidate_copy.c_str();
+  return compute_float32_distance(
+    req,
+    query_values,
+    query_norm_squared,
+    std::string_view(candidate_data, candidate_copy.length()),
+    distance);
+}
+
+inline const std::string& result_logical_identity(
     const query_vectors_result_entry_t& entry)
 {
-  return entry.entry_id;
+  // Partial results being merged belong to one request, which fixes the
+  // bucket and index; the user key is therefore the logical identity.
+  return entry.key;
 }
 
 inline bool result_entry_valid(const query_vectors_result_entry_t& entry)
@@ -451,13 +481,13 @@ inline void merge_result_entry(
   if (retained_results == nullptr) {
     return;
   }
-  const std::string& new_result_id = result_entry_identity(new_result);
+  const std::string& new_result_id = result_logical_identity(new_result);
   if (new_result_id.empty()) {
     retained_results->push_back(new_result);
     return;
   }
   for (auto& retained_result : *retained_results) {
-    if (result_entry_identity(retained_result) == new_result_id) {
+    if (result_logical_identity(retained_result) == new_result_id) {
       if (is_better_query_result(new_result, retained_result)) {
         retained_result = new_result;
       }
@@ -589,8 +619,8 @@ public:
       return -EINVAL;
     }
 
-    // VectorNode leaves and the OMAP adapter both expose at most one record
-    // per entry_id, so the post-merge count equals the matched count here.
+    // A local scan visits each physical record once. Logical duplicate
+    // merge happens when partial query results are combined.
     stats.merged_entries = stats.matched_entries;
     finalize_local_topk_results(&entries, req.local_top_k, heapified);
     stats.final_entries = entries.size();
@@ -646,15 +676,26 @@ private:
 
   void accumulate_result(const vector_entry_view_t& entry)
   {
-    if (entry.vector_data == nullptr) {
+    if (!entry.has_vector_payload()) {
       stats.missing_content++;
+      return;
+    }
+    if (entry.has_ambiguous_vector_payload()) {
+      stats.distance_error++;
       return;
     }
 
     float distance = 0;
     stats.distance_computations++;
-    int r = compute_float32_distance(
-        req, query_values, query_norm, *entry.vector_data, &distance);
+    const int r = !entry.contiguous_vector_data.empty()
+      ? compute_float32_distance(
+          req,
+          query_values,
+          query_norm,
+          entry.contiguous_vector_data,
+          &distance)
+      : compute_float32_distance(
+          req, query_values, query_norm, *entry.vector_data, &distance);
     if (r < 0) {
       // prepare() has already validated the request and query state. The
       // remaining failure is local to this record's vector payload.
