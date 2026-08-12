@@ -1843,7 +1843,7 @@ PGBackend::query_vectors(
         std::chrono::nanoseconds>(now - begin).count();
       logger().debug(
         "query_vectors storage=omap logical_entries={} matched_entries={} "
-        "distance_computations={} leaf_extents=0 logical_kv_bytes={} "
+        "distance_computations={} list_extents=0 logical_kv_bytes={} "
         "storage_path_ns={} query_exec_ns={} total_ns={}",
         filter_stats.total_entries,
         filter_stats.matched_entries,
