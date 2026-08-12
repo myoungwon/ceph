@@ -5,270 +5,27 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
+#include <cstring>
 #include <limits>
 #include <optional>
 
+#include <boost/range/irange.hpp>
+
 #include "common/error_code.h"
 #include "include/ceph_assert.h"
-#include "include/encoding.h"
 
 namespace crimson::os::seastore {
 
 namespace {
 
-constexpr uint32_t MAX_VECTOR_NODE_ITEMS =
-  VECTOR_NODE_MAX_BYTES / sizeof(uint32_t);
-
-void encode_laddr(laddr_t addr, ceph::bufferlist &bl)
+bool valid_page_image(std::string_view page)
 {
-  using ceph::encode;
-  const laddr_le_t encoded(addr);
-  encode(encoded.low64, bl);
-  encode(encoded.high64, bl);
+  return VectorNodeIndexLayout::open_checked(page.data(), page.size()) ||
+    VectorNodeListLayout::open_checked(page.data(), page.size());
 }
 
-laddr_t decode_laddr(ceph::bufferlist::const_iterator &p)
-{
-  using ceph::decode;
-  laddr_le_t encoded;
-  decode(encoded.low64, p);
-  decode(encoded.high64, p);
-  return encoded;
-}
-
-void encode_descriptor(
-  const vector_leaf_descriptor_t &descriptor,
-  ceph::bufferlist &bl)
-{
-  using ceph::encode;
-  encode(descriptor.first_entry_id, bl);
-  encode(descriptor.last_entry_id, bl);
-  encode_laddr(descriptor.laddr, bl);
-  encode(descriptor.entry_count, bl);
-  encode(descriptor.encoded_bytes, bl);
-}
-
-vector_leaf_descriptor_t decode_descriptor(
-  ceph::bufferlist::const_iterator &p)
-{
-  using ceph::decode;
-  vector_leaf_descriptor_t descriptor;
-  decode(descriptor.first_entry_id, p);
-  decode(descriptor.last_entry_id, p);
-  descriptor.laddr = decode_laddr(p);
-  decode(descriptor.entry_count, p);
-  decode(descriptor.encoded_bytes, p);
-  return descriptor;
-}
-
-void encode_entry(
-  const vector_node_entry_t &entry,
-  ceph::bufferlist &bl)
-{
-  entry.encode(bl);
-}
-
-vector_node_entry_t decode_entry(
-  ceph::bufferlist::const_iterator &p)
-{
-  vector_node_entry_t entry;
-  entry.decode(p);
-  if (ceph::os::validate_vector_record(entry) < 0) {
-    throw ceph::buffer::malformed_input("invalid VectorNode record");
-  }
-  return entry;
-}
-
-vector_leaf_descriptor_t make_descriptor(
-  const VectorNodeRef &leaf)
-{
-  const auto &contents = leaf->get_contents();
-  ceph_assert(contents.kind == vector_node_kind_t::LEAF);
-  ceph_assert(!contents.entries.empty());
-  return vector_leaf_descriptor_t{
-    contents.entries.front().entry_id,
-    contents.entries.back().entry_id,
-    leaf->get_laddr(),
-    static_cast<uint32_t>(contents.entries.size()),
-    static_cast<uint32_t>(VectorNode::encode_contents(contents).length())
-  };
-}
-
-bool valid_descriptor(const vector_leaf_descriptor_t &descriptor)
-{
-  return ceph::os::is_lower_hex_string(descriptor.first_entry_id, 8) &&
-    ceph::os::is_lower_hex_string(descriptor.last_entry_id, 8) &&
-    descriptor.first_entry_id <= descriptor.last_entry_id &&
-    descriptor.laddr != L_ADDR_NULL &&
-    descriptor.entry_count != 0 &&
-    descriptor.encoded_bytes != 0 &&
-    descriptor.encoded_bytes <= VECTOR_NODE_MAX_BYTES;
-}
-
-bool valid_node_contents(const vector_node_t &node)
-{
-  if (node.format_version != VECTOR_NODE_FORMAT_VERSION) {
-    return false;
-  }
-  if (node.kind == vector_node_kind_t::ROOT) {
-    if (!node.entries.empty() || !VectorNode::is_sorted(node.leaves)) {
-      return false;
-    }
-    uint64_t entry_count = 0;
-    for (const auto &descriptor : node.leaves) {
-      if (!valid_descriptor(descriptor) ||
-          entry_count > std::numeric_limits<uint64_t>::max() -
-            descriptor.entry_count) {
-        return false;
-      }
-      entry_count += descriptor.entry_count;
-    }
-    return entry_count == node.logical_entry_count;
-  }
-  if (node.kind == vector_node_kind_t::LEAF) {
-    return node.leaves.empty() &&
-      !node.entries.empty() &&
-      node.logical_entry_count == node.entries.size() &&
-      VectorNode::is_sorted(node.entries) &&
-      std::all_of(
-        node.entries.begin(), node.entries.end(), [](const auto &entry) {
-          return ceph::os::validate_vector_record(entry) == 0;
-        });
-  }
-  return false;
-}
-
-bool leaf_matches_descriptor(
-  const vector_node_t &leaf,
-  const vector_leaf_descriptor_t &descriptor)
-{
-  return leaf.kind == vector_node_kind_t::LEAF &&
-    !leaf.entries.empty() &&
-    leaf.entries.front().entry_id == descriptor.first_entry_id &&
-    leaf.entries.back().entry_id == descriptor.last_entry_id &&
-    leaf.entries.size() == descriptor.entry_count;
-}
-
-std::optional<size_t> find_split_position(
-  const std::vector<vector_node_entry_t> &entries,
-  extent_len_t node_bytes)
-{
-  if (entries.size() < 2) {
-    return std::nullopt;
-  }
-
-  const size_t midpoint = entries.size() / 2;
-  for (size_t distance = 0; distance < entries.size(); ++distance) {
-    const size_t candidates[] = {
-      midpoint >= distance ? midpoint - distance : 0,
-      midpoint + distance,
-    };
-    for (size_t position : candidates) {
-      if (position == 0 || position >= entries.size()) {
-        continue;
-      }
-      vector_node_t left;
-      left.kind = vector_node_kind_t::LEAF;
-      left.entries.assign(entries.begin(), entries.begin() + position);
-      left.logical_entry_count = left.entries.size();
-      vector_node_t right;
-      right.kind = vector_node_kind_t::LEAF;
-      right.entries.assign(entries.begin() + position, entries.end());
-      right.logical_entry_count = right.entries.size();
-      if (VectorNode::encode_contents(left).length() <= node_bytes &&
-          VectorNode::encode_contents(right).length() <= node_bytes) {
-        return position;
-      }
-    }
-  }
-  return std::nullopt;
-}
-
-}
-
-ceph::bufferlist VectorNode::encode_contents(const vector_node_t &node)
-{
-  using ceph::encode;
-  ceph::bufferlist bl;
-  encode(node.format_version, bl);
-  encode(static_cast<uint8_t>(node.kind), bl);
-  encode(node.logical_entry_count, bl);
-
-  if (node.kind == vector_node_kind_t::ROOT) {
-    encode(static_cast<uint32_t>(node.leaves.size()), bl);
-    for (const auto &leaf : node.leaves) {
-      encode_descriptor(leaf, bl);
-    }
-  } else {
-    encode(static_cast<uint32_t>(node.entries.size()), bl);
-    for (const auto &entry : node.entries) {
-      encode_entry(entry, bl);
-    }
-  }
-  return bl;
-}
-
-vector_node_t VectorNode::decode_contents(const ceph::bufferlist &bl)
-{
-  using ceph::decode;
-  auto p = bl.cbegin();
-  vector_node_t node;
-  decode(node.format_version, p);
-  if (node.format_version != VECTOR_NODE_FORMAT_VERSION) {
-    throw ceph::buffer::malformed_input("unsupported VectorNode format");
-  }
-
-  uint8_t kind = 0;
-  decode(kind, p);
-  if (kind != static_cast<uint8_t>(vector_node_kind_t::ROOT) &&
-      kind != static_cast<uint8_t>(vector_node_kind_t::LEAF)) {
-    throw ceph::buffer::malformed_input("invalid VectorNode kind");
-  }
-  node.kind = static_cast<vector_node_kind_t>(kind);
-  decode(node.logical_entry_count, p);
-
-  uint32_t item_count = 0;
-  decode(item_count, p);
-  if (item_count > MAX_VECTOR_NODE_ITEMS) {
-    throw ceph::buffer::malformed_input("invalid VectorNode item count");
-  }
-
-  if (node.kind == vector_node_kind_t::ROOT) {
-    node.leaves.reserve(item_count);
-    uint64_t entry_count = 0;
-    for (uint32_t i = 0; i < item_count; ++i) {
-      auto descriptor = decode_descriptor(p);
-      if (!valid_descriptor(descriptor)) {
-        throw ceph::buffer::malformed_input(
-            "invalid VectorNode leaf descriptor");
-      }
-      if (entry_count >
-          std::numeric_limits<uint64_t>::max() - descriptor.entry_count) {
-        throw ceph::buffer::malformed_input(
-            "VectorNode entry count overflow");
-      }
-      entry_count += descriptor.entry_count;
-      node.leaves.push_back(std::move(descriptor));
-    }
-    if (entry_count != node.logical_entry_count ||
-        !VectorNode::is_sorted(node.leaves)) {
-      throw ceph::buffer::malformed_input("invalid VectorNode root");
-    }
-  } else {
-    if (node.logical_entry_count != item_count) {
-      throw ceph::buffer::malformed_input(
-          "invalid VectorNode leaf entry count");
-    }
-    node.entries.reserve(item_count);
-    for (uint32_t i = 0; i < item_count; ++i) {
-      node.entries.push_back(decode_entry(p));
-    }
-    if (node.entries.empty() || !VectorNode::is_sorted(node.entries)) {
-      throw ceph::buffer::malformed_input("invalid VectorNode leaf");
-    }
-  }
-  return node;
-}
+} // anonymous namespace
 
 VectorNode::VectorNode(ceph::bufferptr &&ptr)
   : LogicalChildNode(std::move(ptr)) {}
@@ -277,42 +34,60 @@ VectorNode::VectorNode(extent_len_t length)
   : LogicalChildNode(length) {}
 
 VectorNode::VectorNode(const VectorNode &rhs)
-  : LogicalChildNode(rhs),
-    contents(rhs.contents),
-    decoded(rhs.decoded)
-{
-  ceph_assert(!rhs.dirty);
-}
+  : LogicalChildNode(rhs) {}
 
 CachedExtentRef VectorNode::duplicate_for_write(Transaction&)
 {
   return CachedExtentRef(new VectorNode(*this));
 }
 
+std::optional<VectorNodeIndexLayout> VectorNode::index_layout() const
+{
+  return VectorNodeIndexLayout::open_checked(
+    get_bptr().c_str(), get_length());
+}
+
+std::optional<VectorNodeListLayout> VectorNode::list_layout() const
+{
+  return VectorNodeListLayout::open_checked(
+    get_bptr().c_str(), get_length());
+}
+
+std::optional<VectorNodeIndexLayout> VectorNode::mutable_index_layout()
+{
+  return VectorNodeIndexLayout::open_checked(
+    get_bptr().c_str(), get_length());
+}
+
+std::optional<VectorNodeListLayout> VectorNode::mutable_list_layout()
+{
+  return VectorNodeListLayout::open_checked(
+    get_bptr().c_str(), get_length());
+}
+
+bool VectorNode::validate_page() const
+{
+  return index_layout().has_value() || list_layout().has_value();
+}
+
 void VectorNode::on_clean_read()
 {
-  decode_from_buffer();
-  dirty = false;
+  if (!validate_page()) {
+    throw ceph::buffer::malformed_input("invalid VectorNode page");
+  }
 }
 
 void VectorNode::on_initial_write()
-{
-  dirty = false;
-}
+{}
 
 void VectorNode::prepare_commit(Transaction&)
 {
-  if (dirty) {
-    materialize();
-  }
+  ceph_assert(validate_page());
 }
 
 ceph::bufferlist VectorNode::get_delta()
 {
-  if (dirty) {
-    materialize();
-  }
-
+  // VectorNode journal deltas are full-page images.
   ceph::bufferlist bl;
   ceph::bufferptr bptr(get_bptr(), 0, get_length());
   bl.append(bptr);
@@ -320,151 +95,100 @@ ceph::bufferlist VectorNode::get_delta()
 }
 
 void VectorNode::clear_delta()
+{}
+
+int VectorNode::initialize_index()
 {
-  dirty = false;
+  return VectorNodeIndexLayout::initialize(
+    get_bptr().c_str(), get_length()).has_value() ? 0 : -EINVAL;
 }
 
-void VectorNode::initialize_root()
+int VectorNode::initialize_list()
 {
-  contents = vector_node_t();
-  contents.kind = vector_node_kind_t::ROOT;
-  decoded = true;
-  dirty = true;
-  materialize();
+  return VectorNodeListLayout::initialize(
+    get_bptr().c_str(), get_length()).has_value() ? 0 : -EINVAL;
 }
 
-void VectorNode::initialize_leaf(
-  std::vector<vector_node_entry_t> entries)
+int VectorNode::replace_page(std::string_view page)
 {
-  contents = vector_node_t();
-  contents.kind = vector_node_kind_t::LEAF;
-  contents.logical_entry_count = entries.size();
-  contents.entries = std::move(entries);
-  decoded = true;
-  dirty = true;
-  materialize();
-}
-
-bool VectorNode::is_sorted(
-  const std::vector<vector_node_entry_t> &entries)
-{
-  return std::adjacent_find(
-    entries.begin(),
-    entries.end(),
-    [](const auto &lhs, const auto &rhs) {
-      return !(lhs.entry_id < rhs.entry_id);
-    }) == entries.end();
-}
-
-bool VectorNode::is_sorted(
-  const std::vector<vector_leaf_descriptor_t> &leaves)
-{
-  return std::adjacent_find(
-    leaves.begin(),
-    leaves.end(),
-    [](const auto &lhs, const auto &rhs) {
-      return !(lhs.last_entry_id < rhs.first_entry_id);
-    }) == leaves.end();
-}
-
-void VectorNode::decode_from_buffer()
-{
-  ceph::bufferlist bl;
-  bl.append(get_bptr());
-  contents = decode_contents(bl);
-  decoded = true;
-}
-
-void VectorNode::materialize()
-{
-  ceph_assert(decoded);
-  auto bl = encode_contents(contents);
-  ceph_assert(bl.length() <= get_length());
-  ceph_assert(bl.length() <= VECTOR_NODE_MAX_BYTES);
-
-  bl.rebuild();
-  get_bptr().zero();
-  if (bl.length()) {
-    get_bptr().copy_in(0, bl.length(), bl.front().c_str());
+  if (page.size() != get_length() || !valid_page_image(page)) {
+    return -EINVAL;
   }
+  get_bptr().copy_in(0, page.size(), page.data());
+  return 0;
 }
 
 void VectorNode::apply_delta(const ceph::bufferlist &_bl)
 {
-  ceph_assert(_bl.length() == get_length());
-
+  if (_bl.length() != get_length()) {
+    throw ceph::buffer::malformed_input("invalid VectorNode replay image");
+  }
   ceph::bufferlist bl = _bl;
   bl.rebuild();
-  get_bptr().copy_in(0, bl.length(), bl.front().c_str());
-  decode_from_buffer();
-  dirty = false;
-}
-
-void VectorNode::logical_on_delta_write()
-{
-  dirty = false;
+  const std::string_view page(bl.front().c_str(), bl.length());
+  if (!valid_page_image(page)) {
+    throw ceph::buffer::malformed_input("invalid VectorNode replay image");
+  }
+  get_bptr().copy_in(0, page.size(), page.data());
 }
 
 std::ostream &VectorNode::print_detail_l(std::ostream &out) const
 {
-  if (!decoded) {
-    return out << "undecoded";
+  if (const auto index = index_layout(); index) {
+    return out << "index entries=" << index->item_count();
   }
-  if (contents.kind == vector_node_kind_t::ROOT) {
-    return out << "root entries=" << contents.logical_entry_count
-               << ", leaves=" << contents.leaves.size();
+  if (const auto list = list_layout(); list) {
+    return out << "list entries=" << list->item_count();
   }
-  return out << "leaf entries=" << contents.entries.size();
+  return out << "invalid";
 }
 
-bool VectorNodeManager::is_valid_extent_size(extent_len_t length) const
+// A false result is surfaced by callers as ct_error::enospc, even though a
+// misconfigured block size is a configuration error rather than exhausted
+// space: create_iertr (TransactionManager::alloc_extent_iertr) has no other
+// error in its set to report this with.
+bool VectorNodeManager::is_valid_list_extent_size(extent_len_t length) const
 {
-  return length != 0 &&
-         length <= VECTOR_NODE_MAX_BYTES &&
-         is_aligned(length, tm.get_block_size()) &&
-         is_aligned(VECTOR_NODE_MAX_BYTES, tm.get_block_size());
+  return (length == (16u << 10) || length == (32u << 10)) &&
+         length % VECTOR_NODE_VECTOR_ALIGNMENT == 0 &&
+         is_aligned(length, tm.get_block_size());
 }
 
-VectorNodeManager::create_ret VectorNodeManager::create_vector_root(
+VectorNodeManager::create_ret VectorNodeManager::create_index_table(
   Transaction &t)
 {
-  if (!is_valid_extent_size(node_bytes)) {
+  // See is_valid_list_extent_size(): enospc here likewise stands in for a
+  // block-size/alignment configuration error, not exhausted space.
+  if (!is_aligned(VECTOR_NODE_INDEX_BYTES, tm.get_block_size())) {
     return crimson::ct_error::enospc::make();
   }
-
   return tm.alloc_non_data_extent<VectorNode>(
     t,
     laddr_hint_t::create_global_md_hint(),
-    node_bytes
-  ).si_then([](auto root) {
-    root->initialize_root();
-    return create_iertr::make_ready_future<VectorNodeRef>(std::move(root));
+    VECTOR_NODE_INDEX_BYTES
+  ).si_then([](auto index) -> create_ret {
+    if (index->initialize_index() < 0) {
+      return crimson::ct_error::input_output_error::make();
+    }
+    return create_iertr::make_ready_future<VectorNodeRef>(std::move(index));
   });
 }
 
-VectorNodeManager::create_ret VectorNodeManager::create_vector_leaf(
-  Transaction &t,
-  std::vector<vector_node_entry_t> entries)
+VectorNodeManager::create_ret VectorNodeManager::create_empty_vector_list(
+  Transaction &t)
 {
-  vector_node_t candidate;
-  candidate.kind = vector_node_kind_t::LEAF;
-  candidate.logical_entry_count = entries.size();
-  candidate.entries = entries;
-  if (!valid_node_contents(candidate)) {
-    return crimson::ct_error::input_output_error::make();
-  }
-  if (!is_valid_extent_size(node_bytes) ||
-      VectorNode::encode_contents(candidate).length() > node_bytes) {
+  if (!is_valid_list_extent_size(list_block_bytes)) {
     return crimson::ct_error::enospc::make();
   }
-
   return tm.alloc_non_data_extent<VectorNode>(
     t,
     laddr_hint_t::create_global_md_hint(),
-    node_bytes
-  ).si_then([entries=std::move(entries)](auto leaf) mutable {
-    leaf->initialize_leaf(std::move(entries));
-    return create_iertr::make_ready_future<VectorNodeRef>(std::move(leaf));
+    list_block_bytes
+  ).si_then([](auto list) -> create_ret {
+    if (list->initialize_list() < 0) {
+      return crimson::ct_error::input_output_error::make();
+    }
+    return create_iertr::make_ready_future<VectorNodeRef>(std::move(list));
   });
 }
 
@@ -473,235 +197,266 @@ VectorNodeManager::read_ret VectorNodeManager::read_vector_node(
   laddr_t addr)
 {
   return tm.read_extent<VectorNode>(t, addr
-  ).si_then([](auto ret) {
+  ).si_then([](auto ret) -> read_ret {
+    // Clean reads and replay are validated by VectorNode lifecycle hooks;
+    // layout accessors still checked-open the requested INDEX or LIST kind.
     return read_iertr::make_ready_future<VectorNodeRef>(
       std::move(ret.extent));
   });
 }
 
-VectorNodeManager::upsert_ret VectorNodeManager::replace_contents(
-  Transaction &t,
-  VectorNodeRef node,
-  vector_node_t contents)
+VectorNodeManager::find_ret VectorNodeManager::find_group_head(
+  Transaction&,
+  VectorNodeRef index,
+  uint32_t dimension,
+  uint32_t data_type)
 {
-  if (!valid_node_contents(contents)) {
+  if (!index) {
     return crimson::ct_error::input_output_error::make();
   }
-  const auto encoded_length = VectorNode::encode_contents(contents).length();
-  if (encoded_length > node->get_length() ||
-      encoded_length > VECTOR_NODE_MAX_BYTES) {
-    return crimson::ct_error::enospc::make();
+  const auto layout = index->index_layout();
+  if (!layout) {
+    return crimson::ct_error::input_output_error::make();
   }
-
-  auto mutable_node = tm.get_mutable_extent(
-    t,
-    node->cast<LogicalChildNode>())->cast<VectorNode>();
-  mutable_node->contents = std::move(contents);
-  mutable_node->decoded = true;
-  mutable_node->dirty = true;
-  mutable_node->materialize();
-  return mutate_iertr::make_ready_future<VectorNodeRef>(
-    std::move(mutable_node));
+  const auto position = layout->find_entry(dimension, data_type);
+  if (!position) {
+    return find_iertr::make_ready_future<std::optional<laddr_t>>(
+      std::nullopt);
+  }
+  const auto entry = layout->entry_at(*position);
+  if (!entry) {
+    return crimson::ct_error::input_output_error::make();
+  }
+  return find_iertr::make_ready_future<std::optional<laddr_t>>(
+    entry->head_laddr());
 }
 
-VectorNodeManager::upsert_ret VectorNodeManager::upsert_vector_entry(
+VectorNodeManager::append_ret VectorNodeManager::append_vector_entry(
   Transaction &t,
-  VectorNodeRef root,
-  const vector_node_entry_t &entry)
+  VectorNodeRef index,
+  const ceph::os::vector_record_t &entry)
 {
-  if (!root ||
-      root->get_contents().kind != vector_node_kind_t::ROOT ||
-      ceph::os::validate_vector_record(entry) < 0) {
+  if (!index || ceph::os::validate_vector_record(entry) < 0) {
     return crimson::ct_error::input_output_error::make();
   }
+  const auto index_layout = index->index_layout();
+  if (!index_layout) {
+    return crimson::ct_error::input_output_error::make();
+  }
+  const auto position =
+    index_layout->find_entry(entry.dimension, entry.data_type);
 
-  auto root_contents = root->get_contents();
-  if (root_contents.leaves.empty()) {
-    return create_vector_leaf(t, {entry}
-    ).si_then([this, &t, root=std::move(root),
-               root_contents=std::move(root_contents)](auto leaf) mutable {
-      root_contents.logical_entry_count = 1;
-      root_contents.leaves.push_back(make_descriptor(leaf));
-      return replace_contents(
-        t, std::move(root), std::move(root_contents));
+  if (!position) {
+    // Miss: create the group's first (and, for now, only) LIST block, then
+    // insert the index entry with head == tail == that block. No scan, no
+    // duplicate check.
+    return create_empty_vector_list(t
+    ).si_then([this, &t, index=std::move(index), entry](auto list) mutable
+        -> append_ret {
+      auto mutable_list = list->mutable_list_layout();
+      if (!mutable_list || mutable_list->append_record(entry) < 0) {
+        return crimson::ct_error::input_output_error::make();
+      }
+      auto mutable_index = tm.get_mutable_extent(
+        t, index->cast<LogicalChildNode>())->cast<VectorNode>();
+      auto mutable_index_layout = mutable_index->mutable_index_layout();
+      if (!mutable_index_layout) {
+        return crimson::ct_error::input_output_error::make();
+      }
+      const int result = mutable_index_layout->insert_entry(
+        entry.dimension, entry.data_type,
+        list->get_laddr(), list->get_laddr());
+      if (result < 0) {
+        return result == -ENOSPC
+          ? append_ret(crimson::ct_error::enospc::make())
+          : append_ret(crimson::ct_error::input_output_error::make());
+      }
+      return append_iertr::now();
     });
   }
 
-  auto descriptor = std::upper_bound(
-    root_contents.leaves.begin(),
-    root_contents.leaves.end(),
-    entry.entry_id,
-    [](const auto &entry_id, const auto &leaf) {
-      return entry_id < leaf.first_entry_id;
-    });
-  if (descriptor != root_contents.leaves.begin()) {
-    --descriptor;
+  // Hit: go straight to the tail block via the index entry -- this never
+  // walks the chain to find where to append.
+  const auto current_entry = index_layout->entry_at(*position);
+  if (!current_entry) {
+    return crimson::ct_error::input_output_error::make();
   }
-  const size_t descriptor_index =
-    std::distance(root_contents.leaves.begin(), descriptor);
+  const laddr_t tail_laddr = current_entry->tail_laddr();
+  const uint32_t entry_index = *position;
 
-  return read_vector_node(t, descriptor->laddr
-  ).si_then([this, &t, root=std::move(root), entry,
-             root_contents=std::move(root_contents),
-             descriptor_index](auto leaf) mutable -> upsert_ret {
-    if (!leaf_matches_descriptor(
-          leaf->get_contents(), root_contents.leaves[descriptor_index])) {
+  return read_vector_node(t, tail_laddr
+  ).si_then([this, &t, index=std::move(index), entry, entry_index](
+      auto tail) mutable -> append_ret {
+    auto mutable_tail = tm.get_mutable_extent(
+      t, tail->template cast<LogicalChildNode>())->template cast<VectorNode>();
+    auto mutable_tail_layout = mutable_tail->mutable_list_layout();
+    if (!mutable_tail_layout) {
+      return crimson::ct_error::input_output_error::make();
+    }
+    const int append_result = mutable_tail_layout->append_record(entry);
+    if (append_result == 0) {
+      // Common case: room in the current tail. The INDEX extent is never
+      // touched here.
+      return append_iertr::now();
+    }
+    if (append_result != -ENOSPC) {
       return crimson::ct_error::input_output_error::make();
     }
 
-    auto leaf_contents = leaf->get_contents();
-    auto position = std::lower_bound(
-      leaf_contents.entries.begin(),
-      leaf_contents.entries.end(),
-      entry.entry_id,
-      [](const auto &stored, const auto &entry_id) {
-        return stored.entry_id < entry_id;
-      });
-    const bool inserted =
-      position == leaf_contents.entries.end() ||
-      position->entry_id != entry.entry_id;
-    if (inserted) {
-      leaf_contents.entries.insert(position, entry);
-      leaf_contents.logical_entry_count++;
-    } else {
-      *position = entry;
-    }
-
-    const auto encoded_length =
-      VectorNode::encode_contents(leaf_contents).length();
-    if (encoded_length <= leaf->get_length()) {
-      return replace_contents(t, std::move(leaf), std::move(leaf_contents)
-      ).si_then([this, &t, root=std::move(root),
-                 root_contents=std::move(root_contents),
-                 descriptor_index, inserted](auto leaf) mutable {
-        root_contents.leaves[descriptor_index] = make_descriptor(leaf);
-        if (inserted) {
-          root_contents.logical_entry_count++;
-        }
-        return replace_contents(
-          t, std::move(root), std::move(root_contents));
-      });
-    }
-
-    const auto split_position =
-      find_split_position(leaf_contents.entries, leaf->get_length());
-    if (!split_position) {
-      return crimson::ct_error::enospc::make();
-    }
-
-    std::vector<vector_node_entry_t> right_entries(
-      leaf_contents.entries.begin() + *split_position,
-      leaf_contents.entries.end());
-    leaf_contents.entries.erase(
-      leaf_contents.entries.begin() + *split_position,
-      leaf_contents.entries.end());
-    leaf_contents.logical_entry_count = leaf_contents.entries.size();
-
-    return create_vector_leaf(t, std::move(right_entries)
-    ).si_then([this, &t, root=std::move(root), leaf=std::move(leaf),
-               leaf_contents=std::move(leaf_contents),
-               root_contents=std::move(root_contents),
-               descriptor_index, inserted](auto right_leaf) mutable {
-      return replace_contents(t, std::move(leaf), std::move(leaf_contents)
-      ).si_then([this, &t, root=std::move(root),
-                 right_leaf=std::move(right_leaf),
-                 root_contents=std::move(root_contents),
-                 descriptor_index, inserted](auto left_leaf) mutable {
-        root_contents.leaves[descriptor_index] =
-          make_descriptor(left_leaf);
-        root_contents.leaves.insert(
-          root_contents.leaves.begin() + descriptor_index + 1,
-          make_descriptor(right_leaf));
-        if (inserted) {
-          root_contents.logical_entry_count++;
-        }
-        return replace_contents(
-          t, std::move(root), std::move(root_contents));
-      });
+    // Tail full: allocate a new block, link the old tail to it, and
+    // rewrite only this entry's tail_laddr in the INDEX extent.
+    return create_empty_vector_list(t
+    ).si_then([this, &t, index=std::move(index), entry, entry_index,
+               mutable_tail=std::move(mutable_tail)](auto new_tail) mutable
+        -> append_ret {
+      auto new_list_layout = new_tail->mutable_list_layout();
+      if (!new_list_layout || new_list_layout->append_record(entry) < 0) {
+        return crimson::ct_error::input_output_error::make();
+      }
+      auto old_list_layout = mutable_tail->mutable_list_layout();
+      if (!old_list_layout ||
+          old_list_layout->set_next_page_laddr(new_tail->get_laddr()) < 0) {
+        return crimson::ct_error::input_output_error::make();
+      }
+      auto mutable_index = tm.get_mutable_extent(
+        t, index->cast<LogicalChildNode>())->cast<VectorNode>();
+      auto mutable_index_layout = mutable_index->mutable_index_layout();
+      if (!mutable_index_layout ||
+          mutable_index_layout->set_tail_laddr(
+            entry_index, new_tail->get_laddr()) < 0) {
+        return crimson::ct_error::input_output_error::make();
+      }
+      return append_iertr::now();
     });
   });
 }
 
-VectorNodeManager::scan_ret VectorNodeManager::scan_vector_entries(
+VectorNodeManager::scan_ret VectorNodeManager::scan_vector_group(
   Transaction &t,
-  VectorNodeRef root,
+  laddr_t head_laddr,
+  uint32_t dimension,
+  uint32_t data_type,
   scan_visitor_t visitor,
   bool measure_visitor)
 {
-  if (!root ||
-      root->get_contents().kind != vector_node_kind_t::ROOT) {
+  if (head_laddr == L_ADDR_NULL) {
     return crimson::ct_error::input_output_error::make();
   }
-
+  size_t element_size = 0;
+  if (ceph::rados::vector_data_type_size(data_type, &element_size) < 0 ||
+      dimension == 0 || dimension > ceph::rados::vector_max_dimension) {
+    return crimson::ct_error::input_output_error::make();
+  }
+  const uint32_t row_length =
+    static_cast<uint32_t>(uint64_t(dimension) * element_size);
   return seastar::do_with(
-    std::move(root),
+    head_laddr,
     std::move(visitor),
     vector_scan_stats_t(),
-    [this, &t, measure_visitor](auto &root, auto &visitor, auto &stats) {
-      stats.extent_bytes_scanned = root->get_length();
-      return trans_intr::do_for_each(
-        root->get_contents().leaves,
-        [this, &t, &visitor, &stats, measure_visitor](
-            const auto &descriptor) {
-          return read_vector_node(t, descriptor.laddr
-          ).si_then([&visitor, &stats, descriptor, measure_visitor](auto leaf)
-              -> read_iertr::future<> {
-            const auto &contents = leaf->get_contents();
-            if (!leaf_matches_descriptor(contents, descriptor) ||
-                VectorNode::encode_contents(contents).length() !=
-                  descriptor.encoded_bytes) {
+    [this, &t, measure_visitor, row_length](
+        auto &next_laddr, auto &visitor, auto &stats) {
+      return trans_intr::repeat(
+        [this, &t, &next_laddr, &visitor, &stats, measure_visitor,
+         row_length]()
+            -> read_iertr::future<seastar::stop_iteration> {
+          if (next_laddr == L_ADDR_NULL) {
+            return read_iertr::make_ready_future<seastar::stop_iteration>(
+              seastar::stop_iteration::yes);
+          }
+          return read_vector_node(t, next_laddr
+          ).si_then([&next_laddr, &visitor, &stats, measure_visitor,
+                     row_length](
+              auto list) -> read_iertr::future<seastar::stop_iteration> {
+            const auto layout = list->list_layout();
+            if (!layout) {
               return crimson::ct_error::input_output_error::make();
             }
-            stats.leaf_extents++;
-            stats.extent_bytes_scanned += leaf->get_length();
+            stats.list_extents++;
+            stats.extent_bytes_visited += list->get_length();
             const auto visitor_begin = measure_visitor
               ? std::chrono::steady_clock::now()
               : std::chrono::steady_clock::time_point();
-            for (const auto &entry : contents.entries) {
-              visitor(entry);
-              stats.logical_entries++;
+            uint64_t block_entries = 0;
+            const int scan_result = layout->scan_records(
+              row_length,
+              [&visitor, &block_entries](const VectorNodeRecordView &record) {
+                visitor(record);
+                ++block_entries;
+              });
+            if (scan_result < 0) {
+              return crimson::ct_error::input_output_error::make();
             }
+            stats.logical_entries += block_entries;
             if (measure_visitor) {
               stats.visitor_ns += std::chrono::duration_cast<
                 std::chrono::nanoseconds>(
                   std::chrono::steady_clock::now() - visitor_begin).count();
             }
-            return read_iertr::now();
+            next_laddr = layout->next_page_laddr();
+            return read_iertr::make_ready_future<seastar::stop_iteration>(
+              seastar::stop_iteration::no);
           });
         }
-      ).si_then([&root, &stats]
-          -> read_iertr::future<vector_scan_stats_t> {
-        if (stats.logical_entries !=
-            root->get_contents().logical_entry_count) {
-          return crimson::ct_error::input_output_error::make();
-        }
+      ).si_then([&stats] {
         return read_iertr::make_ready_future<vector_scan_stats_t>(stats);
       });
     });
 }
 
-VectorNodeManager::remove_ret VectorNodeManager::remove_vector_tree(
+VectorNodeManager::remove_ret VectorNodeManager::remove_index_table(
   Transaction &t,
-  VectorNodeRef root)
+  VectorNodeRef index)
 {
-  if (!root ||
-      root->get_contents().kind != vector_node_kind_t::ROOT) {
+  if (!index) {
+    return crimson::ct_error::input_output_error::make();
+  }
+  auto layout = index->index_layout();
+  if (!layout) {
     return crimson::ct_error::input_output_error::make();
   }
 
   return seastar::do_with(
-    std::move(root),
-    [this, &t](auto &root) {
+    std::move(index),
+    std::move(*layout),
+    [this, &t](auto &index, auto &layout) {
+      const auto indices = boost::irange<uint32_t>(0, layout.item_count());
       return trans_intr::do_for_each(
-        root->get_contents().leaves,
-        [this, &t](const auto &descriptor) {
-          return tm.remove(t, descriptor.laddr
-          ).si_then([](auto) {
-            return remove_iertr::now();
-          });
+        indices.begin(), indices.end(),
+        [this, &t, &layout](uint32_t entry_index) -> remove_iertr::future<> {
+          const auto entry = layout.entry_at(entry_index);
+          if (!entry) {
+            return crimson::ct_error::input_output_error::make();
+          }
+          return seastar::do_with(
+            entry->head_laddr(),
+            [this, &t](auto &next_laddr) {
+              return trans_intr::repeat(
+                [this, &t, &next_laddr]()
+                    -> remove_iertr::future<seastar::stop_iteration> {
+                  if (next_laddr == L_ADDR_NULL) {
+                    return remove_iertr::make_ready_future<
+                      seastar::stop_iteration>(seastar::stop_iteration::yes);
+                  }
+                  return read_vector_node(t, next_laddr
+                  ).si_then([this, &t, &next_laddr](auto list)
+                      -> remove_iertr::future<seastar::stop_iteration> {
+                    const auto list_layout = list->list_layout();
+                    if (!list_layout) {
+                      return crimson::ct_error::input_output_error::make();
+                    }
+                    const laddr_t current = next_laddr;
+                    next_laddr = list_layout->next_page_laddr();
+                    return tm.remove(t, current
+                    ).si_then([](auto) {
+                      return remove_iertr::make_ready_future<
+                        seastar::stop_iteration>(seastar::stop_iteration::no);
+                    });
+                  });
+                });
+            });
         }
-      ).si_then([this, &t, &root] {
-        return tm.remove(t, root->template cast<LogicalChildNode>()
+      ).si_then([this, &t, &index] {
+        return tm.remove(t, index->template cast<LogicalChildNode>()
         ).si_then([](auto) {
           return remove_iertr::now();
         });
