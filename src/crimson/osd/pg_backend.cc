@@ -1716,10 +1716,6 @@ PGBackend::put_vector(
     throw crimson::osd::invalid_argument{};
   }
 
-  if (os.oi.has_vector_node() && os.oi.is_omap()) {
-    throw crimson::osd::error(std::errc::io_error);
-  }
-
   const bool use_vector_node =
     os.oi.has_vector_node() ||
     (vector_nodes_enabled() && !os.exists);
@@ -1734,14 +1730,24 @@ PGBackend::put_vector(
   record.encode(encoded_record);
   delta_stats.num_wr++;
   delta_stats.num_wr_kb += shift_round_up(encoded_record.length(), 10);
-  if (!use_vector_node) {
-    osd_op_params.clean_regions.mark_omap_dirty();
-    if (!os.oi.is_omap()) {
-      os.oi.set_flag(object_info_t::FLAG_OMAP);
-      delta_stats.num_objects_omap++;
-    }
-    os.oi.clear_omap_digest();
+
+  // Vector bytes go to exactly one place: VectorNode's LIST page when
+  // use_vector_node, otherwise OMAP's _CONTENT_<vector_hash> key via
+  // enqueue_vector_put() above. Either way, this entry's identity and any
+  // application metadata always goes to OMAP under _ENTRY_<entry_id>.*, so
+  // a query can restore them for a scanned/matched entry_id with a plain
+  // point lookup regardless of which backend stored the vector bytes.
+  if (use_vector_node) {
+    txn.omap_setkeys(
+      coll->get_cid(), ghobject_t{os.oi.soid},
+      ceph::os::make_vector_omap_identity(record));
   }
+  osd_op_params.clean_regions.mark_omap_dirty();
+  if (!os.oi.is_omap()) {
+    os.oi.set_flag(object_info_t::FLAG_OMAP);
+    delta_stats.num_objects_omap++;
+  }
+  os.oi.clear_omap_digest();
   return seastar::now();
 }
 
@@ -1768,10 +1774,6 @@ PGBackend::query_vectors(
     throw crimson::osd::invalid_argument{};
   }
 
-  if (os.oi.has_vector_node() && os.oi.is_omap()) {
-    throw crimson::osd::error(std::errc::io_error);
-  }
-
   ceph::rados::query_vectors_result_t query_result;
   if (os.exists && !os.oi.is_whiteout() &&
       os.oi.has_vector_node()) {
@@ -1787,6 +1789,40 @@ PGBackend::query_vectors(
     }
     ceph_assert(native_result);
     query_result = std::move(*native_result);
+
+    // The LIST scan above only ever sees entry_id + vector bytes (see
+    // vector_node_layout.h), so every result's `key` (user_key) is still
+    // empty here. Restore it with one point lookup keyed by entry_id,
+    // covering only the entries that survived top-k selection -- never
+    // one lookup per scanned candidate.
+    if (!query_result.entries.empty()) {
+      std::set<std::string> identity_keys_to_get;
+      for (const auto &entry : query_result.entries) {
+        identity_keys_to_get.insert("_ENTRY_" + entry.entry_id + ".user_key");
+      }
+      crimson::os::FuturizedStore::Shard::omap_values_t identity_vals;
+      co_await maybe_get_omap_vals_by_keys(
+        store, coll, os.oi, identity_keys_to_get
+      ).safe_then_interruptible(
+        [&identity_vals](crimson::os::FuturizedStore::Shard::omap_values_t
+                            &&vals) {
+          identity_vals = std::move(vals);
+          return ll_read_errorator::now();
+        }).handle_error_interruptible(
+        crimson::ct_error::enodata::handle([] {
+          return ll_read_errorator::now();
+        }),
+        ll_read_errorator::pass_further{}
+      );
+      for (auto &entry : query_result.entries) {
+        const auto found = identity_vals.find(
+          "_ENTRY_" + entry.entry_id + ".user_key");
+        if (found != identity_vals.end()) {
+          ceph::rados::vector_query_exec::decode_omap_string_value(
+            found->second, &entry.key);
+        }
+      }
+    }
   } else {
     const bool measure =
       logger().is_enabled(seastar::log_level::debug);
