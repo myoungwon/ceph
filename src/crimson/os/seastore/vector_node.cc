@@ -4,6 +4,7 @@
 #include "crimson/os/seastore/vector_node.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cerrno>
 #include <cstring>
 #include <limits>
@@ -334,7 +335,8 @@ VectorNodeManager::scan_ret VectorNodeManager::scan_vector_group(
   laddr_t head_laddr,
   uint32_t dimension,
   uint32_t data_type,
-  scan_visitor_t visitor)
+  scan_visitor_t visitor,
+  bool measure_visitor)
 {
   if (head_laddr == L_ADDR_NULL) {
     return crimson::ct_error::input_output_error::make();
@@ -350,17 +352,19 @@ VectorNodeManager::scan_ret VectorNodeManager::scan_vector_group(
     head_laddr,
     std::move(visitor),
     vector_scan_stats_t(),
-    [this, &t, row_length](
+    [this, &t, measure_visitor, row_length](
         auto &next_laddr, auto &visitor, auto &stats) {
       return trans_intr::repeat(
-        [this, &t, &next_laddr, &visitor, &stats, row_length]()
+        [this, &t, &next_laddr, &visitor, &stats, measure_visitor,
+         row_length]()
             -> read_iertr::future<seastar::stop_iteration> {
           if (next_laddr == L_ADDR_NULL) {
             return read_iertr::make_ready_future<seastar::stop_iteration>(
               seastar::stop_iteration::yes);
           }
           return read_vector_node(t, next_laddr
-          ).si_then([&next_laddr, &visitor, &stats, row_length](
+          ).si_then([&next_laddr, &visitor, &stats, measure_visitor,
+                     row_length](
               auto list) -> read_iertr::future<seastar::stop_iteration> {
             const auto layout = list->list_layout();
             if (!layout) {
@@ -368,6 +372,9 @@ VectorNodeManager::scan_ret VectorNodeManager::scan_vector_group(
             }
             stats.list_extents++;
             stats.extent_bytes_visited += list->get_length();
+            const auto visitor_begin = measure_visitor
+              ? std::chrono::steady_clock::now()
+              : std::chrono::steady_clock::time_point();
             uint64_t block_entries = 0;
             const int scan_result = layout->scan_records(
               row_length,
@@ -379,6 +386,11 @@ VectorNodeManager::scan_ret VectorNodeManager::scan_vector_group(
               return crimson::ct_error::input_output_error::make();
             }
             stats.logical_entries += block_entries;
+            if (measure_visitor) {
+              stats.visitor_ns += std::chrono::duration_cast<
+                std::chrono::nanoseconds>(
+                  std::chrono::steady_clock::now() - visitor_begin).count();
+            }
             next_laddr = layout->next_page_laddr();
             return read_iertr::make_ready_future<seastar::stop_iteration>(
               seastar::stop_iteration::no);

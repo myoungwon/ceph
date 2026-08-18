@@ -27,6 +27,7 @@ struct vector_scan_stats_t {
   uint64_t list_extents = 0;
   // Logical sizes of visited cached extents, not physical device I/O bytes.
   uint64_t extent_bytes_visited = 0;
+  uint64_t visitor_ns = 0;
 };
 
 class VectorNode : public LogicalChildNode {
@@ -122,12 +123,16 @@ public:
   // every row in the chain shares that group's row byte length
   // (dimension * element_size(data_type)), which LIST pages no longer
   // store per row (see VectorNodeListLayout), so the caller supplies it.
+  // measure_visitor times the visitor calls and accumulates them into
+  // vector_scan_stats_t::visitor_ns; off by default since it costs a
+  // clock read per LIST block even when unused.
   scan_ret scan_vector_group(
     Transaction &t,
     laddr_t head_laddr,
     uint32_t dimension,
     uint32_t data_type,
-    scan_visitor_t visitor);
+    scan_visitor_t visitor,
+    bool measure_visitor = false);
 
   using remove_iertr = TransactionManager::ref_iertr;
   using remove_ret = remove_iertr::future<>;
