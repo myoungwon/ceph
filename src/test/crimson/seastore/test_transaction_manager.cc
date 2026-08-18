@@ -1,6 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
 // vim: ts=8 sw=2 sts=2 expandtab
 
+#include <array>
 #include <random>
 
 #include <boost/iterator/counting_iterator.hpp>
@@ -12,6 +13,7 @@
 #include "crimson/os/seastore/transaction_manager.h"
 #include "crimson/os/seastore/segment_manager/ephemeral.h"
 #include "crimson/os/seastore/segment_manager.h"
+#include "crimson/os/seastore/vector_node_layout.h"
 
 #include "test/crimson/seastore/test_block.h"
 #include "crimson/os/seastore/lba/lba_btree_node.h"
@@ -1962,6 +1964,95 @@ TEST_P(tm_single_device_test_t, mutate)
     check();
   });
 }
+
+TEST(vector_node_index_layout_t, exact_lookup_hit_and_miss)
+{
+  std::vector<char> page(4 << 10, '\0');  // VECTOR_NODE_INDEX_BYTES not yet named
+  auto layout = VectorNodeIndexLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  const laddr_t head = laddr_t::from_byte_offset(0x1000);
+  const laddr_t tail = laddr_t::from_byte_offset(0x2000);
+  ASSERT_EQ(0, layout->insert_entry(
+    128, ceph::rados::vector_data_type_float32, head, tail));
+
+  const auto hit = layout->find_entry(
+    128, ceph::rados::vector_data_type_float32);
+  ASSERT_TRUE(hit);
+  const auto entry = layout->entry_at(*hit);
+  ASSERT_TRUE(entry);
+  EXPECT_EQ(head, entry->head_laddr());
+  EXPECT_EQ(tail, entry->tail_laddr());
+
+  // Exact match only: neither a different dimension nor a different
+  // data_type is treated as "close enough".
+  EXPECT_FALSE(layout->find_entry(
+    256, ceph::rados::vector_data_type_float32));
+  EXPECT_FALSE(layout->find_entry(
+    128, ceph::rados::vector_data_type_float32 + 1));
+}
+
+TEST(vector_node_index_layout_t, rejects_duplicate_group)
+{
+  std::vector<char> page(4 << 10, '\0');  // VECTOR_NODE_INDEX_BYTES not yet named
+  auto layout = VectorNodeIndexLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  const laddr_t addr = laddr_t::from_byte_offset(0x1000);
+  ASSERT_EQ(0, layout->insert_entry(
+    128, ceph::rados::vector_data_type_float32, addr, addr));
+  EXPECT_EQ(-EEXIST, layout->insert_entry(
+    128, ceph::rados::vector_data_type_float32, addr, addr));
+}
+
+TEST(vector_node_index_layout_t, entries_stay_sorted_for_binary_search)
+{
+  std::vector<char> page(4 << 10, '\0');  // VECTOR_NODE_INDEX_BYTES not yet named
+  auto layout = VectorNodeIndexLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  const laddr_t addr = laddr_t::from_byte_offset(0x1000);
+  const std::array<uint32_t, 4> dimensions = {768, 128, 384, 256};
+  for (const auto dimension : dimensions) {
+    ASSERT_EQ(0, layout->insert_entry(
+      dimension, ceph::rados::vector_data_type_float32, addr, addr));
+  }
+  ASSERT_EQ(4u, layout->item_count());
+  uint32_t previous = 0;
+  for (uint32_t i = 0; i < layout->item_count(); ++i) {
+    const auto entry = layout->entry_at(i);
+    ASSERT_TRUE(entry);
+    EXPECT_LT(previous, entry->dimension());
+    previous = entry->dimension();
+  }
+  for (const auto dimension : dimensions) {
+    EXPECT_TRUE(layout->find_entry(
+      dimension, ceph::rados::vector_data_type_float32));
+  }
+}
+
+TEST(vector_node_index_layout_t, set_tail_laddr_rewrites_only_tail)
+{
+  std::vector<char> page(4 << 10, '\0');  // VECTOR_NODE_INDEX_BYTES not yet named
+  auto layout = VectorNodeIndexLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  const laddr_t head = laddr_t::from_byte_offset(0x1000);
+  const laddr_t old_tail = laddr_t::from_byte_offset(0x2000);
+  const laddr_t new_tail = laddr_t::from_byte_offset(0x3000);
+  ASSERT_EQ(0, layout->insert_entry(
+    128, ceph::rados::vector_data_type_float32, head, old_tail));
+  const auto index = layout->find_entry(
+    128, ceph::rados::vector_data_type_float32);
+  ASSERT_TRUE(index);
+  ASSERT_EQ(0, layout->set_tail_laddr(*index, new_tail));
+
+  const auto entry = layout->entry_at(*index);
+  ASSERT_TRUE(entry);
+  EXPECT_EQ(head, entry->head_laddr());
+  EXPECT_EQ(new_tail, entry->tail_laddr());
+}
+
 
 TEST_P(tm_single_device_test_t, allocate_lba_conflict)
 {
