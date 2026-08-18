@@ -1731,14 +1731,20 @@ PGBackend::put_vector(
   record.encode(encoded_record);
   delta_stats.num_wr++;
   delta_stats.num_wr_kb += shift_round_up(encoded_record.length(), 10);
-  if (!use_vector_node) {
-    osd_op_params.clean_regions.mark_omap_dirty();
-    if (!os.oi.is_omap()) {
-      os.oi.set_flag(object_info_t::FLAG_OMAP);
-      delta_stats.num_objects_omap++;
-    }
-    os.oi.clear_omap_digest();
+
+  // Identity/metadata always goes to OMAP under _ENTRY_<entry_id>.*, even
+  // when the vector bytes themselves went to VectorNode above.
+  if (use_vector_node) {
+    txn.omap_setkeys(
+      coll->get_cid(), ghobject_t{os.oi.soid},
+      ceph::os::make_vector_omap_identity(record));
   }
+  osd_op_params.clean_regions.mark_omap_dirty();
+  if (!os.oi.is_omap()) {
+    os.oi.set_flag(object_info_t::FLAG_OMAP);
+    delta_stats.num_objects_omap++;
+  }
+  os.oi.clear_omap_digest();
   return seastar::now();
 }
 
@@ -1780,6 +1786,38 @@ PGBackend::query_vectors(
     }
     ceph_assert(native_result);
     query_result = std::move(*native_result);
+
+    // `key` (user_key) is still empty here: the LIST scan above only ever
+    // sees entry_id + vector bytes. Restore it with one point lookup per
+    // surviving entry_id, not one per scanned candidate.
+    if (!query_result.entries.empty()) {
+      std::set<std::string> identity_keys_to_get;
+      for (const auto &entry : query_result.entries) {
+        identity_keys_to_get.insert("_ENTRY_" + entry.entry_id + ".user_key");
+      }
+      crimson::os::FuturizedStore::Shard::omap_values_t identity_vals;
+      co_await maybe_get_omap_vals_by_keys(
+        store, coll, os.oi, identity_keys_to_get
+      ).safe_then_interruptible(
+        [&identity_vals](crimson::os::FuturizedStore::Shard::omap_values_t
+                            &&vals) {
+          identity_vals = std::move(vals);
+          return ll_read_errorator::now();
+        }).handle_error_interruptible(
+        crimson::ct_error::enodata::handle([] {
+          return ll_read_errorator::now();
+        }),
+        ll_read_errorator::pass_further{}
+      );
+      for (auto &entry : query_result.entries) {
+        const auto found = identity_vals.find(
+          "_ENTRY_" + entry.entry_id + ".user_key");
+        if (found != identity_vals.end()) {
+          ceph::rados::vector_query_exec::decode_omap_string_value(
+            found->second, &entry.key);
+        }
+      }
+    }
   } else {
     const bool measure =
       logger().is_enabled(seastar::log_level::debug);
