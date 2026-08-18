@@ -17,6 +17,7 @@
 
 /* flags we export */
 int ceph_arch_intel_avx512_vpclmul = 0;
+int ceph_arch_intel_avx2 = 0;
 int ceph_arch_intel_pclmul = 0;
 int ceph_arch_intel_sse42 = 0;
 int ceph_arch_intel_sse41 = 0;
@@ -39,9 +40,14 @@ int ceph_arch_intel_aesni = 0;
 #define CPUID_SSE2	(1 << 26)
 #define CPUID_AESNI 	(1 << 25)
 #define CPUID_OSXSAVE	(1 << 27)
+#define CPUID_AVX	(1 << 28)
+
+#define CPUID7_0_AVX2_EBX	(1 << 5)
 
 /* SSE:[1] AVX:[2] Opmask:[5] ZMM_HI256:[6] ZMM16-31:[7]*/
 #define XCR0_AVX512		(0x000000E6ULL)
+/* SSE:[1] AVX:[2] -- the minimum state needed for 256-bit AVX/AVX2 use */
+#define XCR0_AVX		(0x00000006ULL)
 
 /* Match ISA-L requirements since we call into it. May be stricter than necessary. */
 /* AVX512F:[16] DQ:[17] CD:[28] BW:[30] VL:[31] */
@@ -81,6 +87,20 @@ int ceph_arch_intel_probe(void)
 	}
 	if ((ecx & CPUID_AESNI) != 0) {
 	        ceph_arch_intel_aesni = 1;
+	}
+
+	/*
+	 * AVX2 feature: OSXSAVE/XGETBV must report the SSE+AVX state as
+	 * enabled before it is safe to issue 256-bit AVX/AVX2 instructions,
+	 * then CPUID leaf 7 confirms the CPU itself implements AVX2.
+	 */
+	if ((ecx & CPUID_AVX) && (ecx & CPUID_OSXSAVE) &&
+	    ((ceph_xgetbv(0) & XCR0_AVX) == XCR0_AVX)) {
+		unsigned int eax_7_0 = 0, ebx_7_0 = 0, ecx_7_0 = 0, edx_7_0 = 0;
+		if (__get_cpuid_count(7, 0, &eax_7_0, &ebx_7_0, &ecx_7_0, &edx_7_0) &&
+		    (ebx_7_0 & CPUID7_0_AVX2_EBX)) {
+			ceph_arch_intel_avx2 = 1;
+		}
 	}
 
 	/*
