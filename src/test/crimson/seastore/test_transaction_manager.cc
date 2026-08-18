@@ -26,6 +26,53 @@ namespace {
   [[maybe_unused]] seastar::logger& logger() {
     return crimson::get_logger(ceph_subsys_test);
   }
+
+  ceph::bufferlist make_vector_payload(std::string_view payload) {
+    ceph::bufferlist bl;
+    bl.append(payload.data(), payload.size());
+    return bl;
+  }
+
+  ceph::os::vector_record_t make_vector_entry(
+    std::string entry_id,
+    std::string payload = "aaaa",
+    std::string user_key = {},
+    std::string metadata = {}) {
+    ceph::os::vector_record_t entry;
+    entry.entry_id = std::move(entry_id);
+    entry.bucket_name = "bucket";
+    entry.index_name = "index";
+    entry.user_key = user_key.empty() ? "key-" + entry.entry_id : user_key;
+    entry.data_type = ceph::rados::vector_data_type_float32;
+    entry.distance_metric =
+      ceph::rados::vector_distance_metric_euclidean;
+    entry.dimension = payload.size() / sizeof(float);
+    entry.placement_algorithm =
+      ceph::rados::vector_placement_algorithm_hash_v0;
+    entry.placement_key = "abcd";
+    entry.vector_hash = "01234567";
+    entry.metadata = make_vector_payload(metadata);
+    entry.vector_data = make_vector_payload(payload);
+    return entry;
+  }
+
+  // Collects every record from a LIST page in append (slot) order --
+  // never entry_id order, since LIST no longer sorts. `row_length` is the
+  // group's per-row byte length (dimension * element_size(data_type)),
+  // which LIST pages no longer store, so the caller supplies it -- same
+  // contract as VectorNodeListLayout::scan_records().
+  std::vector<std::pair<std::string, std::string>> collect_list_records(
+    const VectorNodeListLayout &list, uint32_t row_length) {
+    std::vector<std::pair<std::string, std::string>> out;
+    const int r = list.scan_records(
+      row_length, [&](const VectorNodeRecordView &record) {
+        out.emplace_back(
+          std::string(record.entry_id()),
+          std::string(record.vector_data()));
+      });
+    EXPECT_EQ(0, r);
+    return out;
+  }
 }
 
 laddr_t get_laddr_hint(uint64_t offset) {
@@ -2051,6 +2098,77 @@ TEST(vector_node_index_layout_t, set_tail_laddr_rewrites_only_tail)
   ASSERT_TRUE(entry);
   EXPECT_EQ(head, entry->head_laddr());
   EXPECT_EQ(new_tail, entry->tail_laddr());
+}
+
+TEST(vector_node_list_layout_t, append_only_no_dedup)
+{
+  std::vector<char> page(16 << 10, '\0');
+  auto layout = VectorNodeListLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  // Same bucket/index/key/entry_id appended twice: no lookup, no
+  // overwrite -- this is the storage-layer proof that a repeated PUT
+  // appends a second physical record.
+  ASSERT_EQ(0, layout->append_record(make_vector_entry("0000000a", "aaaa")));
+  ASSERT_EQ(0, layout->append_record(make_vector_entry("0000000a", "aaaa")));
+
+  EXPECT_EQ(2u, layout->item_count());
+  EXPECT_EQ(2u, layout->logical_entry_count());
+  const auto records = collect_list_records(*layout, sizeof(float));
+  ASSERT_EQ(2u, records.size());
+  EXPECT_EQ("0000000a", records[0].first);
+  EXPECT_EQ("0000000a", records[1].first);
+}
+
+TEST(vector_node_list_layout_t, scan_order_is_append_order_not_sorted)
+{
+  std::vector<char> page(16 << 10, '\0');
+  auto layout = VectorNodeListLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  ASSERT_EQ(0, layout->append_record(make_vector_entry("ffffffff", "cccc")));
+  ASSERT_EQ(0, layout->append_record(make_vector_entry("00000000", "aaaa")));
+  ASSERT_EQ(0, layout->append_record(make_vector_entry("77777777", "bbbb")));
+
+  const auto records = collect_list_records(*layout, sizeof(float));
+  ASSERT_EQ(3u, records.size());
+  EXPECT_EQ("ffffffff", records[0].first);
+  EXPECT_EQ("00000000", records[1].first);
+  EXPECT_EQ("77777777", records[2].first);
+}
+
+TEST(vector_node_list_layout_t, append_fails_with_enospc_when_full)
+{
+  std::vector<char> page(512, '\0');
+  auto layout = VectorNodeListLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  int result = 0;
+  uint32_t appended = 0;
+  for (uint32_t i = 0; i < 1000 && result == 0; ++i) {
+    char id[9];
+    std::snprintf(id, sizeof(id), "%08x", i);
+    result = layout->append_record(make_vector_entry(id, "aaaa"));
+    if (result == 0) {
+      ++appended;
+    }
+  }
+  EXPECT_EQ(-ENOSPC, result);
+  EXPECT_GT(appended, 0u);
+  EXPECT_EQ(appended, layout->item_count());
+}
+
+TEST(vector_node_list_layout_t, next_page_laddr_round_trips)
+{
+  std::vector<char> page(16 << 10, '\0');
+  auto layout = VectorNodeListLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+  EXPECT_EQ(L_ADDR_NULL, layout->next_page_laddr());
+
+  const laddr_t next = laddr_t::from_byte_offset(0x4000);
+  ASSERT_EQ(0, layout->set_next_page_laddr(next));
+  EXPECT_EQ(next, layout->next_page_laddr());
+  ASSERT_EQ(0, layout->validate());
 }
 
 
