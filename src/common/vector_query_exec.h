@@ -18,6 +18,7 @@
 #include "include/buffer.h"
 #include "include/encoding.h"
 #include "include/rados/vector_ops.h"
+#include "common/vector_record.h"
 
 namespace ceph {
 namespace rados {
@@ -627,6 +628,26 @@ private:
   bool heapified = false;
   bool prepared = false;
 };
+
+inline vector_entry_view_t make_vector_entry_view(
+    const ceph::os::vector_record_t& entry)
+{
+  vector_entry_view_t view;
+  view.entry_id = entry.entry_id;
+  view.bucket_name = entry.bucket_name;
+  view.index_name = entry.index_name;
+  view.user_key = entry.user_key;
+  view.placement_key = entry.placement_key;
+  view.data_type = entry.data_type;
+  view.distance_metric = entry.distance_metric;
+  view.dimension = entry.dimension;
+  view.has_data_type = true;
+  view.has_distance_metric = true;
+  view.has_dimension = true;
+  view.has_vector_reference = true;
+  view.vector_data = &entry.vector_data;
+  return view;
+}
 
 } // namespace vector_query_exec
 } // namespace rados

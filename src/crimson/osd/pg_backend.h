@@ -460,6 +460,10 @@ protected:
   virtual seastar::future<> request_committed(
     const osd_reqid_t& reqid,
     const eversion_t& at_version) = 0;
+  // Whether newly created vector objects should use native VectorNodes.
+  virtual bool vector_nodes_enabled() const {
+    return false;
+  }
   const shard_id_t& get_shard() const {
     return whoami.shard;
   }

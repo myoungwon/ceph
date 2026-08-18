@@ -7,6 +7,7 @@
 #include <seastar/core/do_with.hh>
 
 #include "crimson/common/log.h"
+#include "crimson/osd/exceptions.h"
 #include "crimson/osd/pg.h"
 #include "crimson/osd/pg_backend.h"
 #include "osd/osd_types_fmt.h"
@@ -1212,6 +1213,15 @@ ReplicatedRecoveryBackend::prep_push_target(
   bufferlist omap_header)
 {
   LOG_PREFIX(ReplicatedRecoveryBackend::prep_push_target);
+  object_info_t incoming_oi;
+  if (first) {
+    incoming_oi.decode(attrs.at(OI_ATTR));
+    if (incoming_oi.has_vector_node()) {
+      // Recovery does not yet transfer the native INDEX/LIST extent tree.
+      throw crimson::osd::error(std::errc::operation_not_supported);
+    }
+  }
+
   if (!first) {
     co_return get_temp_recovery_object(recovery_info.soid,
 				       recovery_info.version);
@@ -1240,12 +1250,10 @@ ReplicatedRecoveryBackend::prep_push_target(
         target_oid,
         ghobject_t(recovery_info.soid));
     }
-    object_info_t oi;
-    oi.decode(attrs.at(OI_ATTR));
     t->set_alloc_hint(coll->get_cid(), target_oid,
-                      oi.expected_object_size,
-                      oi.expected_write_size,
-                      oi.alloc_hint_flags);
+                      incoming_oi.expected_object_size,
+                      incoming_oi.expected_write_size,
+                      incoming_oi.alloc_hint_flags);
   }
 
   if (complete) {

@@ -207,6 +207,7 @@ private:
     ObjectContextRef clone_obc;
   };
   std::unique_ptr<CloningContext> cloning_ctx;
+  bool vector_node_clone_unsupported = false;
 
   /**
    * prepare_cloning_ctx
