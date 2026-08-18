@@ -2,6 +2,10 @@
 // vim: ts=8 sw=2 sts=2 expandtab
 
 #include <array>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <iostream>
 #include <random>
 
 #include <boost/iterator/counting_iterator.hpp>
@@ -13,7 +17,7 @@
 #include "crimson/os/seastore/transaction_manager.h"
 #include "crimson/os/seastore/segment_manager/ephemeral.h"
 #include "crimson/os/seastore/segment_manager.h"
-#include "crimson/os/seastore/vector_node_layout.h"
+#include "crimson/os/seastore/vector_node.h"
 
 #include "test/crimson/seastore/test_block.h"
 #include "crimson/os/seastore/lba/lba_btree_node.h"
@@ -54,6 +58,13 @@ namespace {
     entry.metadata = make_vector_payload(metadata);
     entry.vector_data = make_vector_payload(payload);
     return entry;
+  }
+
+  ceph::bufferlist get_extent_image(const VectorNodeRef &node) {
+    ceph::bufferlist bl;
+    ceph::bufferptr bptr(node->get_bptr(), 0, node->get_length());
+    bl.append(bptr);
+    return bl;
   }
 
   // Collects every record from a LIST page in append (slot) order --
@@ -2014,7 +2025,7 @@ TEST_P(tm_single_device_test_t, mutate)
 
 TEST(vector_node_index_layout_t, exact_lookup_hit_and_miss)
 {
-  std::vector<char> page(4 << 10, '\0');  // VECTOR_NODE_INDEX_BYTES not yet named
+  std::vector<char> page(VECTOR_NODE_INDEX_BYTES, '\0');
   auto layout = VectorNodeIndexLayout::initialize(page.data(), page.size());
   ASSERT_TRUE(layout);
 
@@ -2041,7 +2052,7 @@ TEST(vector_node_index_layout_t, exact_lookup_hit_and_miss)
 
 TEST(vector_node_index_layout_t, rejects_duplicate_group)
 {
-  std::vector<char> page(4 << 10, '\0');  // VECTOR_NODE_INDEX_BYTES not yet named
+  std::vector<char> page(VECTOR_NODE_INDEX_BYTES, '\0');
   auto layout = VectorNodeIndexLayout::initialize(page.data(), page.size());
   ASSERT_TRUE(layout);
 
@@ -2054,7 +2065,7 @@ TEST(vector_node_index_layout_t, rejects_duplicate_group)
 
 TEST(vector_node_index_layout_t, entries_stay_sorted_for_binary_search)
 {
-  std::vector<char> page(4 << 10, '\0');  // VECTOR_NODE_INDEX_BYTES not yet named
+  std::vector<char> page(VECTOR_NODE_INDEX_BYTES, '\0');
   auto layout = VectorNodeIndexLayout::initialize(page.data(), page.size());
   ASSERT_TRUE(layout);
 
@@ -2080,7 +2091,7 @@ TEST(vector_node_index_layout_t, entries_stay_sorted_for_binary_search)
 
 TEST(vector_node_index_layout_t, set_tail_laddr_rewrites_only_tail)
 {
-  std::vector<char> page(4 << 10, '\0');  // VECTOR_NODE_INDEX_BYTES not yet named
+  std::vector<char> page(VECTOR_NODE_INDEX_BYTES, '\0');
   auto layout = VectorNodeIndexLayout::initialize(page.data(), page.size());
   ASSERT_TRUE(layout);
 
@@ -2171,6 +2182,344 @@ TEST(vector_node_list_layout_t, next_page_laddr_round_trips)
   ASSERT_EQ(0, layout->validate());
 }
 
+TEST_P(tm_single_device_test_t, vector_node_index_put_and_query_round_trip)
+{
+  run_async([this] {
+    VectorNodeManager manager(*tm);
+    laddr_t index_addr = L_ADDR_NULL;
+    {
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_index_table(trans
+        ).si_then([&](auto index) {
+          index_addr = index->get_laddr();
+          return manager.append_vector_entry(
+            trans, std::move(index),
+            make_vector_entry("0000000b", "bbbb"));
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          return manager.append_vector_entry(
+            trans, std::move(index),
+            make_vector_entry("0000000a", "aaaa"));
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_read_test_transaction();
+      std::vector<std::pair<std::string, std::string>> entries;
+      auto stats = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          return manager.find_group_head(
+            std::move(index), 1u, ceph::rados::vector_data_type_float32);
+        }).si_then([&](auto head) {
+          EXPECT_TRUE(head);
+          return manager.scan_vector_group(
+            trans, *head, 1u, ceph::rados::vector_data_type_float32,
+            [&](const VectorNodeRecordView &record) {
+              entries.emplace_back(
+                std::string(record.entry_id()),
+                std::string(record.vector_data()));
+            });
+        });
+      }).unsafe_get();
+      ASSERT_EQ(2u, entries.size());
+      EXPECT_EQ("0000000b", entries[0].first);
+      EXPECT_EQ("0000000a", entries[1].first);
+      EXPECT_EQ(2u, stats.logical_entries);
+      EXPECT_EQ(1u, stats.list_extents);
+    }
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_index_isolates_groups)
+{
+  run_async([this] {
+    VectorNodeManager manager(*tm);
+    laddr_t index_addr = L_ADDR_NULL;
+    // "aaaa" -> dimension 1; "bbbbbbbb" -> dimension 2. Same data_type.
+    const auto small = make_vector_entry("00000001", "aaaa");
+    const auto large = make_vector_entry("00000002", "bbbbbbbb");
+    {
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_index_table(trans
+        ).si_then([&](auto index) {
+          index_addr = index->get_laddr();
+          return manager.append_vector_entry(trans, std::move(index), small);
+        }).si_then([&] {
+          return manager.read_vector_node(trans, index_addr);
+        }).si_then([&](auto index) {
+          return manager.append_vector_entry(trans, std::move(index), large);
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_read_test_transaction();
+      std::vector<std::string> small_ids;
+      std::vector<std::string> large_ids;
+      std::optional<laddr_t> miss;
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          return manager.find_group_head(
+            std::move(index), small.dimension, small.data_type);
+        }).si_then([&](auto head) {
+          EXPECT_TRUE(head);
+          return manager.scan_vector_group(
+            trans, *head, small.dimension, small.data_type,
+            [&](const VectorNodeRecordView &record) {
+              small_ids.emplace_back(record.entry_id());
+            });
+        }).si_then([&](auto) {
+          return manager.read_vector_node(trans, index_addr);
+        }).si_then([&](auto index) {
+          return manager.find_group_head(
+            std::move(index), large.dimension, large.data_type);
+        }).si_then([&](auto head) {
+          EXPECT_TRUE(head);
+          return manager.scan_vector_group(
+            trans, *head, large.dimension, large.data_type,
+            [&](const VectorNodeRecordView &record) {
+              large_ids.emplace_back(record.entry_id());
+            });
+        }).si_then([&](auto) {
+          return manager.read_vector_node(trans, index_addr);
+        }).si_then([&](auto index) {
+          // An unrelated (dimension, data_type) pair is a clean miss,
+          // never a nearest match against either group above.
+          return manager.find_group_head(std::move(index), 99, 99);
+        }).si_then([&](auto head) {
+          miss = head;
+        });
+      }).unsafe_get();
+      ASSERT_EQ(1u, small_ids.size());
+      EXPECT_EQ("00000001", small_ids.front());
+      ASSERT_EQ(1u, large_ids.size());
+      EXPECT_EQ("00000002", large_ids.front());
+      EXPECT_FALSE(miss);
+    }
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_duplicate_put_appends_two_records)
+{
+  run_async([this] {
+    VectorNodeManager manager(*tm);
+    laddr_t index_addr = L_ADDR_NULL;
+    const auto entry = make_vector_entry("0000000a", "aaaa", "same-key");
+    {
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_index_table(trans
+        ).si_then([&](auto index) {
+          index_addr = index->get_laddr();
+          return manager.append_vector_entry(trans, std::move(index), entry);
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      // Same bucket/index/key (and entry_id) PUT a second time: this
+      // never scans for an existing record, so it always appends.
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          return manager.append_vector_entry(trans, std::move(index), entry);
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_read_test_transaction();
+      uint64_t matching = 0;
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          return manager.find_group_head(
+            std::move(index), entry.dimension, entry.data_type);
+        }).si_then([&](auto head) {
+          EXPECT_TRUE(head);
+          // LIST rows no longer carry user_key (see vector_list_entry_le_t):
+          // both appends share this entry's entry_id, so counting by
+          // entry_id proves the same thing the user_key comparison did.
+          return manager.scan_vector_group(
+            trans, *head, entry.dimension, entry.data_type,
+            [&](const VectorNodeRecordView &record) {
+              if (record.entry_id() == entry.entry_id) {
+                ++matching;
+              }
+            });
+        });
+      }).unsafe_get();
+      // Two physical records stored, verified at the LIST scan level --
+      // not by asserting a QueryVectors result count.
+      EXPECT_EQ(2u, matching);
+    }
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_tail_rollover_links_new_block)
+{
+  run_async([this] {
+    // Smallest valid configured LIST block size, so 30 records of ~700
+    // bytes each force at least one tail rollover.
+    VectorNodeManager manager(*tm, VECTOR_NODE_LIST_DEFAULT_BYTES);
+    laddr_t index_addr = L_ADDR_NULL;
+    {
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_index_table(trans
+        ).si_then([&](auto index) {
+          index_addr = index->get_laddr();
+          return manager.append_vector_entry(
+            trans, std::move(index),
+            make_vector_entry("00000000", std::string(700, 'm')));
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    for (uint32_t i = 1; i < 30; ++i) {
+      auto t = create_transaction();
+      char id[9];
+      std::snprintf(id, sizeof(id), "%08x", i);
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          return manager.append_vector_entry(
+            trans, std::move(index),
+            make_vector_entry(id, std::string(700, 'm')));
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_read_test_transaction();
+      laddr_t head_addr = L_ADDR_NULL;
+      laddr_t tail_addr = L_ADDR_NULL;
+      uint32_t entry_dimension = 0;
+      uint32_t entry_data_type = 0;
+      uint64_t total = 0;
+      auto stats = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          const auto layout = index->index_layout();
+          EXPECT_EQ(1u, layout->item_count());
+          const auto entry = layout->entry_at(0);
+          EXPECT_TRUE(entry);
+          head_addr = entry->head_laddr();
+          tail_addr = entry->tail_laddr();
+          entry_dimension = entry->dimension();
+          entry_data_type = entry->data_type();
+          return manager.find_group_head(
+            std::move(index), entry_dimension, entry_data_type);
+        }).si_then([&](auto head) {
+          EXPECT_TRUE(head);
+          EXPECT_EQ(head_addr, *head);
+          return manager.scan_vector_group(
+            trans, *head, entry_dimension, entry_data_type,
+            [&](const VectorNodeRecordView &) { ++total; });
+        });
+      }).unsafe_get();
+      EXPECT_NE(head_addr, tail_addr);
+      EXPECT_EQ(30u, total);
+      EXPECT_GE(stats.list_extents, 2u);
+    }
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_configured_block_sizes)
+{
+  run_async([this] {
+    for (const extent_len_t block_bytes : {16u << 10, 32u << 10}) {
+      VectorNodeManager manager(*tm, block_bytes);
+      laddr_t index_addr = L_ADDR_NULL;
+      {
+        auto t = create_transaction();
+        with_trans_intr(*(t.t), [&](auto &trans) {
+          return manager.create_index_table(trans
+          ).si_then([&](auto index) {
+            index_addr = index->get_laddr();
+            return manager.append_vector_entry(
+              trans, std::move(index),
+              make_vector_entry("00000000", "aaaa"));
+          });
+        }).unsafe_get();
+        submit_transaction(std::move(t));
+      }
+      {
+        auto t = create_read_test_transaction();
+        uint64_t matched = 0;
+        with_trans_intr(*(t.t), [&](auto &trans) {
+          return manager.read_vector_node(trans, index_addr
+          ).si_then([&](auto index) {
+            return manager.find_group_head(
+              std::move(index),
+              1u, ceph::rados::vector_data_type_float32);
+          }).si_then([&](auto head) {
+            EXPECT_TRUE(head);
+            return manager.scan_vector_group(
+              trans, *head, 1u, ceph::rados::vector_data_type_float32,
+              [&](const VectorNodeRecordView &) { ++matched; });
+          });
+        }).unsafe_get();
+        EXPECT_EQ(1u, matched);
+      }
+    }
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_remove_index_table_frees_chain)
+{
+  run_async([this] {
+    VectorNodeManager manager(*tm);
+    laddr_t index_addr = L_ADDR_NULL;
+    {
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_index_table(trans
+        ).si_then([&](auto index) {
+          index_addr = index->get_laddr();
+          return manager.append_vector_entry(
+            trans, std::move(index),
+            make_vector_entry("00000000", "aaaa"));
+        }).si_then([&] {
+          return manager.read_vector_node(trans, index_addr);
+        }).si_then([&](auto index) {
+          return manager.remove_index_table(trans, std::move(index));
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      using read_ertr = with_trans_ertr<VectorNodeManager::read_iertr>;
+      auto t = create_read_test_transaction();
+      const bool index_missing = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr);
+      }).safe_then([](auto) {
+        return read_ertr::make_ready_future<bool>(false);
+      }).handle_error(
+        crimson::ct_error::enoent::handle([] {
+          return read_ertr::make_ready_future<bool>(true);
+        }),
+        crimson::ct_error::assert_all{
+          "reading a removed VectorNode index returned an unexpected error"
+        }
+      ).unsafe_get();
+      EXPECT_TRUE(index_missing);
+    }
+  });
+}
 
 TEST_P(tm_single_device_test_t, allocate_lba_conflict)
 {
