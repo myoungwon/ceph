@@ -1084,7 +1084,8 @@ struct transaction_manager_test_t :
         extent_types_t::TEST_BLOCK_PHYSICAL,
         extent_types_t::BACKREF_INTERNAL,
         extent_types_t::BACKREF_LEAF,
-	extent_types_t::LOG_NODE
+	extent_types_t::LOG_NODE,
+        extent_types_t::VECTOR_NODE
       };
       // exclude DINK_LADDR_LEAF, ALLOC_INFO, JOURNAL_TAIL
       assert(all_extent_types.size() == EXTENT_TYPES_MAX - 3);
