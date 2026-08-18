@@ -4,6 +4,7 @@
 #include "pg_backend.h"
 #include "include/rados/vector_ops.h"
 #include "common/vector_query_exec.h"
+#include "common/vector_omap_scan.h"
 
 #include <charconv>
 #include <cstdio>
@@ -1844,8 +1845,18 @@ PGBackend::query_vectors(
 
   ceph::rados::query_vectors_result_t query_result;
   ceph::rados::vector_query_exec::query_filter_stats_t filter_stats;
-  r = ceph::rados::vector_query_exec::build_local_results(
-      req, scan, &query_result, &filter_stats);
+  ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+  r = accumulator.prepare(req);
+  if (r < 0) {
+    throw crimson::osd::invalid_argument{};
+  }
+  for (const auto& [entry_id, entry] : scan.entries) {
+    (void)entry_id;
+    const int consume_r = accumulator.consume(
+        ceph::rados::vector_query_exec::make_omap_entry_view(entry, scan));
+    ceph_assert(consume_r == 0);
+  }
+  r = accumulator.finish(&query_result, &filter_stats);
   if (r < 0) {
     throw crimson::osd::invalid_argument{};
   }

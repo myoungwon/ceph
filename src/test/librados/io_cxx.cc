@@ -26,6 +26,7 @@
 #include "include/err.h"
 #include "include/scope_guard.h"
 #include "common/vector_query_exec.h"
+#include "common/vector_omap_scan.h"
 #include "json_spirit/json_spirit.h"
 #include "librados/vector_pg_lsh.h"
 #include "librados/vector_placement.h"
@@ -409,8 +410,14 @@ TEST(VectorQueryExecutor, LocalTopKLimitsPartialResults) {
   scan.contents[far_entry.content_key] = far_bl;
 
   ceph::rados::query_vectors_result_t result;
-  ASSERT_EQ(0, ceph::rados::vector_query_exec::build_local_results(
-      req, scan, &result));
+  ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+  ASSERT_EQ(0, accumulator.prepare(req));
+  for (const auto& [entry_id, entry] : scan.entries) {
+    (void)entry_id;
+    ASSERT_EQ(0, accumulator.consume(
+        ceph::rados::vector_query_exec::make_omap_entry_view(entry, scan)));
+  }
+  ASSERT_EQ(0, accumulator.finish(&result));
   ASSERT_EQ(1u, result.entries.size());
   EXPECT_EQ("entry-near", result.entries[0].entry_id);
   EXPECT_EQ("vec-near", result.entries[0].key);
@@ -491,8 +498,14 @@ TEST(VectorQueryExecutor, LocalTopKKeepsBoundedSortedResults) {
 
   ceph::rados::query_vectors_result_t result;
   ceph::rados::vector_query_exec::query_filter_stats_t stats;
-  ASSERT_EQ(0, ceph::rados::vector_query_exec::build_local_results(
-      req, scan, &result, &stats));
+  ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+  ASSERT_EQ(0, accumulator.prepare(req));
+  for (const auto& [entry_id, entry] : scan.entries) {
+    (void)entry_id;
+    ASSERT_EQ(0, accumulator.consume(
+        ceph::rados::vector_query_exec::make_omap_entry_view(entry, scan)));
+  }
+  ASSERT_EQ(0, accumulator.finish(&result, &stats));
   ASSERT_EQ(2u, result.entries.size());
   EXPECT_EQ("entry-b", result.entries[0].entry_id);
   EXPECT_EQ("entry-d", result.entries[1].entry_id);

@@ -40,6 +40,7 @@
 #include "include/compat.h"
 #include "include/rados/vector_ops.h"
 #include "common/vector_query_exec.h"
+#include "common/vector_omap_scan.h"
 #include "json_spirit/json_spirit_reader.h"
 #include "json_spirit/json_spirit_value.h"
 #include "messages/MCommandReply.h"
@@ -7131,8 +7132,18 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 
 	ceph::rados::query_vectors_result_t query_result;
 	ceph::rados::vector_query_exec::query_filter_stats_t filter_stats;
-	result = ceph::rados::vector_query_exec::build_local_results(
-	    req, scan, &query_result, &filter_stats);
+	ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+	result = accumulator.prepare(req);
+	if (result < 0) {
+	  break;
+	}
+	for (const auto& [entry_id, entry] : scan.entries) {
+	  (void)entry_id;
+	  const int r = accumulator.consume(
+	      ceph::rados::vector_query_exec::make_omap_entry_view(entry, scan));
+	  ceph_assert(r == 0);
+	}
+	result = accumulator.finish(&query_result, &filter_stats);
 	if (result < 0) {
 	  break;
 	}
