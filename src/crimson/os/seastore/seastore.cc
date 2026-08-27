@@ -16,6 +16,7 @@
 
 #include "common/JSONFormatter.h"
 #include "common/safe_io.h"
+#include "common/vector_query_exec.h"
 #include "include/stringify.h"
 #include "os/Transaction.h"
 #include "osd/osd_types_fmt.h"
@@ -32,6 +33,7 @@
 #include "crimson/os/seastore/onode_manager.h"
 #include "crimson/os/seastore/object_data_handler.h"
 #include "crimson/os/seastore/omap_manager/log/log_manager.h"
+#include "crimson/os/seastore/vector_node.h"
 
 #include "common/ceph_crypto.h"
 
@@ -1533,6 +1535,176 @@ SeaStore::Shard::omap_get_vectors(
   });
 }
 
+// LIST rows carry only entry_id and vector bytes, so
+// bucket_name/index_name/user_key/placement_key stay unset here.
+// dimension/data_type/distance_metric come from the request, not the row:
+// find_group_head() already scoped this scan to them, so every visited
+// row inherently matches.
+static ceph::rados::vector_query_exec::vector_entry_view_t
+make_query_entry_view(
+  const ceph::rados::query_vectors_request_t &request,
+  const VectorNodeRecordView &record)
+{
+  ceph::rados::vector_query_exec::vector_entry_view_t entry;
+  entry.entry_id = record.entry_id();
+  entry.is_vector_node_native = true;
+  entry.data_type = request.data_type;
+  entry.distance_metric = request.distance_metric;
+  entry.dimension = request.dimension;
+  entry.has_data_type = true;
+  entry.has_distance_metric = true;
+  entry.has_dimension = true;
+  entry.has_vector_reference = true;
+  entry.contiguous_vector_data = record.vector_data();
+  return entry;
+}
+
+SeaStore::Shard::read_errorator::future<
+  std::optional<ceph::rados::query_vectors_result_t>>
+SeaStore::Shard::query_vectors(
+  CollectionRef ch,
+  const ghobject_t &oid,
+  const ceph::rados::query_vectors_request_t &request,
+  uint32_t op_flags)
+{
+  LOG_PREFIX(SeaStoreS::query_vectors);
+  assert(store_active);
+  const bool measure =
+    LOCAL_LOGGER.is_enabled(seastar::log_level::debug);
+  const auto begin = measure
+    ? std::chrono::steady_clock::now()
+    : std::chrono::steady_clock::time_point();
+  ++(shard_stats.read_num);
+  ++(shard_stats.pending_read_num);
+
+  return repeat_with_onode<
+    std::optional<ceph::rados::query_vectors_result_t>>(
+    ch,
+    oid,
+    Transaction::src_t::READ,
+    "query_vectors",
+    op_type_t::OMAP_QUERY_VECTORS,
+    op_flags,
+    [this, request, begin, measure, FNAME](auto &transaction, auto &onode)
+      -> base_iertr::future<
+        std::optional<ceph::rados::query_vectors_result_t>>
+  {
+    if (!onode.has_vector_index()) {
+      // No VectorNode index table on this object at all: an empty result,
+      // not an error -- the same outcome as an exact (dimension, data_type)
+      // miss within an existing index table.
+      return base_iertr::make_ready_future<
+          std::optional<ceph::rados::query_vectors_result_t>>(
+        ceph::rados::query_vectors_result_t());
+    }
+    if (!select_log_omap_root(onode).is_null()) {
+      return crimson::ct_error::input_output_error::make();
+    }
+
+    ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+    const auto prepare_begin = measure
+      ? std::chrono::steady_clock::now()
+      : std::chrono::steady_clock::time_point();
+    if (accumulator.prepare(request) < 0) {
+      return crimson::ct_error::input_output_error::make();
+    }
+    const uint64_t prepare_ns = measure
+      ? static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - prepare_begin).count())
+      : 0;
+
+    return seastar::do_with(
+      VectorNodeManager(
+        *transaction_manager,
+        crimson::common::get_conf<Option::size_t>(
+          "seastore_vector_node_list_block_bytes")),
+      std::move(accumulator),
+      ceph::rados::query_vectors_result_t(),
+      [this, &transaction, &onode, &request, begin, measure, prepare_ns,
+       FNAME](
+        auto &manager,
+        auto &accumulator,
+        auto &result)
+    {
+      return manager.read_vector_node(
+        transaction, onode.get_vector_index_laddr()
+      ).si_then([&manager, &request](auto index) {
+        return manager.find_group_head(
+          std::move(index), request.dimension, request.data_type);
+      }).si_then([&transaction, &manager, &accumulator, &request, measure](
+          auto head_laddr) -> VectorNodeManager::scan_ret {
+        if (!head_laddr) {
+          // Exact (dimension, data_type) miss: empty result immediately,
+          // no LIST block is ever read.
+          return VectorNodeManager::read_iertr::make_ready_future<
+            vector_scan_stats_t>(vector_scan_stats_t());
+        }
+        return manager.scan_vector_group(
+          transaction, *head_laddr, request.dimension, request.data_type,
+          [&accumulator, &request](const VectorNodeRecordView &entry) {
+            const int r = accumulator.consume(
+              make_query_entry_view(request, entry));
+            ceph_assert(r == 0);
+          },
+          measure);
+      }).si_then([&accumulator, &result, begin, measure, prepare_ns, FNAME](
+          auto scan_stats)
+          -> base_iertr::future<
+            std::optional<ceph::rados::query_vectors_result_t>> {
+        const auto finish_begin = measure
+          ? std::chrono::steady_clock::now()
+          : std::chrono::steady_clock::time_point();
+        ceph::rados::vector_query_exec::query_filter_stats_t filter_stats;
+        if (accumulator.finish(
+              &result, &filter_stats) < 0) {
+          return crimson::ct_error::input_output_error::make();
+        }
+        result.local_matching_entries = filter_stats.matched_entries;
+        result.local_distance_computations =
+          filter_stats.distance_computations;
+        if (measure) {
+          const auto now = std::chrono::steady_clock::now();
+          const uint64_t finish_ns = std::chrono::duration_cast<
+            std::chrono::nanoseconds>(now - finish_begin).count();
+          const uint64_t query_exec_ns =
+            prepare_ns + scan_stats.visitor_ns + finish_ns;
+          const uint64_t total_ns = std::chrono::duration_cast<
+            std::chrono::nanoseconds>(now - begin).count();
+          const uint64_t storage_path_ns = total_ns > query_exec_ns
+            ? total_ns - query_exec_ns
+            : 0;
+          DEBUG(
+            "storage=vector_node logical_entries={} matched_entries={} "
+            "distance_computations={} list_extents={} "
+            "extent_bytes_visited={} storage_path_ns={} query_exec_ns={} "
+            "total_ns={}",
+            scan_stats.logical_entries,
+            filter_stats.matched_entries,
+            filter_stats.distance_computations,
+            scan_stats.list_extents,
+            scan_stats.extent_bytes_visited,
+            storage_path_ns,
+            query_exec_ns,
+            total_ns);
+        }
+        return base_iertr::make_ready_future<
+          std::optional<ceph::rados::query_vectors_result_t>>(
+            std::move(result));
+      }).handle_error_interruptible(
+        crimson::ct_error::enoent::handle([] {
+          return base_iertr::future<
+            std::optional<ceph::rados::query_vectors_result_t>>(
+              crimson::ct_error::input_output_error::make());
+        }),
+        base_iertr::pass_further{});
+    });
+  }).finally([this] {
+    assert(shard_stats.pending_read_num);
+    --(shard_stats.pending_read_num);
+  });
+}
+
 SeaStore::Shard::read_errorator::future<SeaStore::Shard::omap_values_t>
 SeaStore::Shard::omap_query_vectors(
   CollectionRef ch,
@@ -2133,18 +2305,67 @@ SeaStore::Shard::_do_transaction_step(
 	  onode.reset();
 	});
       }
-      case Transaction::OP_PUT_VECTOR:
+      case Transaction::OP_PUT_VECTOR_NODE:
       {
-        std::map<std::string, ceph::bufferlist> aset;
-        i.decode_attrset(aset);
-	auto root = select_log_omap_root(*onode);
-        DEBUGT("op PUT_VECTOR, oid={}, omap size={}, type={} ...",
-               *ctx.transaction, oid, aset.size(), root.get_type());
-        return omaptree_put_vectors(
-          *ctx.transaction,
-          std::move(root),
-          *onode,
-          std::move(aset));
+        ceph::bufferlist record_bl;
+        i.decode_bl(record_bl);
+        ceph::os::vector_record_t record;
+        auto record_iter = record_bl.cbegin();
+        record.decode(record_iter);
+        if (!record_iter.end() ||
+            ceph::os::validate_vector_record(record) < 0) {
+          return crimson::ct_error::input_output_error::make();
+        }
+
+        auto omap_root = select_log_omap_root(*onode);
+        if (!omap_root.is_null()) {
+          return crimson::ct_error::input_output_error::make();
+        }
+
+        DEBUGT("op PUT_VECTOR native, oid={}, entry_id={} ...",
+               *ctx.transaction, oid, record.entry_id);
+        return seastar::do_with(
+          VectorNodeManager(
+            *transaction_manager,
+            crimson::common::get_conf<Option::size_t>(
+              "seastore_vector_node_list_block_bytes")),
+          std::move(record),
+          [this, &ctx, &onode](auto &manager, auto &record) {
+            // Exact (dimension, data_type) group lookup -> straight to the
+            // group's tail_laddr on a hit. No duplicate/entry_id scan is
+            // ever performed: a repeated bucket/index/key PUT always
+            // appends a second physical record.
+            auto append = [&ctx, &manager, &record](auto index) {
+              return manager.append_vector_entry(
+                *ctx.transaction, std::move(index), record
+              ).handle_error_interruptible(
+                crimson::ct_error::enoent::handle([] {
+                  return tm_iertr::future<>(
+                    crimson::ct_error::input_output_error::make());
+                }),
+                tm_iertr::pass_further{});
+            };
+
+            if (onode->has_vector_index()) {
+              return manager.read_vector_node(
+                *ctx.transaction, onode->get_vector_index_laddr()
+              ).si_then(std::move(append)
+              ).handle_error_interruptible(
+                crimson::ct_error::enoent::handle([] {
+                  return tm_iertr::future<>(
+                    crimson::ct_error::input_output_error::make());
+                }),
+                tm_iertr::pass_further{});
+            }
+
+            return manager.create_index_table(*ctx.transaction
+            ).si_then([&ctx, &onode, append=std::move(append)](
+                auto index) mutable {
+              onode->update_vector_index_laddr(
+                *ctx.transaction, index->get_laddr());
+              return append(std::move(index));
+            });
+          });
       }
       default:
         ERROR("bad op {}", static_cast<unsigned>(op->op));
@@ -2166,7 +2387,7 @@ SeaStore::Shard::_do_transaction_step(
           op->op == Transaction::OP_SETATTRS ||
           op->op == Transaction::OP_RMATTR ||
           op->op == Transaction::OP_OMAP_SETKEYS ||
-          op->op == Transaction::OP_PUT_VECTOR ||
+          op->op == Transaction::OP_PUT_VECTOR_NODE ||
           op->op == Transaction::OP_OMAP_RMKEYS ||
           op->op == Transaction::OP_OMAP_RMKEYRANGE ||
           op->op == Transaction::OP_OMAP_SETHEADER) {
@@ -2238,6 +2459,11 @@ SeaStore::Shard::_rename(
   d_onode->update_object_info(*ctx.transaction, oi_bl);
   d_onode->update_snapset(*ctx.transaction, ss_bl);
   rename_onode_omap_metadata(*ctx.transaction, *onode, *d_onode);
+  if (onode->has_vector_index()) {
+    d_onode->update_vector_index_laddr(
+      *ctx.transaction, onode->get_vector_index_laddr());
+    onode->update_vector_index_laddr(*ctx.transaction, L_ADDR_NULL);
+  }
   co_await onode_manager->erase_onode(
     *ctx.transaction, onode
   ).handle_error_interruptible(
@@ -2247,14 +2473,53 @@ SeaStore::Shard::_rename(
 }
 
 SeaStore::Shard::tm_ret
+SeaStore::Shard::remove_vector_node(
+  Transaction &transaction,
+  Onode &onode)
+{
+  if (!onode.has_vector_index()) {
+    return tm_iertr::now();
+  }
+
+  return seastar::do_with(
+    VectorNodeManager(
+      *transaction_manager,
+      crimson::common::get_conf<Option::size_t>(
+        "seastore_vector_node_list_block_bytes")),
+    [this, &transaction, &onode](auto &manager) {
+      return manager.read_vector_node(
+        transaction, onode.get_vector_index_laddr()
+      ).si_then([&transaction, &manager](auto index) {
+        // Walks every INDEX entry's LIST chain, freeing each LIST extent,
+        // then frees the INDEX extent itself.
+        return manager.remove_index_table(
+          transaction, std::move(index));
+      }).handle_error_interruptible(
+        crimson::ct_error::enoent::handle([] {
+          return tm_iertr::future<>(
+            crimson::ct_error::input_output_error::make());
+        }),
+        tm_iertr::pass_further{}
+      ).si_then([&transaction, &onode] {
+        onode.update_vector_index_laddr(transaction, L_ADDR_NULL);
+      });
+    });
+}
+
+SeaStore::Shard::tm_ret
 SeaStore::Shard::_remove(
   internal_context_t &ctx,
   OnodeRef &onode)
 {
-  return omaptree_clear_no_onode(
-    *ctx.transaction,
-    get_omap_root(omap_type_t::OMAP, *onode)
+  // The VectorNode extents and ONode laddr are removed in this transaction.
+  // object_info_t, including FLAG_VECTOR_NODE, disappears with the object.
+  return remove_vector_node(
+    *ctx.transaction, *onode
   ).si_then([this, &ctx, &onode] {
+    return omaptree_clear_no_onode(
+      *ctx.transaction,
+      get_omap_root(omap_type_t::OMAP, *onode));
+  }).si_then([this, &ctx, &onode] {
     return omaptree_clear_no_onode(
       *ctx.transaction,
       get_omap_root(omap_type_t::XATTR, *onode));

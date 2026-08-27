@@ -13,6 +13,7 @@
 #include "crimson/os/seastore/random_block_manager/rbm_device.h"
 #include "crimson/os/seastore/object_data_handler.h"
 #include "crimson/os/seastore/omap_manager/btree/omap_btree_node_impl.h"
+#include "crimson/os/seastore/vector_node.h"
 
 /*
  * TransactionManager logs
@@ -950,6 +951,20 @@ TransactionManager::move_region(
             auto maybe_indirect_extent = co_await read_pin<OMapInnerNode>(
               t, src, src.get_intermediate_offset(), src.get_length());
             auto extent = co_await alloc_non_data_extent<OMapInnerNode>(
+              t,
+              laddr_hint_t::create_as_fixed(calc_dst_key()),
+              src.get_length()
+            ).handle_error_interruptible(
+              move_region_iertr::pass_further(),
+              crimson::ct_error::assert_all("invalid error"));
+            extent->set_bptr(maybe_indirect_extent.extent->get_bptr());
+          }
+          break;
+        case extent_types_t::VECTOR_NODE:
+          {
+            auto maybe_indirect_extent = co_await read_pin<VectorNode>(
+              t, src, src.get_intermediate_offset(), src.get_length());
+            auto extent = co_await alloc_non_data_extent<VectorNode>(
               t,
               laddr_hint_t::create_as_fixed(calc_dst_key()),
               src.get_length()

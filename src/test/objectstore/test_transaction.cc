@@ -80,6 +80,50 @@ TEST(Transaction, Swap)
   ASSERT_FALSE(b.empty());
 }
 
+TEST(Transaction, VectorNodePayloadRoundTrip)
+{
+  const coll_t cid(spg_t(pg_t(1, 2), shard_id_t::NO_SHARD));
+  const ghobject_t oid(hobject_t("vector", "", CEPH_NOSNAP, 0, 1, ""));
+
+  bufferlist native_record;
+  native_record.append("versioned-native-record");
+
+  ObjectStore::Transaction source;
+  source.put_vector_node(cid, oid, native_record);
+
+  bufferlist encoded;
+  encode(source, encoded);
+  auto encoded_iter = encoded.cbegin();
+  ObjectStore::Transaction decoded;
+  decode(decoded, encoded_iter);
+
+  auto iter = decoded.begin();
+  ASSERT_TRUE(iter.have_op());
+  auto op = iter.decode_op();
+  ASSERT_EQ(ObjectStore::Transaction::OP_PUT_VECTOR_NODE, op->op);
+  bufferlist decoded_record;
+  iter.decode_bl(decoded_record);
+  ASSERT_EQ(native_record, decoded_record);
+  ASSERT_FALSE(iter.have_op());
+}
+
+TEST(ObjectInfo, VectorNodeFlagRoundTrip)
+{
+  object_info_t source(hobject_t("vector", "", CEPH_NOSNAP, 0, 1, ""));
+  source.set_flag(object_info_t::FLAG_VECTOR_NODE);
+
+  bufferlist encoded;
+  source.encode(encoded, CEPH_FEATURES_ALL);
+  auto encoded_iter = encoded.cbegin();
+  object_info_t decoded;
+  decoded.decode(encoded_iter);
+
+  EXPECT_TRUE(decoded.has_vector_node());
+  EXPECT_NE(
+    std::string::npos,
+    decoded.get_flag_string().find("vector_node"));
+}
+
 ObjectStore::Transaction generate_transaction()
 {
   auto a = ObjectStore::Transaction{};

@@ -158,8 +158,8 @@ struct ECCrimsonOp : ECCommon::RMWPipeline::Op {
 	break;
       case ceph::os::Transaction::OP_OMAP_CLEAR:
 	t_pg->omap_clear(i.get_oid(op->oid).hobj);
+        break;
       case ceph::os::Transaction::OP_OMAP_SETKEYS:
-      case ceph::os::Transaction::OP_PUT_VECTOR:
 	{
 	std::map<std::string, ceph::bufferlist> aset;
 	i.decode_attrset(aset);

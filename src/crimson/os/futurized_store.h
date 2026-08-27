@@ -10,6 +10,7 @@
 
 #include <seastar/core/future.hh>
 
+#include "common/vector_record.h"
 #include "os/Transaction.h"
 #include "crimson/common/config_proxy.h"
 #include "crimson/common/smp_helpers.h"
@@ -26,6 +27,7 @@ class Transaction;
 namespace crimson::os {
 class FuturizedCollection;
 class FuturizedStore;
+
 struct BackendStore {
   FuturizedStore &f_store;  // indicate alienstore/seastore/cyanstore, not shard store
   store_shard_t shard_id;       // indicate on which core it should run
@@ -103,6 +105,16 @@ public:
       const ghobject_t& oid,
       const omap_keys_t& keys,
       uint32_t op_flags = 0) = 0;
+
+    virtual read_errorator::future<
+      std::optional<ceph::rados::query_vectors_result_t>> query_vectors(
+        CollectionRef,
+        const ghobject_t&,
+        const ceph::rados::query_vectors_request_t&,
+        uint32_t = 0) {
+      return read_errorator::make_ready_future<
+        std::optional<ceph::rados::query_vectors_result_t>>(std::nullopt);
+    }
 
     // for vector-native implementation
     virtual read_errorator::future<omap_values_t> omap_get_vectors(
@@ -269,6 +281,21 @@ public:
   // called on the shard and get this FuturizedStore::shard;
   virtual BackendStore get_backend_store(store_index_t store_index) = 0;
   virtual Shard& get_sharded_store(store_index_t store_index = 0) = 0;
+
+  // Whether newly created vector objects should use native VectorNodes.
+  virtual bool vector_nodes_enabled() const {
+    return false;
+  }
+
+  virtual void enqueue_vector_put(
+    ceph::os::Transaction& transaction,
+    const coll_t& cid,
+    const ghobject_t& oid,
+    const ceph::os::vector_record_t& record,
+    bool) {
+    transaction.omap_setkeys(
+      cid, oid, ceph::os::make_vector_omap(record));
+  }
 
   virtual seastar::future<std::tuple<int, std::string>> read_meta(
     const std::string& key) = 0;

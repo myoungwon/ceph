@@ -188,6 +188,28 @@ options:
   level: dev
   desc: default logical address space reservation for seastore objects' data
   default: 16777216
+- name: seastore_experimental_vector_node
+  type: bool
+  level: dev
+  desc: Enable experimental native VectorNode storage for new vector objects
+  long_desc: VectorNode recovery, backfill, snapshots, and scrub are not yet
+             supported. Enable only for explicit tests and benchmarks.
+  default: false
+  flags:
+  - startup
+- name: seastore_vector_node_list_block_bytes
+  type: size
+  level: dev
+  desc: Size in bytes of each VectorNode LIST block (must be 16384 or 32768)
+  long_desc: Applies to VectorNode LIST block allocation only, never to the
+             fixed-size VectorNode INDEX page. Read once at startup -- mixing
+             VectorNode data written under different configured sizes within
+             the same store is not supported, and changing this value across
+             restarts of a store that already has VectorNode data on disk is
+             undefined.
+  default: 16384
+  flags:
+  - startup
 # TODO: implement sub-extent checksum and deprecate this configuration.
 - name: seastore_full_integrity_check
   type: bool

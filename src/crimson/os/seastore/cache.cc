@@ -21,6 +21,7 @@
 #include "crimson/os/seastore/onode_manager/staged-fltree/node_extent_manager/seastore.h"
 #include "crimson/os/seastore/backref/backref_tree_node.h"
 #include "crimson/os/seastore/omap_manager/log/log_node.h"
+#include "crimson/os/seastore/vector_node.h"
 #include "test/crimson/seastore/test_block.h"
 
 using std::string_view;
@@ -79,6 +80,9 @@ CachedExtentRef Cache::retire_absent_extent_addr_by_type(
       t, laddr, addr, length, std::move(extent_init_func));
   case extent_types_t::LOG_NODE:
     return retire_absent_extent_addr<log_manager::LogNode>(
+      t, laddr, addr, length, std::move(extent_init_func));
+  case extent_types_t::VECTOR_NODE:
+    return retire_absent_extent_addr<VectorNode>(
       t, laddr, addr, length, std::move(extent_init_func));
   case extent_types_t::OBJECT_DATA_BLOCK:
     return retire_absent_extent_addr<ObjectDataBlock>(
@@ -150,9 +154,10 @@ void Cache::register_metrics(store_index_t store_index)
     {extent_types_t::TEST_BLOCK_PHYSICAL, {sm::label_instance("ext", "TEST_BLOCK_PHYSICAL")}},
     {extent_types_t::BACKREF_INTERNAL,    {sm::label_instance("ext", "BACKREF_INTERNAL")}},
     {extent_types_t::BACKREF_LEAF,        {sm::label_instance("ext", "BACKREF_LEAF")}},
-    {extent_types_t::LOG_NODE,            {sm::label_instance("ext", "LOG_NODE")}}
+    {extent_types_t::LOG_NODE,            {sm::label_instance("ext", "LOG_NODE")}},
+    {extent_types_t::VECTOR_NODE,         {sm::label_instance("ext", "VECTOR_NODE")}}
   };
-  assert(labels_by_ext.size() == (std::size_t)extent_types_t::NONE);
+  assert(labels_by_ext.size() == EXTENT_TYPES_MAX - 1);
   for (auto& [src, src_label] : labels_by_src) {
     src_label.push_back(sm::label_instance("shard_store_index", std::to_string(store_index)));
   }
@@ -1182,6 +1187,9 @@ CachedExtentRef Cache::alloc_remapped_extent_by_type(
   case extent_types_t::COLL_BLOCK:
     return alloc_remapped_extent<collection_manager::CollectionNode>(
       t, remap_laddr, remap_paddr, remap_offset, remap_length, original_bptr);
+  case extent_types_t::VECTOR_NODE:
+    return alloc_remapped_extent<VectorNode>(
+      t, remap_laddr, remap_paddr, remap_offset, remap_length, original_bptr);
   case extent_types_t::OBJECT_DATA_BLOCK:
     return alloc_remapped_extent<ObjectDataBlock>(
       t, remap_laddr, remap_paddr, remap_offset, remap_length, original_bptr);
@@ -1235,6 +1243,9 @@ CachedExtentRef Cache::alloc_new_non_data_extent_by_type(
   case extent_types_t::LOG_NODE:
      return alloc_new_non_data_extent<log_manager::LogNode>(
        t, length, hint, gen);
+  case extent_types_t::VECTOR_NODE:
+    return alloc_new_non_data_extent<VectorNode>(
+      t, length, hint, gen);
   case extent_types_t::NONE: {
     ceph_assert(0 == "NONE is an invalid extent type");
     return CachedExtentRef();
@@ -2604,6 +2615,9 @@ Cache::_get_absent_extent_by_type(
     ret = CachedExtent::make_cached_extent_ref<
       log_manager::LogNode>(length);
     break;
+  case extent_types_t::VECTOR_NODE:
+    ret = CachedExtent::make_cached_extent_ref<VectorNode>(length);
+    break;
   case extent_types_t::NONE:
     ceph_assert(0 == "NONE is an invalid extent type");
     break;
@@ -2725,6 +2739,12 @@ Cache::do_get_caching_extent_by_type(
     });
   case extent_types_t::LOG_NODE:
     return do_get_caching_extent<log_manager::LogNode>(
+      offset, length, std::move(extent_init_func), std::move(on_cache), p_src
+    ).safe_then([](auto extent) {
+      return CachedExtentRef(extent.detach(), false /* add_ref */);
+    });
+  case extent_types_t::VECTOR_NODE:
+    return do_get_caching_extent<VectorNode>(
       offset, length, std::move(extent_init_func), std::move(on_cache), p_src
     ).safe_then([](auto extent) {
       return CachedExtentRef(extent.detach(), false /* add_ref */);

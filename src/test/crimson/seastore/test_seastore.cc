@@ -1069,6 +1069,101 @@ TEST_P(seastore_test_t, omap_test_simple)
   });
 }
 
+TEST_P(seastore_test_t, vector_query_requires_native_onode)
+{
+  run_async([this] {
+    auto &test_obj = get_object(make_oid(0));
+    test_obj.touch(*sharded_seastore);
+
+    ceph::rados::query_vectors_request_t request;
+    request.bucket_name = "bucket";
+    request.index_name = "index";
+    request.data_type = ceph::rados::vector_data_type_float32;
+    request.distance_metric =
+      ceph::rados::vector_distance_metric_euclidean;
+    request.dimension = 1;
+    request.local_top_k = 1;
+    const float query_value = 0.0f;
+    request.query_vector.append(
+      reinterpret_cast<const char *>(&query_value), sizeof(query_value));
+
+    using query_ertr = SeaStoreShard::read_errorator;
+    const bool rejected = sharded_seastore->query_vectors(
+      test_obj.coll, test_obj.oid, request
+    ).safe_then([](auto) {
+      return query_ertr::make_ready_future<bool>(false);
+    }).handle_error(
+      crimson::ct_error::input_output_error::handle([] {
+        return query_ertr::make_ready_future<bool>(true);
+      }),
+      crimson::ct_error::assert_all{
+        "non-native ONode query returned an unexpected error"
+      }
+    ).unsafe_get();
+    EXPECT_TRUE(rejected);
+  });
+}
+
+TEST_P(seastore_test_t, vector_node_put_query_remove)
+{
+  run_async([this] {
+    auto &test_obj = get_object(make_oid(0));
+    const float stored_value = 1.0f;
+
+    ceph::os::vector_record_t record;
+    record.entry_id = "00000001";
+    record.bucket_name = "bucket";
+    record.index_name = "index";
+    record.user_key = "key";
+    record.data_type = ceph::rados::vector_data_type_float32;
+    record.distance_metric =
+      ceph::rados::vector_distance_metric_euclidean;
+    record.dimension = 1;
+    record.placement_algorithm =
+      ceph::rados::vector_placement_algorithm_hash_v0;
+    record.placement_key = "abcd";
+    record.vector_hash = "01234567";
+    record.vector_data.append(
+      reinterpret_cast<const char *>(&stored_value), sizeof(stored_value));
+    ASSERT_EQ(0, ceph::os::validate_vector_record(record));
+
+    ceph::bufferlist record_bl;
+    record.encode(record_bl);
+    CTransaction put;
+    put.touch(test_obj.cid, test_obj.oid);
+    put.put_vector_node(test_obj.cid, test_obj.oid, record_bl);
+    do_transaction(std::move(put));
+
+    ceph::rados::query_vectors_request_t request;
+    request.bucket_name = record.bucket_name;
+    request.index_name = record.index_name;
+    request.data_type = record.data_type;
+    request.distance_metric = record.distance_metric;
+    request.dimension = record.dimension;
+    request.local_top_k = 1;
+    request.query_vector = record.vector_data;
+
+    auto result = sharded_seastore->query_vectors(
+      test_obj.coll, test_obj.oid, request
+    ).handle_error(
+      SeaStoreShard::read_errorator::assert_all{
+        "native VectorNode query failed"
+      }
+    ).get();
+    ASSERT_TRUE(result);
+    ASSERT_EQ(1u, result->entries.size());
+    EXPECT_EQ(record.entry_id, result->entries.front().entry_id);
+    EXPECT_EQ(record.user_key, result->entries.front().key);
+    EXPECT_FLOAT_EQ(0.0f, result->entries.front().distance);
+
+    CTransaction remove;
+    remove.remove(test_obj.cid, test_obj.oid);
+    do_transaction(std::move(remove));
+    EXPECT_FALSE(sharded_seastore->exists(
+      test_obj.coll, test_obj.oid).unsafe_get());
+  });
+}
+
 TEST_P(seastore_test_t, rename)
 {
   run_async([this] {

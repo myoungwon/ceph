@@ -602,6 +602,10 @@ OpsExecuter::execute_op(OSDOp& osd_op)
 OpsExecuter::interruptible_errorated_future<OpsExecuter::osd_op_errorator>
 OpsExecuter::do_execute_op(OSDOp& osd_op)
 {
+  if (vector_node_clone_unsupported) {
+    return crimson::ct_error::operation_not_supported::make();
+  }
+
   // TODO: dispatch via call table?
   // TODO: we might want to find a way to unify both input and output
   // of each op.
@@ -788,6 +792,9 @@ OpsExecuter::do_execute_op(OSDOp& osd_op)
       return crimson::ct_error::operation_not_supported::make();
     }
 #endif
+    if (obc->obs.oi.has_vector_node()) {
+      return crimson::ct_error::operation_not_supported::make();
+    }
     return do_write_op([this, &osd_op](auto& backend, auto& os, auto& txn) {
       return backend.omap_set_vals(os, osd_op, txn, *osd_op_params, delta_stats);
     });
@@ -797,6 +804,9 @@ OpsExecuter::do_execute_op(OSDOp& osd_op)
       return crimson::ct_error::operation_not_supported::make();
     }
 #endif
+    if (obc->obs.oi.has_vector_node()) {
+      return crimson::ct_error::operation_not_supported::make();
+    }
     return do_write_op([this, &osd_op](auto& backend, auto& os, auto& txn) {
       return backend.omap_set_header(os, osd_op, txn, *osd_op_params,
         delta_stats);
@@ -807,6 +817,9 @@ OpsExecuter::do_execute_op(OSDOp& osd_op)
       return crimson::ct_error::operation_not_supported::make();
     }
 #endif
+    if (obc->obs.oi.has_vector_node()) {
+      return crimson::ct_error::operation_not_supported::make();
+    }
     return do_write_op([this, &osd_op](auto& backend, auto& os, auto& txn) {
       return backend.omap_remove_range(os, osd_op, txn, delta_stats);
     });
@@ -815,10 +828,16 @@ OpsExecuter::do_execute_op(OSDOp& osd_op)
     if (!pg.get_pgpool().info.supports_omap()) {
       return crimson::ct_error::operation_not_supported::make();
     }*/
+    if (obc->obs.oi.has_vector_node()) {
+      return crimson::ct_error::operation_not_supported::make();
+    }
     return do_write_op([&osd_op](auto& backend, auto& os, auto& txn) {
       return backend.omap_remove_key(os, osd_op, txn);
     });
   case CEPH_OSD_OP_OMAPCLEAR:
+    if (obc->obs.oi.has_vector_node()) {
+      return crimson::ct_error::operation_not_supported::make();
+    }
     return do_write_op([this, &osd_op](auto& backend, auto& os, auto& txn) {
       return backend.omap_clear(os, osd_op, txn, *osd_op_params, delta_stats);
     });
@@ -1144,14 +1163,20 @@ OpsExecuter::OpsExecuter(Ref<PG> _pg,
     snapc(_snapc)
 {
   if (op_info.may_write() && should_clone(*obc, snapc)) {
-    do_write_op([this](auto& backend, auto& os, auto& txn) {
-      prepare_cloning_ctx(
-	std::as_const(snapc),
-	std::as_const(obc->obs),
-	std::as_const(obc->ssc->snapset),
-	backend,
-	txn);
-    });
+    if (obc->obs.oi.has_vector_node()) {
+      // Cloning only the object metadata would leave the snapshot pointing at
+      // a VectorNode tree whose ownership and lifetime were not cloned.
+      vector_node_clone_unsupported = true;
+    } else {
+      do_write_op([this](auto& backend, auto& os, auto& txn) {
+        prepare_cloning_ctx(
+	  std::as_const(snapc),
+	  std::as_const(obc->obs),
+	  std::as_const(obc->ssc->snapset),
+	  backend,
+	  txn);
+      });
+    }
   }
 }
 

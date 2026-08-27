@@ -20,12 +20,15 @@
 
 #include "gtest/gtest.h"
 
+#include "arch/intel.h"
+#include "arch/probe.h"
 #include "include/rados/librados.hpp"
 #include "include/ceph_hash.h"
 #include "include/encoding.h"
 #include "include/err.h"
 #include "include/scope_guard.h"
 #include "common/vector_query_exec.h"
+#include "common/vector_omap_scan.h"
 #include "json_spirit/json_spirit.h"
 #include "librados/vector_pg_lsh.h"
 #include "librados/vector_placement.h"
@@ -409,8 +412,14 @@ TEST(VectorQueryExecutor, LocalTopKLimitsPartialResults) {
   scan.contents[far_entry.content_key] = far_bl;
 
   ceph::rados::query_vectors_result_t result;
-  ASSERT_EQ(0, ceph::rados::vector_query_exec::build_local_results(
-      req, scan, &result));
+  ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+  ASSERT_EQ(0, accumulator.prepare(req));
+  for (const auto& [entry_id, entry] : scan.entries) {
+    (void)entry_id;
+    ASSERT_EQ(0, accumulator.consume(
+        ceph::rados::vector_query_exec::make_omap_entry_view(entry, scan)));
+  }
+  ASSERT_EQ(0, accumulator.finish(&result));
   ASSERT_EQ(1u, result.entries.size());
   EXPECT_EQ("entry-near", result.entries[0].entry_id);
   EXPECT_EQ("vec-near", result.entries[0].key);
@@ -443,6 +452,58 @@ TEST(VectorQueryExecutor, DistanceHandlesFragmentedCandidateWithoutRebuild) {
   EXPECT_FALSE(candidate.is_contiguous());
   EXPECT_EQ(original_buffer_count, candidate.get_num_buffers());
 }
+
+#if defined(CEPH_VECTOR_QUERY_EXEC_HAVE_X86_SIMD)
+TEST(VectorQueryExecutor, ScalarAndAvx2KernelsAgreeOnDistanceTerms) {
+  ceph_arch_probe();
+  if (!ceph_arch_intel_avx2) {
+    GTEST_SKIP() << "host has no AVX2, cannot compare against the AVX2 kernel";
+  }
+
+  // 11 dimensions: two full 4-wide AVX2 blocks plus a 3-element tail, so
+  // both the vectorized loop and the scalar remainder run in the kernel.
+  const std::vector<float> query = {
+    0.1f, -1.25f, 3.75f, -0.5f, 2.0f, -3.25f, 0.75f, 1.5f, -2.75f, 4.25f, -0.1f};
+  const std::vector<float> candidate = {
+    -0.4f, 2.5f, -1.75f, 0.25f, -2.0f, 1.25f, -0.75f, 3.5f, 0.25f, -4.0f, 0.9f};
+  ASSERT_EQ(query.size(), candidate.size());
+  const uint32_t dimension = query.size();
+
+  const char *candidate_bytes = reinterpret_cast<const char *>(candidate.data());
+
+  ceph::rados::vector_query_exec::distance_terms_t scalar_terms;
+  ceph::rados::vector_query_exec::accumulate_distance_terms_scalar(
+      query.data(), candidate_bytes, dimension, &scalar_terms);
+
+  ceph::rados::vector_query_exec::distance_terms_t avx2_terms;
+  ceph::rados::vector_query_exec::accumulate_distance_terms_avx2(
+      query.data(), candidate_bytes, dimension, &avx2_terms);
+
+  EXPECT_NEAR(scalar_terms.dot, avx2_terms.dot, 1e-9);
+  EXPECT_NEAR(scalar_terms.candidate_norm_squared,
+              avx2_terms.candidate_norm_squared, 1e-9);
+  EXPECT_NEAR(scalar_terms.sum_sq, avx2_terms.sum_sq, 1e-9);
+
+  const double query_norm =
+      ceph::rados::vector_query_exec::squared_l2_norm(query);
+
+  // What top-k ranking actually observes is the float32 cast each metric
+  // produces in compute_float32_distance; both kernels must agree there.
+  EXPECT_FLOAT_EQ(static_cast<float>(std::sqrt(scalar_terms.sum_sq)),
+                   static_cast<float>(std::sqrt(avx2_terms.sum_sq)));
+  EXPECT_FLOAT_EQ(
+      static_cast<float>(
+          1.0 - scalar_terms.dot /
+          (std::sqrt(query_norm) *
+           std::sqrt(scalar_terms.candidate_norm_squared))),
+      static_cast<float>(
+          1.0 - avx2_terms.dot /
+          (std::sqrt(query_norm) *
+           std::sqrt(avx2_terms.candidate_norm_squared))));
+  EXPECT_FLOAT_EQ(static_cast<float>(-scalar_terms.dot),
+                   static_cast<float>(-avx2_terms.dot));
+}
+#endif // CEPH_VECTOR_QUERY_EXEC_HAVE_X86_SIMD
 
 TEST(VectorQueryExecutor, LocalTopKKeepsBoundedSortedResults) {
   float query[] = {0.0, 0.0};
@@ -491,8 +552,14 @@ TEST(VectorQueryExecutor, LocalTopKKeepsBoundedSortedResults) {
 
   ceph::rados::query_vectors_result_t result;
   ceph::rados::vector_query_exec::query_filter_stats_t stats;
-  ASSERT_EQ(0, ceph::rados::vector_query_exec::build_local_results(
-      req, scan, &result, &stats));
+  ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+  ASSERT_EQ(0, accumulator.prepare(req));
+  for (const auto& [entry_id, entry] : scan.entries) {
+    (void)entry_id;
+    ASSERT_EQ(0, accumulator.consume(
+        ceph::rados::vector_query_exec::make_omap_entry_view(entry, scan)));
+  }
+  ASSERT_EQ(0, accumulator.finish(&result, &stats));
   ASSERT_EQ(2u, result.entries.size());
   EXPECT_EQ("entry-b", result.entries[0].entry_id);
   EXPECT_EQ("entry-d", result.entries[1].entry_id);
@@ -500,6 +567,301 @@ TEST(VectorQueryExecutor, LocalTopKKeepsBoundedSortedResults) {
   EXPECT_EQ(4u, stats.matched_entries);
   EXPECT_EQ(4u, stats.merged_entries);
   EXPECT_EQ(2u, stats.final_entries);
+}
+
+namespace {
+
+struct vector_query_run_t {
+  ceph::rados::query_vectors_result_t result;
+  ceph::rados::vector_query_exec::query_filter_stats_t stats;
+};
+
+bufferlist make_float32_vector(float x, float y)
+{
+  const float values[] = {x, y};
+  bufferlist bl;
+  bl.append(
+      reinterpret_cast<const char *>(values), sizeof(values));
+  return bl;
+}
+
+ceph::os::vector_record_t make_query_record(
+    const string& entry_id,
+    const string& key,
+    float x,
+    float y,
+    uint32_t metric,
+    const string& placement_key = "abcd")
+{
+  ceph::os::vector_record_t record;
+  record.entry_id = entry_id;
+  record.bucket_name = "bucket";
+  record.index_name = "index";
+  record.user_key = key;
+  record.data_type = ceph::rados::vector_data_type_float32;
+  record.distance_metric = metric;
+  record.dimension = 2;
+  record.placement_algorithm =
+    ceph::rados::vector_placement_algorithm_hash_v0;
+  record.placement_key = placement_key;
+  record.vector_hash = entry_id;
+  record.vector_data = make_float32_vector(x, y);
+  return record;
+}
+
+ceph::rados::query_vectors_request_t make_local_query(
+    uint32_t metric,
+    uint32_t local_top_k)
+{
+  ceph::rados::query_vectors_request_t req;
+  req.bucket_name = "bucket";
+  req.index_name = "index";
+  req.data_type = ceph::rados::vector_data_type_float32;
+  req.distance_metric = metric;
+  req.dimension = 2;
+  req.local_top_k = local_top_k;
+  req.query_vector = make_float32_vector(1.0, 0.0);
+  req.probe_prefixes.push_back("abcd");
+  return req;
+}
+
+void add_record_to_omap_scan(
+    const ceph::os::vector_record_t& record,
+    ceph::rados::vector_query_exec::omap_scan_state_t *scan)
+{
+  auto omap = ceph::os::make_vector_omap(record);
+  for (const auto& [key, value] : omap) {
+    string bytes(value.length(), '\0');
+    auto p = value.cbegin();
+    p.copy(value.length(), bytes.data());
+    ceph::rados::vector_query_exec::consume_omap_key_value(
+        key, bytes, *scan);
+  }
+}
+
+vector_query_run_t run_omap_query(
+    const ceph::rados::query_vectors_request_t& req,
+    const std::vector<ceph::os::vector_record_t>& writes)
+{
+  ceph::rados::vector_query_exec::omap_scan_state_t scan;
+  for (const auto& record : writes) {
+    add_record_to_omap_scan(record, &scan);
+  }
+
+  vector_query_run_t run;
+  ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+  EXPECT_EQ(0, accumulator.prepare(req));
+  for (const auto& [entry_id, entry] : scan.entries) {
+    (void)entry_id;
+    EXPECT_EQ(0, accumulator.consume(
+        ceph::rados::vector_query_exec::make_omap_entry_view(entry, scan)));
+  }
+  EXPECT_EQ(0, accumulator.finish(&run.result, &run.stats));
+  return run;
+}
+
+vector_query_run_t run_vector_record_query(
+    const ceph::rados::query_vectors_request_t& req,
+    const std::vector<ceph::os::vector_record_t>& writes)
+{
+  std::map<string, ceph::os::vector_record_t> records;
+  for (const auto& record : writes) {
+    records.insert_or_assign(record.entry_id, record);
+  }
+
+  ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+  EXPECT_EQ(0, accumulator.prepare(req));
+  for (const auto& [entry_id, record] : records) {
+    (void)entry_id;
+    EXPECT_EQ(0, accumulator.consume(
+        ceph::rados::vector_query_exec::make_vector_entry_view(record)));
+  }
+
+  vector_query_run_t run;
+  EXPECT_EQ(0, accumulator.finish(&run.result, &run.stats));
+  return run;
+}
+
+void expect_query_runs_equal(
+    const vector_query_run_t& omap,
+    const vector_query_run_t& vector_node)
+{
+  ASSERT_EQ(omap.result.entries.size(), vector_node.result.entries.size());
+  for (size_t i = 0; i < omap.result.entries.size(); ++i) {
+    EXPECT_EQ(omap.result.entries[i].key,
+              vector_node.result.entries[i].key);
+    EXPECT_EQ(omap.result.entries[i].entry_id,
+              vector_node.result.entries[i].entry_id);
+    EXPECT_EQ(omap.result.entries[i].distance,
+              vector_node.result.entries[i].distance);
+  }
+
+  EXPECT_EQ(omap.stats.total_entries, vector_node.stats.total_entries);
+  EXPECT_EQ(omap.stats.incomplete_entries,
+            vector_node.stats.incomplete_entries);
+  EXPECT_EQ(omap.stats.bucket_mismatch,
+            vector_node.stats.bucket_mismatch);
+  EXPECT_EQ(omap.stats.index_mismatch,
+            vector_node.stats.index_mismatch);
+  EXPECT_EQ(omap.stats.data_type_mismatch,
+            vector_node.stats.data_type_mismatch);
+  EXPECT_EQ(omap.stats.distance_metric_mismatch,
+            vector_node.stats.distance_metric_mismatch);
+  EXPECT_EQ(omap.stats.dimension_mismatch,
+            vector_node.stats.dimension_mismatch);
+  EXPECT_EQ(omap.stats.probe_mismatch,
+            vector_node.stats.probe_mismatch);
+  EXPECT_EQ(omap.stats.missing_content,
+            vector_node.stats.missing_content);
+  EXPECT_EQ(omap.stats.distance_error,
+            vector_node.stats.distance_error);
+  EXPECT_EQ(omap.stats.matched_entries,
+            vector_node.stats.matched_entries);
+  EXPECT_EQ(omap.stats.distance_computations,
+            vector_node.stats.distance_computations);
+  EXPECT_EQ(omap.stats.merged_entries,
+            vector_node.stats.merged_entries);
+  EXPECT_EQ(omap.stats.final_entries,
+            vector_node.stats.final_entries);
+}
+
+} // anonymous namespace
+
+TEST(VectorQueryExecutor, OmapAndVectorRecordAdaptersMatchAllMetrics) {
+  const uint32_t metrics[] = {
+    ceph::rados::vector_distance_metric_euclidean,
+    ceph::rados::vector_distance_metric_cosine,
+    ceph::rados::vector_distance_metric_dot,
+  };
+
+  for (const auto metric : metrics) {
+    SCOPED_TRACE(metric);
+    std::vector<ceph::os::vector_record_t> records = {
+      make_query_record("00000001", "tie-a", 1.0, 1.0, metric),
+      make_query_record("00000002", "tie-b", 1.0, -1.0, metric),
+      make_query_record("00000003", "axis", 3.0, 0.0, metric),
+      make_query_record(
+        "00000004", "other-probe", 1.0, 0.0, metric, "ffff"),
+    };
+
+    for (const uint32_t local_top_k : {8u, 2u}) {
+      SCOPED_TRACE(local_top_k);
+      auto req = make_local_query(metric, local_top_k);
+      auto omap = run_omap_query(req, records);
+      auto vector_node = run_vector_record_query(req, records);
+      expect_query_runs_equal(omap, vector_node);
+      EXPECT_EQ(4u, omap.stats.total_entries);
+      EXPECT_EQ(3u, omap.stats.matched_entries);
+      EXPECT_EQ(3u, omap.stats.distance_computations);
+      EXPECT_EQ(1u, omap.stats.probe_mismatch);
+      EXPECT_EQ(std::min<size_t>(local_top_k, 3),
+                omap.result.entries.size());
+    }
+  }
+}
+
+TEST(VectorQueryExecutor, OmapAndVectorRecordAdaptersMatchTiesAndReplace) {
+  const auto metric = ceph::rados::vector_distance_metric_euclidean;
+  auto old_record =
+    make_query_record("00000001", "old", 10.0, 0.0, metric);
+  auto updated_record =
+    make_query_record("00000001", "updated", 1.0, 0.0, metric);
+  updated_record.metadata.append("metadata", 8);
+
+  std::vector<ceph::os::vector_record_t> writes = {
+    old_record,
+    make_query_record("00000002", "tie-b", 1.0, 1.0, metric),
+    make_query_record("00000003", "tie-a", 1.0, -1.0, metric),
+    updated_record,
+  };
+  auto req = make_local_query(metric, 3);
+  auto omap = run_omap_query(req, writes);
+  auto vector_node = run_vector_record_query(req, writes);
+  expect_query_runs_equal(omap, vector_node);
+
+  ASSERT_EQ(3u, omap.result.entries.size());
+  EXPECT_EQ("updated", omap.result.entries[0].key);
+  EXPECT_EQ("tie-a", omap.result.entries[1].key);
+  EXPECT_EQ("tie-b", omap.result.entries[2].key);
+  EXPECT_EQ(3u, omap.stats.total_entries);
+  EXPECT_EQ(3u, omap.stats.matched_entries);
+}
+
+TEST(VectorQueryExecutor, OmapAndVectorRecordAdaptersMatchMalformedEntries) {
+  const auto metric = ceph::rados::vector_distance_metric_euclidean;
+  auto req = make_local_query(metric, 2);
+
+  auto incomplete =
+    make_query_record("00000001", "", 1.0, 0.0, metric);
+  auto omap = run_omap_query(req, {incomplete});
+  auto vector_node = run_vector_record_query(req, {incomplete});
+  expect_query_runs_equal(omap, vector_node);
+  EXPECT_EQ(1u, omap.stats.incomplete_entries);
+  EXPECT_TRUE(omap.result.entries.empty());
+
+  auto wrong_length =
+    make_query_record("00000002", "wrong-length", 1.0, 0.0, metric);
+  const float short_vector = 1.0;
+  wrong_length.vector_data.clear();
+  wrong_length.vector_data.append(
+      reinterpret_cast<const char *>(&short_vector),
+      sizeof(short_vector));
+  EXPECT_EQ(-EINVAL, ceph::os::validate_vector_record(wrong_length));
+
+  omap = run_omap_query(req, {wrong_length});
+  vector_node = run_vector_record_query(req, {wrong_length});
+  expect_query_runs_equal(omap, vector_node);
+  EXPECT_EQ(1u, omap.stats.distance_computations);
+  EXPECT_EQ(1u, omap.stats.distance_error);
+  EXPECT_EQ(0u, omap.stats.matched_entries);
+}
+
+TEST(VectorQueryExecutor, AccumulatorPrepareAndFinishAreOneShot) {
+  const auto metric = ceph::rados::vector_distance_metric_euclidean;
+  auto req = make_local_query(metric, 1);
+  auto record = make_query_record(
+    "00000001", "vector", 1.0, 0.0, metric);
+
+  ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+  ASSERT_EQ(0, accumulator.prepare(req));
+  ASSERT_EQ(0, accumulator.consume(
+      ceph::rados::vector_query_exec::make_vector_entry_view(record)));
+
+  auto invalid_req = req;
+  invalid_req.local_top_k = 0;
+  EXPECT_EQ(-EINVAL, accumulator.prepare(invalid_req));
+
+  ceph::rados::query_vectors_result_t result;
+  EXPECT_EQ(-EINVAL, accumulator.finish(&result));
+
+  ASSERT_EQ(0, accumulator.prepare(req));
+  ASSERT_EQ(0, accumulator.consume(
+      ceph::rados::vector_query_exec::make_vector_entry_view(record)));
+  ASSERT_EQ(0, accumulator.finish(&result));
+  ASSERT_EQ(1u, result.entries.size());
+  EXPECT_EQ("00000001", result.entries.front().entry_id);
+  EXPECT_EQ(-EINVAL, accumulator.finish(&result));
+}
+
+TEST(VectorQueryExecutor, AccumulatorRejectsEmptyEntryId) {
+  const auto metric = ceph::rados::vector_distance_metric_euclidean;
+  auto req = make_local_query(metric, 1);
+  auto record = make_query_record(
+    "00000001", "vector", 1.0, 0.0, metric);
+  record.entry_id.clear();
+
+  ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+  ASSERT_EQ(0, accumulator.prepare(req));
+  ASSERT_EQ(0, accumulator.consume(
+      ceph::rados::vector_query_exec::make_vector_entry_view(record)));
+
+  ceph::rados::query_vectors_result_t result;
+  ceph::rados::vector_query_exec::query_filter_stats_t stats;
+  ASSERT_EQ(0, accumulator.finish(&result, &stats));
+  EXPECT_TRUE(result.entries.empty());
+  EXPECT_EQ(1u, stats.total_entries);
+  EXPECT_EQ(1u, stats.incomplete_entries);
+  EXPECT_EQ(0u, stats.matched_entries);
 }
 
 TEST(VectorQueryPlanner, HashV0SeparatesBucketAndIndex) {
@@ -1812,41 +2174,48 @@ TEST_F(LibRadosIoPP, PutVectorPP) {
   };
   std::map<string, bufferlist> vals;
   ASSERT_EQ(0, ioctx.omap_get_vals_by_keys(oid, keys, &vals));
-  ASSERT_EQ(keys.size(), vals.size());
+  if (vals.empty()) {
+    string objectstore;
+    std::ignore = cluster.conf_get("osd_objectstore", objectstore);
+    EXPECT_TRUE(
+        is_crimson_cluster() && objectstore == "seastore");
+  } else {
+    ASSERT_EQ(keys.size(), vals.size());
 
-  auto key_iter = vals[prefix + "user_key"].cbegin();
-  string stored_key;
-  decode(stored_key, key_iter);
-  ASSERT_EQ("vec-pp", stored_key);
+    auto key_iter = vals[prefix + "user_key"].cbegin();
+    string stored_key;
+    decode(stored_key, key_iter);
+    ASSERT_EQ("vec-pp", stored_key);
 
-  auto content_key_iter = vals[prefix + "content_key"].cbegin();
-  string stored_content_key;
-  decode(stored_content_key, content_key_iter);
-  ASSERT_EQ(content_key, stored_content_key);
+    auto content_key_iter = vals[prefix + "content_key"].cbegin();
+    string stored_content_key;
+    decode(stored_content_key, content_key_iter);
+    ASSERT_EQ(content_key, stored_content_key);
 
-  auto key2_iter = vals[prefix2 + "user_key"].cbegin();
-  string stored_key2;
-  decode(stored_key2, key2_iter);
-  ASSERT_EQ("vec-pp-2", stored_key2);
+    auto key2_iter = vals[prefix2 + "user_key"].cbegin();
+    string stored_key2;
+    decode(stored_key2, key2_iter);
+    ASSERT_EQ("vec-pp-2", stored_key2);
 
-  auto dimension_iter = vals[prefix + "dimension"].cbegin();
-  uint32_t stored_dimension = 0;
-  decode(stored_dimension, dimension_iter);
-  ASSERT_EQ(4u, stored_dimension);
+    auto dimension_iter = vals[prefix + "dimension"].cbegin();
+    uint32_t stored_dimension = 0;
+    decode(stored_dimension, dimension_iter);
+    ASSERT_EQ(4u, stored_dimension);
 
-  auto vector_hash_iter = vals[prefix + "vector_hash"].cbegin();
-  string stored_vector_hash;
-  decode(stored_vector_hash, vector_hash_iter);
-  ASSERT_EQ(vector_hash, stored_vector_hash);
+    auto vector_hash_iter = vals[prefix + "vector_hash"].cbegin();
+    string stored_vector_hash;
+    decode(stored_vector_hash, vector_hash_iter);
+    ASSERT_EQ(vector_hash, stored_vector_hash);
 
-  ASSERT_EQ(vector_bl.length(), vals[content_key].length());
-  ASSERT_EQ(0, memcmp(vector_bl.c_str(), vals[content_key].c_str(),
-                      vector_bl.length()));
+    ASSERT_EQ(vector_bl.length(), vals[content_key].length());
+    ASSERT_EQ(0, memcmp(vector_bl.c_str(), vals[content_key].c_str(),
+                        vector_bl.length()));
 
-  ASSERT_EQ(updated_metadata.length(), vals[prefix + "metadata"].length());
-  ASSERT_EQ(0, memcmp(updated_metadata.c_str(),
-                      vals[prefix + "metadata"].c_str(),
-                      updated_metadata.length()));
+    ASSERT_EQ(updated_metadata.length(), vals[prefix + "metadata"].length());
+    ASSERT_EQ(0, memcmp(updated_metadata.c_str(),
+                        vals[prefix + "metadata"].c_str(),
+                        updated_metadata.length()));
+  }
 
   ASSERT_EQ(-EINVAL, ioctx.put_vector(
       "bucket", "index", "bad-dim",
@@ -1889,6 +2258,52 @@ TEST_F(LibRadosIoPP, PutVectorPP) {
       LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
       static_cast<rados_vector_distance_metric_t>(999),
       4, vector, sizeof(vector), metadata));
+}
+
+TEST_F(LibRadosIoPP, PutVectorLegacyOmapFallbackPP) {
+  float vector[] = {1.0, 2.0, 3.0, 4.0};
+  bufferlist vector_bl;
+  vector_bl.append(
+      reinterpret_cast<const char *>(vector), sizeof(vector));
+  bufferlist metadata;
+  metadata.append("legacy-metadata", sizeof("legacy-metadata"));
+
+  const string bucket = "legacy-vector-bucket-pp";
+  const string index = "legacy-vector-index-pp";
+  const string key = "legacy-vector-key-pp";
+  const string oid = vector_test_oid(bucket, index, key, vector_bl);
+  ASSERT_FALSE(oid.empty());
+
+  bufferlist marker;
+  marker.append("legacy", sizeof("legacy"));
+  ASSERT_EQ(0, ioctx.omap_set(oid, {{"legacy-marker", marker}}));
+  ASSERT_EQ(0, ioctx.put_vector(
+      bucket, index, key,
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), metadata));
+
+  const string entry_id = vector_entry_id(bucket, index, key);
+  const string prefix = "_ENTRY_" + entry_id + ".";
+  std::map<string, bufferlist> vals;
+  ASSERT_EQ(0, ioctx.omap_get_vals_by_keys(
+      oid, {"legacy-marker", prefix + "user_key"}, &vals));
+  ASSERT_EQ(2u, vals.size());
+
+  auto key_iter = vals[prefix + "user_key"].cbegin();
+  string stored_key;
+  decode(stored_key, key_iter);
+  EXPECT_EQ(key, stored_key);
+
+  std::vector<query_vectors_result_entry> results;
+  ASSERT_EQ(0, ioctx.query_vectors(
+      bucket, index,
+      LIBRADOS_VECTOR_DATA_TYPE_FLOAT32,
+      LIBRADOS_VECTOR_DISTANCE_METRIC_COSINE,
+      4, vector, sizeof(vector), 1, true, &results));
+  ASSERT_EQ(1u, results.size());
+  EXPECT_EQ(key, results[0].key);
+  EXPECT_NEAR(0.0f, results[0].distance, 1e-6f);
 }
 
 TEST_F(LibRadosIoPP, QueryVectorsValidationPP) {

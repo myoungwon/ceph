@@ -1,6 +1,11 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
 // vim: ts=8 sw=2 sts=2 expandtab
 
+#include <array>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <iostream>
 #include <random>
 
 #include <boost/iterator/counting_iterator.hpp>
@@ -12,6 +17,7 @@
 #include "crimson/os/seastore/transaction_manager.h"
 #include "crimson/os/seastore/segment_manager/ephemeral.h"
 #include "crimson/os/seastore/segment_manager.h"
+#include "crimson/os/seastore/vector_node.h"
 
 #include "test/crimson/seastore/test_block.h"
 #include "crimson/os/seastore/lba/lba_btree_node.h"
@@ -23,6 +29,60 @@ using namespace crimson::os::seastore;
 namespace {
   [[maybe_unused]] seastar::logger& logger() {
     return crimson::get_logger(ceph_subsys_test);
+  }
+
+  ceph::bufferlist make_vector_payload(std::string_view payload) {
+    ceph::bufferlist bl;
+    bl.append(payload.data(), payload.size());
+    return bl;
+  }
+
+  ceph::os::vector_record_t make_vector_entry(
+    std::string entry_id,
+    std::string payload = "aaaa",
+    std::string user_key = {},
+    std::string metadata = {}) {
+    ceph::os::vector_record_t entry;
+    entry.entry_id = std::move(entry_id);
+    entry.bucket_name = "bucket";
+    entry.index_name = "index";
+    entry.user_key = user_key.empty() ? "key-" + entry.entry_id : user_key;
+    entry.data_type = ceph::rados::vector_data_type_float32;
+    entry.distance_metric =
+      ceph::rados::vector_distance_metric_euclidean;
+    entry.dimension = payload.size() / sizeof(float);
+    entry.placement_algorithm =
+      ceph::rados::vector_placement_algorithm_hash_v0;
+    entry.placement_key = "abcd";
+    entry.vector_hash = "01234567";
+    entry.metadata = make_vector_payload(metadata);
+    entry.vector_data = make_vector_payload(payload);
+    return entry;
+  }
+
+  ceph::bufferlist get_extent_image(const VectorNodeRef &node) {
+    ceph::bufferlist bl;
+    ceph::bufferptr bptr(node->get_bptr(), 0, node->get_length());
+    bl.append(bptr);
+    return bl;
+  }
+
+  // Collects every record from a LIST page in append (slot) order --
+  // never entry_id order, since LIST no longer sorts. `row_length` is the
+  // group's per-row byte length (dimension * element_size(data_type)),
+  // which LIST pages no longer store, so the caller supplies it -- same
+  // contract as VectorNodeListLayout::scan_records().
+  std::vector<std::pair<std::string, std::string>> collect_list_records(
+    const VectorNodeListLayout &list, uint32_t row_length) {
+    std::vector<std::pair<std::string, std::string>> out;
+    const int r = list.scan_records(
+      row_length, [&](const VectorNodeRecordView &record) {
+        out.emplace_back(
+          std::string(record.entry_id()),
+          std::string(record.vector_data()));
+      });
+    EXPECT_EQ(0, r);
+    return out;
   }
 }
 
@@ -1084,7 +1144,8 @@ struct transaction_manager_test_t :
         extent_types_t::TEST_BLOCK_PHYSICAL,
         extent_types_t::BACKREF_INTERNAL,
         extent_types_t::BACKREF_LEAF,
-	extent_types_t::LOG_NODE
+	extent_types_t::LOG_NODE,
+        extent_types_t::VECTOR_NODE
       };
       // exclude DINK_LADDR_LEAF, ALLOC_INFO, JOURNAL_TAIL
       assert(all_extent_types.size() == EXTENT_TYPES_MAX - 3);
@@ -1959,6 +2020,504 @@ TEST_P(tm_single_device_test_t, mutate)
     ASSERT_TRUE(check_usage());
     replay();
     check();
+  });
+}
+
+TEST(vector_node_index_layout_t, exact_lookup_hit_and_miss)
+{
+  std::vector<char> page(VECTOR_NODE_INDEX_BYTES, '\0');
+  auto layout = VectorNodeIndexLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  const laddr_t head = laddr_t::from_byte_offset(0x1000);
+  const laddr_t tail = laddr_t::from_byte_offset(0x2000);
+  ASSERT_EQ(0, layout->insert_entry(
+    128, ceph::rados::vector_data_type_float32, head, tail));
+
+  const auto hit = layout->find_entry(
+    128, ceph::rados::vector_data_type_float32);
+  ASSERT_TRUE(hit);
+  const auto entry = layout->entry_at(*hit);
+  ASSERT_TRUE(entry);
+  EXPECT_EQ(head, entry->head_laddr());
+  EXPECT_EQ(tail, entry->tail_laddr());
+
+  // Exact match only: neither a different dimension nor a different
+  // data_type is treated as "close enough".
+  EXPECT_FALSE(layout->find_entry(
+    256, ceph::rados::vector_data_type_float32));
+  EXPECT_FALSE(layout->find_entry(
+    128, ceph::rados::vector_data_type_float32 + 1));
+}
+
+TEST(vector_node_index_layout_t, rejects_duplicate_group)
+{
+  std::vector<char> page(VECTOR_NODE_INDEX_BYTES, '\0');
+  auto layout = VectorNodeIndexLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  const laddr_t addr = laddr_t::from_byte_offset(0x1000);
+  ASSERT_EQ(0, layout->insert_entry(
+    128, ceph::rados::vector_data_type_float32, addr, addr));
+  EXPECT_EQ(-EEXIST, layout->insert_entry(
+    128, ceph::rados::vector_data_type_float32, addr, addr));
+}
+
+TEST(vector_node_index_layout_t, entries_stay_sorted_for_binary_search)
+{
+  std::vector<char> page(VECTOR_NODE_INDEX_BYTES, '\0');
+  auto layout = VectorNodeIndexLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  const laddr_t addr = laddr_t::from_byte_offset(0x1000);
+  const std::array<uint32_t, 4> dimensions = {768, 128, 384, 256};
+  for (const auto dimension : dimensions) {
+    ASSERT_EQ(0, layout->insert_entry(
+      dimension, ceph::rados::vector_data_type_float32, addr, addr));
+  }
+  ASSERT_EQ(4u, layout->item_count());
+  uint32_t previous = 0;
+  for (uint32_t i = 0; i < layout->item_count(); ++i) {
+    const auto entry = layout->entry_at(i);
+    ASSERT_TRUE(entry);
+    EXPECT_LT(previous, entry->dimension());
+    previous = entry->dimension();
+  }
+  for (const auto dimension : dimensions) {
+    EXPECT_TRUE(layout->find_entry(
+      dimension, ceph::rados::vector_data_type_float32));
+  }
+}
+
+TEST(vector_node_index_layout_t, set_tail_laddr_rewrites_only_tail)
+{
+  std::vector<char> page(VECTOR_NODE_INDEX_BYTES, '\0');
+  auto layout = VectorNodeIndexLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  const laddr_t head = laddr_t::from_byte_offset(0x1000);
+  const laddr_t old_tail = laddr_t::from_byte_offset(0x2000);
+  const laddr_t new_tail = laddr_t::from_byte_offset(0x3000);
+  ASSERT_EQ(0, layout->insert_entry(
+    128, ceph::rados::vector_data_type_float32, head, old_tail));
+  const auto index = layout->find_entry(
+    128, ceph::rados::vector_data_type_float32);
+  ASSERT_TRUE(index);
+  ASSERT_EQ(0, layout->set_tail_laddr(*index, new_tail));
+
+  const auto entry = layout->entry_at(*index);
+  ASSERT_TRUE(entry);
+  EXPECT_EQ(head, entry->head_laddr());
+  EXPECT_EQ(new_tail, entry->tail_laddr());
+}
+
+TEST(vector_node_list_layout_t, append_only_no_dedup)
+{
+  std::vector<char> page(16 << 10, '\0');
+  auto layout = VectorNodeListLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  // Same bucket/index/key/entry_id appended twice: no lookup, no
+  // overwrite -- this is the storage-layer proof that a repeated PUT
+  // appends a second physical record.
+  ASSERT_EQ(0, layout->append_record(make_vector_entry("0000000a", "aaaa")));
+  ASSERT_EQ(0, layout->append_record(make_vector_entry("0000000a", "aaaa")));
+
+  EXPECT_EQ(2u, layout->item_count());
+  EXPECT_EQ(2u, layout->logical_entry_count());
+  const auto records = collect_list_records(*layout, sizeof(float));
+  ASSERT_EQ(2u, records.size());
+  EXPECT_EQ("0000000a", records[0].first);
+  EXPECT_EQ("0000000a", records[1].first);
+}
+
+TEST(vector_node_list_layout_t, scan_order_is_append_order_not_sorted)
+{
+  std::vector<char> page(16 << 10, '\0');
+  auto layout = VectorNodeListLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  ASSERT_EQ(0, layout->append_record(make_vector_entry("ffffffff", "cccc")));
+  ASSERT_EQ(0, layout->append_record(make_vector_entry("00000000", "aaaa")));
+  ASSERT_EQ(0, layout->append_record(make_vector_entry("77777777", "bbbb")));
+
+  const auto records = collect_list_records(*layout, sizeof(float));
+  ASSERT_EQ(3u, records.size());
+  EXPECT_EQ("ffffffff", records[0].first);
+  EXPECT_EQ("00000000", records[1].first);
+  EXPECT_EQ("77777777", records[2].first);
+}
+
+TEST(vector_node_list_layout_t, append_fails_with_enospc_when_full)
+{
+  std::vector<char> page(512, '\0');
+  auto layout = VectorNodeListLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+
+  int result = 0;
+  uint32_t appended = 0;
+  for (uint32_t i = 0; i < 1000 && result == 0; ++i) {
+    char id[9];
+    std::snprintf(id, sizeof(id), "%08x", i);
+    result = layout->append_record(make_vector_entry(id, "aaaa"));
+    if (result == 0) {
+      ++appended;
+    }
+  }
+  EXPECT_EQ(-ENOSPC, result);
+  EXPECT_GT(appended, 0u);
+  EXPECT_EQ(appended, layout->item_count());
+}
+
+TEST(vector_node_list_layout_t, next_page_laddr_round_trips)
+{
+  std::vector<char> page(16 << 10, '\0');
+  auto layout = VectorNodeListLayout::initialize(page.data(), page.size());
+  ASSERT_TRUE(layout);
+  EXPECT_EQ(L_ADDR_NULL, layout->next_page_laddr());
+
+  const laddr_t next = laddr_t::from_byte_offset(0x4000);
+  ASSERT_EQ(0, layout->set_next_page_laddr(next));
+  EXPECT_EQ(next, layout->next_page_laddr());
+  ASSERT_EQ(0, layout->validate());
+}
+
+TEST_P(tm_single_device_test_t, vector_node_index_put_and_query_round_trip)
+{
+  run_async([this] {
+    VectorNodeManager manager(*tm);
+    laddr_t index_addr = L_ADDR_NULL;
+    {
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_index_table(trans
+        ).si_then([&](auto index) {
+          index_addr = index->get_laddr();
+          return manager.append_vector_entry(
+            trans, std::move(index),
+            make_vector_entry("0000000b", "bbbb"));
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          return manager.append_vector_entry(
+            trans, std::move(index),
+            make_vector_entry("0000000a", "aaaa"));
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_read_test_transaction();
+      std::vector<std::pair<std::string, std::string>> entries;
+      auto stats = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          return manager.find_group_head(
+            std::move(index), 1u, ceph::rados::vector_data_type_float32);
+        }).si_then([&](auto head) {
+          EXPECT_TRUE(head);
+          return manager.scan_vector_group(
+            trans, *head, 1u, ceph::rados::vector_data_type_float32,
+            [&](const VectorNodeRecordView &record) {
+              entries.emplace_back(
+                std::string(record.entry_id()),
+                std::string(record.vector_data()));
+            });
+        });
+      }).unsafe_get();
+      ASSERT_EQ(2u, entries.size());
+      EXPECT_EQ("0000000b", entries[0].first);
+      EXPECT_EQ("0000000a", entries[1].first);
+      EXPECT_EQ(2u, stats.logical_entries);
+      EXPECT_EQ(1u, stats.list_extents);
+    }
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_index_isolates_groups)
+{
+  run_async([this] {
+    VectorNodeManager manager(*tm);
+    laddr_t index_addr = L_ADDR_NULL;
+    // "aaaa" -> dimension 1; "bbbbbbbb" -> dimension 2. Same data_type.
+    const auto small = make_vector_entry("00000001", "aaaa");
+    const auto large = make_vector_entry("00000002", "bbbbbbbb");
+    {
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_index_table(trans
+        ).si_then([&](auto index) {
+          index_addr = index->get_laddr();
+          return manager.append_vector_entry(trans, std::move(index), small);
+        }).si_then([&] {
+          return manager.read_vector_node(trans, index_addr);
+        }).si_then([&](auto index) {
+          return manager.append_vector_entry(trans, std::move(index), large);
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_read_test_transaction();
+      std::vector<std::string> small_ids;
+      std::vector<std::string> large_ids;
+      std::optional<laddr_t> miss;
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          return manager.find_group_head(
+            std::move(index), small.dimension, small.data_type);
+        }).si_then([&](auto head) {
+          EXPECT_TRUE(head);
+          return manager.scan_vector_group(
+            trans, *head, small.dimension, small.data_type,
+            [&](const VectorNodeRecordView &record) {
+              small_ids.emplace_back(record.entry_id());
+            });
+        }).si_then([&](auto) {
+          return manager.read_vector_node(trans, index_addr);
+        }).si_then([&](auto index) {
+          return manager.find_group_head(
+            std::move(index), large.dimension, large.data_type);
+        }).si_then([&](auto head) {
+          EXPECT_TRUE(head);
+          return manager.scan_vector_group(
+            trans, *head, large.dimension, large.data_type,
+            [&](const VectorNodeRecordView &record) {
+              large_ids.emplace_back(record.entry_id());
+            });
+        }).si_then([&](auto) {
+          return manager.read_vector_node(trans, index_addr);
+        }).si_then([&](auto index) {
+          // An unrelated (dimension, data_type) pair is a clean miss,
+          // never a nearest match against either group above.
+          return manager.find_group_head(std::move(index), 99, 99);
+        }).si_then([&](auto head) {
+          miss = head;
+        });
+      }).unsafe_get();
+      ASSERT_EQ(1u, small_ids.size());
+      EXPECT_EQ("00000001", small_ids.front());
+      ASSERT_EQ(1u, large_ids.size());
+      EXPECT_EQ("00000002", large_ids.front());
+      EXPECT_FALSE(miss);
+    }
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_duplicate_put_appends_two_records)
+{
+  run_async([this] {
+    VectorNodeManager manager(*tm);
+    laddr_t index_addr = L_ADDR_NULL;
+    const auto entry = make_vector_entry("0000000a", "aaaa", "same-key");
+    {
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_index_table(trans
+        ).si_then([&](auto index) {
+          index_addr = index->get_laddr();
+          return manager.append_vector_entry(trans, std::move(index), entry);
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      // Same bucket/index/key (and entry_id) PUT a second time: this
+      // never scans for an existing record, so it always appends.
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          return manager.append_vector_entry(trans, std::move(index), entry);
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_read_test_transaction();
+      uint64_t matching = 0;
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          return manager.find_group_head(
+            std::move(index), entry.dimension, entry.data_type);
+        }).si_then([&](auto head) {
+          EXPECT_TRUE(head);
+          // LIST rows no longer carry user_key (see vector_list_entry_le_t):
+          // both appends share this entry's entry_id, so counting by
+          // entry_id proves the same thing the user_key comparison did.
+          return manager.scan_vector_group(
+            trans, *head, entry.dimension, entry.data_type,
+            [&](const VectorNodeRecordView &record) {
+              if (record.entry_id() == entry.entry_id) {
+                ++matching;
+              }
+            });
+        });
+      }).unsafe_get();
+      // Two physical records stored, verified at the LIST scan level --
+      // not by asserting a QueryVectors result count.
+      EXPECT_EQ(2u, matching);
+    }
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_tail_rollover_links_new_block)
+{
+  run_async([this] {
+    // Smallest valid configured LIST block size, so 30 records of ~700
+    // bytes each force at least one tail rollover.
+    VectorNodeManager manager(*tm, VECTOR_NODE_LIST_DEFAULT_BYTES);
+    laddr_t index_addr = L_ADDR_NULL;
+    {
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_index_table(trans
+        ).si_then([&](auto index) {
+          index_addr = index->get_laddr();
+          return manager.append_vector_entry(
+            trans, std::move(index),
+            make_vector_entry("00000000", std::string(700, 'm')));
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    for (uint32_t i = 1; i < 30; ++i) {
+      auto t = create_transaction();
+      char id[9];
+      std::snprintf(id, sizeof(id), "%08x", i);
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          return manager.append_vector_entry(
+            trans, std::move(index),
+            make_vector_entry(id, std::string(700, 'm')));
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      auto t = create_read_test_transaction();
+      laddr_t head_addr = L_ADDR_NULL;
+      laddr_t tail_addr = L_ADDR_NULL;
+      uint32_t entry_dimension = 0;
+      uint32_t entry_data_type = 0;
+      uint64_t total = 0;
+      auto stats = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr
+        ).si_then([&](auto index) {
+          const auto layout = index->index_layout();
+          EXPECT_EQ(1u, layout->item_count());
+          const auto entry = layout->entry_at(0);
+          EXPECT_TRUE(entry);
+          head_addr = entry->head_laddr();
+          tail_addr = entry->tail_laddr();
+          entry_dimension = entry->dimension();
+          entry_data_type = entry->data_type();
+          return manager.find_group_head(
+            std::move(index), entry_dimension, entry_data_type);
+        }).si_then([&](auto head) {
+          EXPECT_TRUE(head);
+          EXPECT_EQ(head_addr, *head);
+          return manager.scan_vector_group(
+            trans, *head, entry_dimension, entry_data_type,
+            [&](const VectorNodeRecordView &) { ++total; });
+        });
+      }).unsafe_get();
+      EXPECT_NE(head_addr, tail_addr);
+      EXPECT_EQ(30u, total);
+      EXPECT_GE(stats.list_extents, 2u);
+    }
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_configured_block_sizes)
+{
+  run_async([this] {
+    for (const extent_len_t block_bytes : {16u << 10, 32u << 10}) {
+      VectorNodeManager manager(*tm, block_bytes);
+      laddr_t index_addr = L_ADDR_NULL;
+      {
+        auto t = create_transaction();
+        with_trans_intr(*(t.t), [&](auto &trans) {
+          return manager.create_index_table(trans
+          ).si_then([&](auto index) {
+            index_addr = index->get_laddr();
+            return manager.append_vector_entry(
+              trans, std::move(index),
+              make_vector_entry("00000000", "aaaa"));
+          });
+        }).unsafe_get();
+        submit_transaction(std::move(t));
+      }
+      {
+        auto t = create_read_test_transaction();
+        uint64_t matched = 0;
+        with_trans_intr(*(t.t), [&](auto &trans) {
+          return manager.read_vector_node(trans, index_addr
+          ).si_then([&](auto index) {
+            return manager.find_group_head(
+              std::move(index),
+              1u, ceph::rados::vector_data_type_float32);
+          }).si_then([&](auto head) {
+            EXPECT_TRUE(head);
+            return manager.scan_vector_group(
+              trans, *head, 1u, ceph::rados::vector_data_type_float32,
+              [&](const VectorNodeRecordView &) { ++matched; });
+          });
+        }).unsafe_get();
+        EXPECT_EQ(1u, matched);
+      }
+    }
+  });
+}
+
+TEST_P(tm_single_device_test_t, vector_node_remove_index_table_frees_chain)
+{
+  run_async([this] {
+    VectorNodeManager manager(*tm);
+    laddr_t index_addr = L_ADDR_NULL;
+    {
+      auto t = create_transaction();
+      with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.create_index_table(trans
+        ).si_then([&](auto index) {
+          index_addr = index->get_laddr();
+          return manager.append_vector_entry(
+            trans, std::move(index),
+            make_vector_entry("00000000", "aaaa"));
+        }).si_then([&] {
+          return manager.read_vector_node(trans, index_addr);
+        }).si_then([&](auto index) {
+          return manager.remove_index_table(trans, std::move(index));
+        });
+      }).unsafe_get();
+      submit_transaction(std::move(t));
+    }
+    {
+      using read_ertr = with_trans_ertr<VectorNodeManager::read_iertr>;
+      auto t = create_read_test_transaction();
+      const bool index_missing = with_trans_intr(*(t.t), [&](auto &trans) {
+        return manager.read_vector_node(trans, index_addr);
+      }).safe_then([](auto) {
+        return read_ertr::make_ready_future<bool>(false);
+      }).handle_error(
+        crimson::ct_error::enoent::handle([] {
+          return read_ertr::make_ready_future<bool>(true);
+        }),
+        crimson::ct_error::assert_all{
+          "reading a removed VectorNode index returned an unexpected error"
+        }
+      ).unsafe_get();
+      EXPECT_TRUE(index_missing);
+    }
   });
 }
 

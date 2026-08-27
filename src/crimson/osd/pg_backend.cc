@@ -4,16 +4,15 @@
 #include "pg_backend.h"
 #include "include/rados/vector_ops.h"
 #include "common/vector_query_exec.h"
+#include "common/vector_omap_scan.h"
 
 #include <charconv>
-#include <cstdio>
-#include <optional>
+#include <chrono>
 #include <boost/range/adaptor/filtered.hpp>
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/algorithm/copy.hpp>
 #include <fmt/format.h>
 #include <fmt/ostream.h>
-#include "include/ceph_hash.h"
 #include "include/err.h" // for MAX_ERRNO
 #include "include/utime_fmt.h"
 #include <seastar/core/print.hh>
@@ -52,69 +51,6 @@ using std::string_view;
 using crimson::common::local_conf;
 
 namespace crimson::osd {
-
-static string vector_hex_u32(uint32_t value)
-{
-  char buf[9];
-  snprintf(buf, sizeof(buf), "%08x", value);
-  return string(buf);
-}
-
-static string vector_entry_id(const ceph::rados::put_vector_request_t& req)
-{
-  // entry_id is a compact hash of one logical bucket/index/user key binding.
-  string value;
-  value.reserve(req.bucket_name.length() + req.index_name.length() +
-                req.key.length() + 2);
-  value.append(req.bucket_name);
-  value.push_back('\0');
-  value.append(req.index_name);
-  value.push_back('\0');
-  value.append(req.key);
-  return vector_hex_u32(ceph_str_hash_rjenkins(
-      value.c_str(), static_cast<unsigned>(value.length())));
-}
-
-template <typename T>
-static void vector_omap_set(std::map<std::string, ceph::bufferlist> *omap,
-                            const string& key,
-                            const T& value)
-{
-  ceph::bufferlist bl;
-  encode(value, bl);
-  (*omap)[key] = bl;
-}
-
-static std::map<std::string, ceph::bufferlist> put_vector_omap(
-    const ceph::rados::put_vector_request_t& req,
-    const string& entry_id)
-{
-  // _CONTENT_<vector_hash> stores the raw vector bytes.
-  // _ENTRY_<entry_id>.* stores metadata for one logical vector entry.
-  const string content_key = "_CONTENT_" + req.vector_hash;
-  const string entry_prefix = "_ENTRY_" + entry_id + ".";
-  std::map<std::string, ceph::bufferlist> omap;
-
-  omap[content_key] = req.vector_data;
-  vector_omap_set(&omap, entry_prefix + "bucket_name", req.bucket_name);
-  vector_omap_set(&omap, entry_prefix + "index_name", req.index_name);
-  vector_omap_set(&omap, entry_prefix + "user_key", req.key);
-  vector_omap_set(&omap, entry_prefix + "content_key", content_key);
-  vector_omap_set(&omap, entry_prefix + "data_type", req.data_type);
-  vector_omap_set(&omap, entry_prefix + "distance_metric", req.distance_metric);
-  vector_omap_set(&omap, entry_prefix + "dimension", req.dimension);
-  vector_omap_set(&omap, entry_prefix + "layout_version",
-                  ceph::rados::vector_layout_version);
-  vector_omap_set(&omap, entry_prefix + "placement_algorithm",
-                  req.placement_algorithm);
-  vector_omap_set(&omap, entry_prefix + "placement_key", req.placement_key);
-  vector_omap_set(&omap, entry_prefix + "vector_hash", req.vector_hash);
-  if (req.metadata.length() > 0) {
-    omap[entry_prefix + "metadata"] = req.metadata;
-  }
-
-  return omap;
-}
 
 std::unique_ptr<PGBackend>
 PGBackend::create(pg_t pgid,
@@ -1776,18 +1712,34 @@ PGBackend::put_vector(
     throw crimson::osd::invalid_argument{};
   }
 
-  const string entry_id = vector_entry_id(req);
-  std::map<std::string, ceph::bufferlist> omap =
-    put_vector_omap(req, entry_id);
+  auto record = ceph::os::make_vector_record(req);
+  if (ceph::os::validate_vector_record(record) < 0) {
+    throw crimson::osd::invalid_argument{};
+  }
 
-  ceph::bufferlist encoded_omap;
-  encode(omap, encoded_omap);
-
+  const bool use_vector_node =
+    os.oi.has_vector_node() ||
+    (vector_nodes_enabled() && !os.exists);
   maybe_create_new_object(os, txn, delta_stats);
-  txn.put_vector(coll->get_cid(), ghobject_t{os.oi.soid}, omap);
-  osd_op_params.clean_regions.mark_omap_dirty();
+  if (use_vector_node) {
+    os.oi.set_flag(object_info_t::FLAG_VECTOR_NODE);
+  }
+  store.f_store.enqueue_vector_put(
+    txn, coll->get_cid(), ghobject_t{os.oi.soid}, record, use_vector_node);
+
+  ceph::bufferlist encoded_record;
+  record.encode(encoded_record);
   delta_stats.num_wr++;
-  delta_stats.num_wr_kb += shift_round_up(encoded_omap.length(), 10);
+  delta_stats.num_wr_kb += shift_round_up(encoded_record.length(), 10);
+
+  // Identity/metadata always goes to OMAP under _ENTRY_<entry_id>.*, even
+  // when the vector bytes themselves went to VectorNode above.
+  if (use_vector_node) {
+    txn.omap_setkeys(
+      coll->get_cid(), ghobject_t{os.oi.soid},
+      ceph::os::make_vector_omap_identity(record));
+  }
+  osd_op_params.clean_regions.mark_omap_dirty();
   if (!os.oi.is_omap()) {
     os.oi.set_flag(object_info_t::FLAG_OMAP);
     delta_stats.num_objects_omap++;
@@ -1819,39 +1771,130 @@ PGBackend::query_vectors(
     throw crimson::osd::invalid_argument{};
   }
 
-  ceph::rados::vector_query_exec::omap_scan_state_t scan;
-  if (os.exists && !os.oi.is_whiteout() && os.oi.is_omap()) {
-    ObjectStore::omap_iter_seek_t start_from =
-      ObjectStore::omap_iter_seek_t::min_lower_bound();
-    omap_iterate_cb_t callback =
-      [&scan](std::string_view key, std::string_view value) {
-        ceph::rados::vector_query_exec::consume_omap_key_value(
-            key, value, scan);
-        return ObjectStore::omap_iter_ret_t::NEXT;
-      };
-
-    co_await maybe_do_omap_iterate(
-      store, coll, os.oi, start_from, callback
-    ).safe_then([](auto) {
-      return seastar::now();
-    }).handle_error(
-      crimson::ct_error::enodata::handle([] {
-        return ll_read_errorator::now();
-      }),
-      ll_read_errorator::pass_further{}
-    );
-  }
-
   ceph::rados::query_vectors_result_t query_result;
-  ceph::rados::vector_query_exec::query_filter_stats_t filter_stats;
-  r = ceph::rados::vector_query_exec::build_local_results(
-      req, scan, &query_result, &filter_stats);
-  if (r < 0) {
-    throw crimson::osd::invalid_argument{};
+  if (os.exists && !os.oi.is_whiteout() &&
+      os.oi.has_vector_node()) {
+    auto native_result = co_await crimson::os::with_store<
+      &crimson::os::FuturizedStore::Shard::query_vectors>(
+      store, coll, ghobject_t{os.oi.soid}, req, 0);
+    if (!native_result) {
+      // FLAG_VECTOR_NODE selects exactly one storage format. A backend that
+      // cannot find that format is inconsistent; it must not fall back to
+      // an unrelated OMAP representation.
+      co_await ll_read_ierrorator::future<>(
+        crimson::ct_error::input_output_error::make());
+    }
+    ceph_assert(native_result);
+    query_result = std::move(*native_result);
+
+    // `key` (user_key) is still empty here: the LIST scan above only ever
+    // sees entry_id + vector bytes. Restore it with one point lookup per
+    // surviving entry_id, not one per scanned candidate.
+    if (!query_result.entries.empty()) {
+      std::set<std::string> identity_keys_to_get;
+      for (const auto &entry : query_result.entries) {
+        identity_keys_to_get.insert("_ENTRY_" + entry.entry_id + ".user_key");
+      }
+      crimson::os::FuturizedStore::Shard::omap_values_t identity_vals;
+      co_await maybe_get_omap_vals_by_keys(
+        store, coll, os.oi, identity_keys_to_get
+      ).safe_then_interruptible(
+        [&identity_vals](crimson::os::FuturizedStore::Shard::omap_values_t
+                            &&vals) {
+          identity_vals = std::move(vals);
+          return ll_read_errorator::now();
+        }).handle_error_interruptible(
+        crimson::ct_error::enodata::handle([] {
+          return ll_read_errorator::now();
+        }),
+        ll_read_errorator::pass_further{}
+      );
+      for (auto &entry : query_result.entries) {
+        const auto found = identity_vals.find(
+          "_ENTRY_" + entry.entry_id + ".user_key");
+        if (found != identity_vals.end()) {
+          ceph::rados::vector_query_exec::decode_omap_string_value(
+            found->second, &entry.key);
+        }
+      }
+    }
+  } else {
+    const bool measure =
+      logger().is_enabled(seastar::log_level::debug);
+    const auto begin = measure
+      ? std::chrono::steady_clock::now()
+      : std::chrono::steady_clock::time_point();
+    ceph::rados::vector_query_exec::query_filter_stats_t filter_stats;
+    uint64_t logical_kv_bytes = 0;
+    ceph::rados::vector_query_exec::omap_scan_state_t scan;
+    if (os.exists && !os.oi.is_whiteout() && os.oi.is_omap()) {
+      ObjectStore::omap_iter_seek_t start_from =
+        ObjectStore::omap_iter_seek_t::min_lower_bound();
+      omap_iterate_cb_t callback =
+        [&scan, &logical_kv_bytes, measure](
+            std::string_view key, std::string_view value) {
+          if (measure) {
+            logical_kv_bytes += key.size() + value.size();
+          }
+          ceph::rados::vector_query_exec::consume_omap_key_value(
+            key, value, scan);
+          return ObjectStore::omap_iter_ret_t::NEXT;
+        };
+
+      co_await maybe_do_omap_iterate(
+        store, coll, os.oi, start_from, callback
+      ).safe_then([](auto) {
+        return seastar::now();
+      }).handle_error(
+        crimson::ct_error::enodata::handle([] {
+          return ll_read_errorator::now();
+        }),
+        ll_read_errorator::pass_further{}
+      );
+    }
+
+    const auto query_exec_begin = measure
+      ? std::chrono::steady_clock::now()
+      : std::chrono::steady_clock::time_point();
+    ceph::rados::vector_query_exec::local_query_accumulator_t accumulator;
+    r = accumulator.prepare(req);
+    if (r < 0) {
+      throw crimson::osd::invalid_argument{};
+    }
+    for (const auto& [entry_id, entry] : scan.entries) {
+      (void)entry_id;
+      const int consume_r = accumulator.consume(
+          ceph::rados::vector_query_exec::make_omap_entry_view(entry, scan));
+      ceph_assert(consume_r == 0);
+    }
+    r = accumulator.finish(&query_result, &filter_stats);
+    if (r < 0) {
+      throw crimson::osd::invalid_argument{};
+    }
+    query_result.local_matching_entries = filter_stats.matched_entries;
+    query_result.local_distance_computations =
+      filter_stats.distance_computations;
+    if (measure) {
+      const auto now = std::chrono::steady_clock::now();
+      const auto storage_path_ns = std::chrono::duration_cast<
+        std::chrono::nanoseconds>(query_exec_begin - begin).count();
+      const auto query_exec_ns = std::chrono::duration_cast<
+        std::chrono::nanoseconds>(now - query_exec_begin).count();
+      const auto total_ns = std::chrono::duration_cast<
+        std::chrono::nanoseconds>(now - begin).count();
+      logger().debug(
+        "query_vectors storage=omap logical_entries={} matched_entries={} "
+        "distance_computations={} list_extents=0 logical_kv_bytes={} "
+        "storage_path_ns={} query_exec_ns={} total_ns={}",
+        filter_stats.total_entries,
+        filter_stats.matched_entries,
+        filter_stats.distance_computations,
+        logical_kv_bytes,
+        storage_path_ns,
+        query_exec_ns,
+        total_ns);
+    }
   }
-  query_result.local_matching_entries = filter_stats.matched_entries;
-  query_result.local_distance_computations =
-    filter_stats.distance_computations;
   encode(query_result, osd_op.outdata);
   delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
   delta_stats.num_rd++;
