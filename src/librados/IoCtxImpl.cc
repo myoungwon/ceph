@@ -687,6 +687,44 @@ int librados::IoCtxImpl::write(const object_t& oid, bufferlist& bl,
   return operate(oid, &op, NULL);
 }
 
+int librados::vector_internal::submit_put(
+    librados::IoCtxImpl *ioctx_impl,
+    const object_t& oid,
+    const std::string& locator_key,
+    const std::string& placement_algorithm,
+    const std::string& placement_key,
+    const std::string& vector_hash,
+    ceph::rados::put_vector_request_t req,
+    librados::vector_internal::put_op_state_t *op_state,
+    librados::v14_2_0::AioCompletion *completion)
+{
+  if (op_state == nullptr || completion == nullptr ||
+      ioctx_impl == nullptr ||
+      placement_algorithm.empty() || placement_key.empty() ||
+      vector_hash.empty()) {
+    return -EINVAL;
+  }
+
+  req.placement_algorithm = placement_algorithm;
+  req.placement_key = placement_key;
+  req.vector_hash = vector_hash;
+
+  op_state->payload.clear();
+  encode(req, op_state->payload);
+  op_state->op.put_vector(op_state->payload);
+
+  op_state->routed_ioctx.reset(new IoCtxImpl());
+  op_state->routed_ioctx->get();
+  op_state->routed_ioctx->dup(*ioctx_impl);
+  if (!locator_key.empty()) {
+    op_state->routed_ioctx->oloc.key = locator_key;
+  }
+
+  return op_state->routed_ioctx->aio_operate(
+      oid, &op_state->op, completion->pc, op_state->routed_ioctx->snapc,
+      nullptr, 0);
+}
+
 int librados::IoCtxImpl::put_vector(const std::string& vector_bucket_name,
 				    const std::string& index_name,
 				    const std::string& key,

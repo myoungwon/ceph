@@ -19,6 +19,12 @@ else()
 endif()
 install(TARGETS rados DESTINATION bin)
 
+add_executable(ceph-vector-bench-native
+  ceph_vector_bench_native.cc)
+target_link_libraries(ceph-vector-bench-native
+  librados
+  global)
+
 if(NOT WIN32)
   set(neorados_srcs
       neorados.cc)

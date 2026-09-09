@@ -445,6 +445,62 @@ struct query_vectors_result_entry_t {
   }
 };
 
+// Per-OSD telemetry for one tree-boundary query, set only when the request
+// carried a vector_tree_boundary_search_config_t. Nothing here feeds back
+// into query correctness; it exists so a benchmark client can see how much
+// of the tree the search actually touched. tau is the current top-k radius,
+// absent while the local top-k is still unfilled.
+struct query_vectors_tree_stats_t {
+  // Candidates returned by the initial PG-local descent.
+  uint64_t primary_candidate_count = 0;
+  // Frontier expansions performed after that descent.
+  uint64_t expanded_subtree_count = 0;
+  // Candidates handed to the scan, primary and expanded together.
+  uint64_t candidates_seen = 0;
+  // Candidates whose VectorNode chain was actually read.
+  uint64_t opened_onode_count = 0;
+  // Subtrees the tau distance bound excluded before they were expanded.
+  uint64_t pruned_distance_count = 0;
+  // Candidates the residual wildcard mask excluded before opening them.
+  uint64_t pruned_residual_count = 0;
+  bool has_tau_initial = false;
+  float tau_initial = 0;
+  bool has_tau_final = false;
+  float tau_final = 0;
+
+  void encode(ceph::bufferlist& bl) const {
+    ENCODE_START(1, 1, bl);
+    using ceph::encode;
+    encode(primary_candidate_count, bl);
+    encode(expanded_subtree_count, bl);
+    encode(candidates_seen, bl);
+    encode(opened_onode_count, bl);
+    encode(pruned_distance_count, bl);
+    encode(pruned_residual_count, bl);
+    encode(has_tau_initial, bl);
+    encode(tau_initial, bl);
+    encode(has_tau_final, bl);
+    encode(tau_final, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::bufferlist::const_iterator& p) {
+    DECODE_START(1, p);
+    using ceph::decode;
+    decode(primary_candidate_count, p);
+    decode(expanded_subtree_count, p);
+    decode(candidates_seen, p);
+    decode(opened_onode_count, p);
+    decode(pruned_distance_count, p);
+    decode(pruned_residual_count, p);
+    decode(has_tau_initial, p);
+    decode(tau_initial, p);
+    decode(has_tau_final, p);
+    decode(tau_final, p);
+    DECODE_FINISH(p);
+  }
+};
+
 struct query_vectors_result_t {
   // Sorted vector query result entries.
   std::vector<query_vectors_result_entry_t> entries;
@@ -452,6 +508,8 @@ struct query_vectors_result_t {
   // clients derive logical candidate and duplicate counts after global merge.
   uint64_t local_matching_entries = 0;
   uint64_t local_distance_computations = 0;
+  // Set only for tree-boundary queries; see query_vectors_tree_stats_t.
+  std::optional<query_vectors_tree_stats_t> tree_stats;
 
   void encode(ceph::bufferlist& bl) const {
     ENCODE_START(1, 1, bl);
@@ -462,6 +520,11 @@ struct query_vectors_result_t {
     }
     encode(local_matching_entries, bl);
     encode(local_distance_computations, bl);
+    const bool has_tree_stats = tree_stats.has_value();
+    encode(has_tree_stats, bl);
+    if (has_tree_stats) {
+      tree_stats->encode(bl);
+    }
     ENCODE_FINISH(bl);
   }
 
@@ -479,6 +542,14 @@ struct query_vectors_result_t {
     }
     decode(local_matching_entries, p);
     decode(local_distance_computations, p);
+    tree_stats.reset();
+    bool has_tree_stats = false;
+    decode(has_tree_stats, p);
+    if (has_tree_stats) {
+      query_vectors_tree_stats_t stats;
+      stats.decode(p);
+      tree_stats = std::move(stats);
+    }
     DECODE_FINISH(p);
   }
 };
@@ -491,6 +562,7 @@ WRITE_CLASS_ENCODER(ceph::rados::vector_index_config_t)
 WRITE_CLASS_ENCODER(ceph::rados::put_vector_request_t)
 WRITE_CLASS_ENCODER(ceph::rados::query_vectors_request_t)
 WRITE_CLASS_ENCODER(ceph::rados::query_vectors_result_entry_t)
+WRITE_CLASS_ENCODER(ceph::rados::query_vectors_tree_stats_t)
 WRITE_CLASS_ENCODER(ceph::rados::query_vectors_result_t)
 
 #endif

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <ostream>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -164,6 +165,19 @@ struct stage_record_t {
   uint32_t topk_replacements = 0;
   uint32_t topk_size = 0;
 
+  // Server-reported work, for this stage and cumulatively.
+  uint64_t batch_candidates = 0;
+  uint64_t cum_candidates = 0;
+  uint64_t batch_distance_computations = 0;
+  uint64_t cum_distance_computations = 0;
+
+  double batch_latency_us = 0;
+  double cum_latency_us = 0;
+
+  // Ground-truth recall of the retained top-k after this stage. Only set
+  // when the caller supplied ground truth.
+  std::optional<double> recall;
+
 };
 
 // Cross-batch global top-k. Entries survive between stages: a stage merges
@@ -292,6 +306,55 @@ struct policy_t {
 // for different reasons: no tau at all means top-k is not even filled, and a
 // tau that has just appeared for the first time has nothing to be compared
 // against yet.
+// Header row matching write_stage_csv_row() below.
+inline const char *stage_csv_header()
+{
+  return "query_index,stage,cum_m,batch_pg_count,"
+         "d1,tau,tau_over_d1,tau_impr_abs,tau_impr_rel,"
+         "topk_replacements,topk_size,"
+         "batch_candidates,cum_candidates,"
+         "batch_distcomp,cum_distcomp,"
+         "batch_latency_us,cum_latency_us,"
+         "recall_at_stage";
+}
+
+// One CSV row. An unset optional is written as an empty field, never as 0 or
+// -1: "top-k was not filled, so no bound exists" and "the bound is 0" are
+// different facts, and an offline rule that cannot tell them apart repeats
+// the trap this file's tau comments warn about.
+inline void write_stage_csv_row(std::ostream& out,
+                                uint64_t query_index,
+                                const stage_record_t& record)
+{
+  const auto field = [&out](const auto& value) {
+    if (value) {
+      out << *value;
+    }
+    out << ',';
+  };
+  out << query_index << ','
+      << record.stage << ','
+      << record.cum_m << ','
+      << record.batch_pg_count << ',';
+  field(record.d1);
+  field(record.tau);
+  field(record.tau_over_d1);
+  field(record.tau_improvement_abs);
+  field(record.tau_improvement_rel);
+  out << record.topk_replacements << ','
+      << record.topk_size << ','
+      << record.batch_candidates << ','
+      << record.cum_candidates << ','
+      << record.batch_distance_computations << ','
+      << record.cum_distance_computations << ','
+      << record.batch_latency_us << ','
+      << record.cum_latency_us << ',';
+  if (record.recall) {
+    out << *record.recall;
+  }
+  out << '\n';
+}
+
 inline bool should_expand(const policy_t& policy,
                           const stage_record_t& record)
 {
