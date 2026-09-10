@@ -463,6 +463,9 @@ struct query_vectors_tree_stats_t {
   uint64_t pruned_distance_count = 0;
   // Candidates the residual wildcard mask excluded before opening them.
   uint64_t pruned_residual_count = 0;
+  // Opened candidates outside the anchor's own PG band. A traversal that
+  // admits overlapping child ranges is only correct while this is 0.
+  uint64_t containment_violations = 0;
   bool has_tau_initial = false;
   float tau_initial = 0;
   bool has_tau_final = false;
@@ -477,6 +480,7 @@ struct query_vectors_tree_stats_t {
     encode(opened_onode_count, bl);
     encode(pruned_distance_count, bl);
     encode(pruned_residual_count, bl);
+    encode(containment_violations, bl);
     encode(has_tau_initial, bl);
     encode(tau_initial, bl);
     encode(has_tau_final, bl);
@@ -493,6 +497,7 @@ struct query_vectors_tree_stats_t {
     decode(opened_onode_count, p);
     decode(pruned_distance_count, p);
     decode(pruned_residual_count, p);
+    decode(containment_violations, p);
     decode(has_tau_initial, p);
     decode(tau_initial, p);
     decode(has_tau_final, p);

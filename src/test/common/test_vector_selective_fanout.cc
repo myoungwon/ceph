@@ -251,3 +251,38 @@ TEST(VectorSelectiveFanout, ShouldExpandTauRelativeImprovementCandidateRule)
   at_threshold.tau_improvement_rel = 0.02;
   EXPECT_TRUE(sf::should_expand(policy, at_threshold));
 }
+
+TEST(VectorSelectiveFanout, CsvRowLeavesUnsetOptionalsEmpty)
+{
+  sf::stage_record_t record;
+  record.stage = 1;
+  record.cum_m = 16;
+  record.batch_pg_count = 8;
+  record.d1 = 10.0f;
+  // tau deliberately unset: top-k was not filled at this stage.
+  record.topk_replacements = 2;
+  record.topk_size = 3;
+  record.batch_candidates = 100;
+  record.cum_candidates = 250;
+
+  std::ostringstream out;
+  sf::write_stage_csv_row(out, 42, record);
+  const std::string row = out.str();
+
+  // "no bound" must serialize as an empty field, never as a number an
+  // offline rule could mistake for a real bound of 0.
+  EXPECT_NE(std::string::npos, row.find("42,1,16,8,10,,,,,2,3,100,250,"));
+  EXPECT_EQ('\n', row.back());
+
+  // Header column count must match the row's field count.
+  const auto count_fields = [](const std::string& s) {
+    size_t n = 1;
+    for (const char c : s) {
+      if (c == ',') ++n;
+    }
+    return n;
+  };
+  std::string trimmed = row;
+  trimmed.pop_back();
+  EXPECT_EQ(count_fields(sf::stage_csv_header()), count_fields(trimmed));
+}

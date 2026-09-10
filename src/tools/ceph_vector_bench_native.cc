@@ -63,6 +63,15 @@ struct options_t {
   uint32_t l = 16;
   uint32_t seed = 1315423911U;
   uint32_t d = 1;
+  // Load path only, and a post-filter on the already-built target list
+  // rather than a change to any routing function. Both routings build
+  // their write targets as a prefix of a d-independent ranking, so
+  // targets(d=D) is targets(d=D-1) plus one more entry. Writing only ranks
+  // [begin, d) therefore reproduces exactly the store state a full --d D
+  // load would have produced, given ranks [0, begin) are already present
+  // from an earlier load -- which is how a d=1 index is grown to d=2/d=3
+  // without re-PUTting the copies it already holds.
+  uint32_t write_rank_begin = 0;
   uint32_t m = 1;
   uint32_t hamming_radius = 0;
   uint32_t distance_bucket_bits = 0;
@@ -91,6 +100,14 @@ struct options_t {
   // instead of the existing best-first-reordering-only behavior. Requires
   // --raw-euclidean-geometry and --tree-search-budget > 0.
   bool tree_prune = false;
+  // Tree-search-budget only: how many consecutive expansions that fail to
+  // narrow tau a probe may make before it stops
+  // (query_params_t::tree_boundary_search_no_improve_patience). 0 keeps the
+  // existing stop-on-first-non-improving-expansion behaviour.
+  uint32_t tree_no_improve_patience = 0;
+  // Tree-search-budget only: cap on ONodes the OSD may open per probe
+  // (query_params_t::tree_boundary_search_onode_budget). 0 is unlimited.
+  uint32_t tree_onode_budget = 0;
   // routing-mode=pivot only: see build_pivot_model()/pivot_rank_pgs() below.
   // write_top_pgs/probe_pgs reuse --d/--m (same "how many PGs" meaning as
   // LSH's write/query fanout).
@@ -110,6 +127,12 @@ struct options_t {
   // fanout-query only: "sequential" or "parallel" dispatch of the m probes
   // a single logical query resolves to.
   std::string fanout_mode = "parallel";
+  // fanout-query only: RADOS ops kept outstanding per --query-concurrency
+  // worker. 0 submits a whole stage and then waits on it, one logical query
+  // at a time; N > 0 keeps a rolling window of N probe slots refilled as
+  // each completes, filled across several in-flight logical queries. A
+  // client-side queue depth, unrelated to seastore's io_concurrency.
+  uint32_t io_depth = 0;
   std::string fanout_log_path;
   uint64_t fanout_log_count = 10;
   // fanout-query only: dispatch the m routed PGs in growing cumulative
@@ -143,6 +166,11 @@ struct load_result_t {
   uint64_t completed = 0;
   uint64_t failures = 0;
   uint64_t put_targets = 0;
+  // Rows whose target list --write-rank-begin consumed whole: the routing
+  // produced fewer than begin+1 unique PGs for this vector, so a full load
+  // would also have written it fewer times and there is no rank-`begin`
+  // copy to add. Skipping it is what keeps the two equivalent.
+  uint64_t rank_skipped = 0;
   uint64_t target_violations = 0;
   int first_error = 0;
   double seconds = 0;
@@ -187,6 +215,9 @@ void usage(std::ostream& out, const char *program)
       << "    candidate PGs, all queried for the same query vector; results are\n"
       << "    merged (dedup by key + global top-k) into one logical result.\n"
       << "    --fanout-mode sequential|parallel (default parallel)\n"
+      << "    --io-depth N: keep N RADOS ops outstanding per worker,\n"
+      << "      refilling each slot as it completes, instead of submitting\n"
+      << "      a whole stage and waiting on it (default 0).\n"
       << "    --fanout-log FILE --fanout-log-count N: dump the first N logical\n"
       << "      queries' per-subrequest pg/sub_oid/submit_us/complete_us.\n"
       << "    --selective: dispatch the m routed PGs in growing cumulative\n"
@@ -224,7 +255,15 @@ void usage(std::ostream& out, const char *program)
       << "  --tree-search-budget N --tree-prune: real tau-based subtree\n"
       << "    EXCLUSION (not just best-first reordering) within the tree\n"
       << "    search; requires --raw-euclidean-geometry.\n"
-      << "Load: --load-concurrency N\n"
+      << "  --tree-search-budget N --tree-no-improve-patience N: let a probe\n"
+      << "    survive N consecutive expansions that do not narrow tau\n"
+      << "    (default 0: stop at the first one).\n"
+      << "  --tree-search-budget N --tree-onode-budget N: cap the ONodes the\n"
+      << "    OSD opens per probe (default 0: unlimited).\n"
+      << "Load: --load-concurrency N --write-rank-begin R\n"
+      << "    --write-rank-begin R writes only write-target ranks\n"
+      << "    [R, --d), growing an index loaded at --d R to --d D\n"
+      << "    without re-PUTting the copies it already holds.\n"
       << "Query: --top-k N --query-concurrency N --warmup-rounds N --rounds N\n"
       << "       --min-queries N --min-seconds N\n"
       << "Ceph: --conf FILE --client NAME --cluster NAME\n";
@@ -257,15 +296,17 @@ bool parse_options(int argc, char **argv, options_t *options)
     OPT_RESIDUAL_BITS, OPT_DISTANCE_BUCKET_RADIUS,
     OPT_RESIDUAL_HAMMING_RADIUS, OPT_PROBE_LIMIT_PER_PG,
     OPT_PIVOT_BUILD_SAMPLE, OPT_PIVOT_PROBE_BUDGET, OPT_TOP_K,
-    OPT_QUERY_CONCURRENCY, OPT_LOAD_CONCURRENCY, OPT_WARMUP_ROUNDS, OPT_ROUNDS, OPT_MIN_QUERIES,
+    OPT_QUERY_CONCURRENCY, OPT_LOAD_CONCURRENCY, OPT_WRITE_RANK_BEGIN,
+    OPT_WARMUP_ROUNDS, OPT_ROUNDS, OPT_MIN_QUERIES,
     OPT_MIN_SECONDS, OPT_BASE_LIMIT, OPT_QUERY_LIMIT,
     OPT_QUERY_INDEX_LIST, OPT_DESTINATION_PG_LOG,
-    OPT_FANOUT_MODE, OPT_FANOUT_LOG, OPT_FANOUT_LOG_COUNT,
+    OPT_FANOUT_MODE, OPT_IO_DEPTH, OPT_FANOUT_LOG, OPT_FANOUT_LOG_COUNT,
     OPT_QUERY_TABLE_COUNT, OPT_MARGIN_ORDERED_PROBES,
     OPT_SELECTIVE, OPT_SELECTIVE_SCHEDULE, OPT_SELECTIVE_STOP,
     OPT_SELECTIVE_MIN_IMPROVEMENT, OPT_SELECTIVE_CSV,
     OPT_SERVER_SIDE_BOUNDARY_SEARCH, OPT_TREE_SEARCH_BUDGET,
-    OPT_RAW_EUCLIDEAN_GEOMETRY, OPT_TREE_PRUNE, OPT_HELP,
+    OPT_RAW_EUCLIDEAN_GEOMETRY, OPT_TREE_PRUNE,
+    OPT_TREE_NO_IMPROVE_PATIENCE, OPT_TREE_ONODE_BUDGET, OPT_HELP,
   };
   const option long_options[] = {
     {"base", required_argument, nullptr, OPT_BASE},
@@ -297,6 +338,7 @@ bool parse_options(int argc, char **argv, options_t *options)
     {"top-k", required_argument, nullptr, OPT_TOP_K},
     {"query-concurrency", required_argument, nullptr, OPT_QUERY_CONCURRENCY},
     {"load-concurrency", required_argument, nullptr, OPT_LOAD_CONCURRENCY},
+    {"write-rank-begin", required_argument, nullptr, OPT_WRITE_RANK_BEGIN},
     {"warmup-rounds", required_argument, nullptr, OPT_WARMUP_ROUNDS},
     {"rounds", required_argument, nullptr, OPT_ROUNDS},
     {"min-queries", required_argument, nullptr, OPT_MIN_QUERIES},
@@ -306,6 +348,7 @@ bool parse_options(int argc, char **argv, options_t *options)
     {"query-index-list", required_argument, nullptr, OPT_QUERY_INDEX_LIST},
     {"destination-pg-log", required_argument, nullptr, OPT_DESTINATION_PG_LOG},
     {"fanout-mode", required_argument, nullptr, OPT_FANOUT_MODE},
+    {"io-depth", required_argument, nullptr, OPT_IO_DEPTH},
     {"fanout-log", required_argument, nullptr, OPT_FANOUT_LOG},
     {"fanout-log-count", required_argument, nullptr, OPT_FANOUT_LOG_COUNT},
     {"query-table-count", required_argument, nullptr, OPT_QUERY_TABLE_COUNT},
@@ -323,6 +366,9 @@ bool parse_options(int argc, char **argv, options_t *options)
     {"raw-euclidean-geometry", no_argument, nullptr,
      OPT_RAW_EUCLIDEAN_GEOMETRY},
     {"tree-prune", no_argument, nullptr, OPT_TREE_PRUNE},
+    {"tree-no-improve-patience", required_argument, nullptr,
+     OPT_TREE_NO_IMPROVE_PATIENCE},
+    {"tree-onode-budget", required_argument, nullptr, OPT_TREE_ONODE_BUDGET},
     {"help", no_argument, nullptr, OPT_HELP},
     {nullptr, 0, nullptr, 0},
   };
@@ -362,6 +408,7 @@ bool parse_options(int argc, char **argv, options_t *options)
     case OPT_TOP_K: PARSE_OPT(top_k); break;
     case OPT_QUERY_CONCURRENCY: PARSE_OPT(query_concurrency); break;
     case OPT_LOAD_CONCURRENCY: PARSE_OPT(load_concurrency); break;
+    case OPT_WRITE_RANK_BEGIN: PARSE_OPT(write_rank_begin); break;
     case OPT_WARMUP_ROUNDS: PARSE_OPT(warmup_rounds); break;
     case OPT_ROUNDS: PARSE_OPT(rounds); break;
     case OPT_QUERY_TABLE_COUNT: PARSE_OPT(query_table_count); break;
@@ -370,6 +417,10 @@ bool parse_options(int argc, char **argv, options_t *options)
     case OPT_BASE_LIMIT: PARSE_OPT(base_limit); break;
     case OPT_QUERY_LIMIT: PARSE_OPT(query_limit); break;
     case OPT_TREE_SEARCH_BUDGET: PARSE_OPT(tree_search_budget); break;
+    case OPT_IO_DEPTH: PARSE_OPT(io_depth); break;
+    case OPT_TREE_NO_IMPROVE_PATIENCE:
+      PARSE_OPT(tree_no_improve_patience); break;
+    case OPT_TREE_ONODE_BUDGET: PARSE_OPT(tree_onode_budget); break;
 #undef PARSE_OPT
     case OPT_QUERY_INDEX_LIST: options->query_index_list_path = optarg; break;
     case OPT_DESTINATION_PG_LOG: options->destination_pg_log_path = optarg; break;
@@ -455,6 +506,28 @@ bool parse_options(int argc, char **argv, options_t *options)
   if (options->routing_mode == "pivot" &&
       options->pivot_probe_budget == 0) {
     return false;
+  }
+  // sequential issues one probe at a time through the blocking
+  // query_sync() path, so a queue depth means nothing there.
+  if (options->io_depth > 0 &&
+      (options->operation != "fanout-query" ||
+       options->fanout_mode != "parallel")) {
+    std::cerr << "error: --io-depth needs --operation fanout-query"
+                 " --fanout-mode parallel\n";
+    return false;
+  }
+  // [begin, d) has to be a non-empty range, and any other operation would
+  // silently ignore the option.
+  if (options->write_rank_begin > 0) {
+    if (options->write_rank_begin >= options->d) {
+      std::cerr << "error: --write-rank-begin must be < --d\n";
+      return false;
+    }
+    if (options->operation != "load") {
+      std::cerr << "error: --write-rank-begin is only valid with"
+                   " --operation load\n";
+      return false;
+    }
   }
   // Boundary-aware search only exists for pg-suboid's sub_oid key space
   // (see common/vector_pg_lsh_boundary.h).
@@ -792,6 +865,9 @@ pg_lsh::query_params_t query_params(const options_t& options)
   params.server_side_boundary_search = options.server_side_boundary_search;
   params.tree_boundary_search_budget = options.tree_search_budget;
   params.tree_boundary_search_prune = options.tree_prune;
+  params.tree_boundary_search_no_improve_patience =
+      options.tree_no_improve_patience;
+  params.tree_boundary_search_onode_budget = options.tree_onode_budget;
   params.query_routing.table_count = options.query_table_count;
   params.query_routing.margin_ordered_probes = options.margin_ordered_probes;
   return params;
@@ -1066,6 +1142,16 @@ load_result_t load_vectors(const options_t& options,
               options.bucket, options.index, vector_bl, config,
               pool_info(options), &locator_cache, &targets);
         }
+        if (options.write_rank_begin > 0 && pr >= 0) {
+          if (options.write_rank_begin >= targets.size()) {
+            targets.clear();
+            ++local.rank_skipped;
+            ++local.completed;
+            continue;
+          }
+          targets.erase(targets.begin(),
+                        targets.begin() + options.write_rank_begin);
+        }
         local.put_targets += targets.size();
         // d>1 write fanout: build_put_targets() already dedups to at most
         // config.d unique PGs, so fewer targets than requested (PG
@@ -1135,6 +1221,7 @@ load_result_t load_vectors(const options_t& options,
     result.completed += local.completed;
     result.failures += local.failures;
     result.put_targets += local.put_targets;
+    result.rank_skipped += local.rank_skipped;
     result.target_violations += local.target_violations;
     result.vector_oids.insert(local.vector_oids.begin(), local.vector_oids.end());
     if (result.first_oid.empty()) result.first_oid = local.first_oid;
@@ -1409,6 +1496,15 @@ struct fanout_query_result_t {
   std::string first_oid;
   double seconds = 0;
   std::vector<double> latency_us;
+  // Pipeline occupancy: without these --io-depth is a knob with no way to
+  // tell whether the window ever filled. queue_wait is time a query spent
+  // with an issuable probe and no free slot; active is the rest of its
+  // end-to-end. inflight_integral/pipeline_wall give the average depth.
+  uint64_t queue_wait_us_sum = 0;
+  uint64_t active_us_sum = 0;
+  double inflight_integral_us = 0;
+  double pipeline_wall_us = 0;
+  size_t max_inflight = 0;
   // Summed across every probe of every completed logical query that came
   // back with a query_vectors_tree_stats_t, i.e. every tree-search probe.
   uint64_t tree_stats_probes = 0;
@@ -1416,6 +1512,7 @@ struct fanout_query_result_t {
   uint64_t tree_expanded_subtree_count = 0;
   uint64_t tree_pruned_distance_count = 0;
   uint64_t tree_pruned_residual_count = 0;
+  uint64_t tree_containment_violations = 0;
   uint64_t tree_opened_onode_count = 0;
   uint64_t tree_candidates_seen = 0;
   // Selective fan-out (--selective). final_m is the cumulative PG count the
@@ -1434,6 +1531,9 @@ struct fanout_probe_outcome_t {
   int r = 0;
   int op_rval = 0;
   ceph::bufferlist reply;
+  // When this probe became issuable, versus when a slot was actually free
+  // for it: submit_us - ready_us is its wait for a slot.
+  double ready_us = 0;
   double submit_us = 0;
   double complete_us = 0;
   uint64_t matching_records = 0;
@@ -1501,27 +1601,214 @@ fanout_query_result_t run_fanout_queries(
         return;
       }
 
-      while (!stop.load(std::memory_order_relaxed)) {
+      // Slots are refilled across several in-flight logical queries, not
+      // within one: the m probes of a single query all target distinct PGs,
+      // so a per-query submit-all/wait-all barrier holds every PG at depth 1
+      // and leaves the OSD idle during that query's routing and merge.
+      //
+      // At --io-depth 0 claim_slot() grows slots without a bound, so the
+      // loop submits a whole stage before waiting on it. That is the old
+      // behaviour, which is why there is only one dispatch path here.
+      const bool sequential_mode = options.fanout_mode == "sequential";
+      const bool bounded_depth = options.io_depth > 0;
+      const size_t query_slot_count = bounded_depth ? options.io_depth : 1;
+
+      struct probe_slot_t {
+        size_t query_slot = 0;
+        size_t probe_index = 0;
+        size_t outcome_index = 0;
+        // Recreated per op: ObjectOperation accumulates, and routed_ioctx
+        // must outlive the op, so a slot never reuses one.
+        std::unique_ptr<pg_lsh::query_op_state_t> op_state;
+        librados::AioCompletion *completion = nullptr;
+        // Stable storage for the completion callback's argument.
+        void *queue = nullptr;
+        size_t self = 0;
+      };
+      struct query_slot_t {
+        bool active = false;
+        uint64_t ticket = 0;
+        size_t query_index = 0;
+        clock_type::time_point query_begin{};
+        ceph::bufferlist query_bl;
+        std::vector<pg_lsh::query_probe_t> probes;
+        std::vector<std::pair<size_t, size_t>> pg_probe_ranges;
+        size_t distinct_pgs = 0;
+        uint32_t available_pgs = 0;
+        std::optional<sf::topk_accumulator_t<
+            ceph::rados::query_vectors_result_entry_t>> accumulator;
+        std::vector<fanout_probe_outcome_t> outcomes;
+        std::vector<fanout_probe_outcome_t> stage_outcomes;
+        std::vector<sf::stage_record_t> stage_records;
+        std::optional<float> tau_prev;
+        size_t stage = 0;
+        uint32_t stage_range_begin = 0;
+        uint32_t stage_range_end = 0;
+        size_t stage_probe_begin = 0;
+        size_t next_probe = 0;
+        size_t probe_end = 0;
+        size_t outstanding = 0;
+        double stage_begin_us = 0;
+        double stage_end_us = 0;
+        bool no_stages = false;
+        // Time this query spent with an issuable probe but no free slot.
+        double queue_wait_us = 0;
+        std::optional<clock_type::time_point> blocked_since;
+        uint64_t query_matching = 0;
+        uint64_t query_distance = 0;
+        uint32_t final_cum_m = 0;
+        bool any_missing = false;
+        bool decode_error = false;
+        bool probe_failed = false;
+      };
+      // Completions fire on a librados finisher thread: the callback only
+      // pushes the slot index and signals. Everything else (get_return_
+      // value(), release(), resubmit) happens on this worker thread.
+      struct done_queue_t {
+        std::mutex lock;
+        std::condition_variable cv;
+        std::vector<size_t> slots;
+        void push(size_t slot) {
+          {
+            std::lock_guard<std::mutex> locker(lock);
+            slots.push_back(slot);
+          }
+          cv.notify_one();
+        }
+      };
+      done_queue_t done;
+      const librados::callback_t probe_complete_cb =
+        [](librados::completion_t, void *arg) {
+          auto *slot = static_cast<probe_slot_t*>(arg);
+          static_cast<done_queue_t*>(slot->queue)->push(slot->self);
+        };
+
+      std::vector<std::unique_ptr<query_slot_t>> query_slots;
+      query_slots.reserve(query_slot_count);
+      for (size_t i = 0; i < query_slot_count; ++i) {
+        query_slots.emplace_back(new query_slot_t());
+      }
+      // Admission order, oldest first: a query that is already in flight
+      // always outbids a newer one for a free slot, so head-of-line queries
+      // drain instead of every query advancing in lockstep.
+      std::vector<size_t> active_order;
+      std::vector<std::unique_ptr<probe_slot_t>> slots;
+      std::vector<size_t> free_slots;
+      size_t outstanding_total = 0;
+
+      // Integral of the outstanding-op count over wall time, so avg_inflight
+      // is a time-average rather than a per-completion sample.
+      const auto pipeline_begin = clock_type::now();
+      auto depth_sampled_at = pipeline_begin;
+      double inflight_integral_us = 0;
+      size_t max_inflight = 0;
+      const auto note_depth = [&]() {
+        const auto now = clock_type::now();
+        inflight_integral_us +=
+          std::chrono::duration<double, std::micro>(now - depth_sampled_at)
+            .count() * static_cast<double>(outstanding_total);
+        depth_sampled_at = now;
+      };
+
+      const auto elapsed_us = [](const query_slot_t& qs,
+                                 clock_type::time_point tp) {
+        return std::chrono::duration<double, std::micro>(
+            tp - qs.query_begin).count();
+      };
+      const auto build_request = [&](const ceph::bufferlist& query_bl) {
+        ceph::rados::query_vectors_request_t req;
+        req.bucket_name = options.bucket;
+        req.index_name = options.index;
+        req.data_type = config.data_type;
+        req.distance_metric = config.distance_metric;
+        req.dimension = config.dimension;
+        req.local_top_k = options.top_k;
+        req.query_vector = query_bl;
+        pg_lsh::apply_boundary_search_config(
+            config, query_params(options), &req);
+        pg_lsh::apply_tree_boundary_search_config(
+            config, query_params(options), &req);
+        return req;
+      };
+
+      // Ground-truth recall of a candidate result set, without touching
+      // the run-level counters -- the final recall accounting below still
+      // owns those. Only called per stage when a CSV is being written,
+      // since it rebuilds the expected-id set each time.
+      const auto measure_recall =
+        [&](size_t query_index,
+            const std::vector<ceph::rados::query_vectors_result_entry_t>&
+              results) -> std::optional<double> {
+        if (groundtruth == nullptr ||
+            query_index >= groundtruth->rows.size()) {
+          return std::nullopt;
+        }
+        const auto& truth = groundtruth->rows[query_index];
+        const size_t truth_k = std::min<size_t>(options.top_k, truth.size());
+        if (truth_k == 0) {
+          return std::nullopt;
+        }
+        std::set<std::string> expected;
+        for (size_t i = 0; i < truth_k; ++i) {
+          expected.insert(expected_entry_id(options, truth[i]));
+        }
+        uint64_t hits = 0;
+        for (const auto& entry : results) {
+          if (expected.erase(entry.entry_id) != 0) ++hits;
+        }
+        return static_cast<double>(hits) / static_cast<double>(truth_k);
+      };
+
+      // Points a query slot at its next non-empty schedule stage. Stages
+      // slice by ranked-PG index, never by flat probe index -- see the
+      // pg_probe_ranges comment in admit_query() below.
+      const auto begin_stage = [&](query_slot_t& qs) -> bool {
+        while (qs.stage < policy.schedule.size()) {
+          const auto range =
+            sf::stage_range(policy.schedule, qs.stage, qs.available_pgs);
+          if (range.empty()) {
+            ++qs.stage;
+            continue;
+          }
+          qs.stage_range_begin = range.begin;
+          qs.stage_range_end = range.end;
+          qs.stage_probe_begin = qs.pg_probe_ranges[range.begin].first;
+          qs.probe_end = qs.pg_probe_ranges[range.end - 1].second;
+          qs.next_probe = qs.stage_probe_begin;
+          // assign() once, never resized while the stage is outstanding:
+          // submit_query() holds &oc.reply and &oc.op_rval for the life of
+          // the op.
+          qs.stage_outcomes.assign(qs.probe_end - qs.stage_probe_begin,
+                                   fanout_probe_outcome_t{});
+          qs.stage_begin_us = elapsed_us(qs, clock_type::now());
+          qs.stage_end_us = 0;
+          return true;
+        }
+        return false;
+      };
+
+      bool admitting = true;
+      const auto admit_query = [&](query_slot_t& qs, size_t slot_index) -> bool {
+        if (stop.load(std::memory_order_relaxed)) return false;
         const uint64_t ticket = next.fetch_add(1, std::memory_order_relaxed);
         if (min_queries == 0 && min_seconds == 0) {
-          if (ticket >= fixed_total) break;
+          if (ticket >= fixed_total) return false;
         } else if (ticket >= min_queries) {
           const double elapsed = std::chrono::duration<double>(
               clock_type::now() - begin).count();
-          if (elapsed >= min_seconds) break;
+          if (elapsed >= min_seconds) return false;
         }
         const size_t query_index = ticket % queries.rows.size();
-        const auto query_bl = vector_buffer(queries.rows[query_index]);
         // Starts before build_query_probes() so routing/LSH computation is
         // included in logical latency, per spec.
-        const auto query_begin = clock_type::now();
-        const auto elapsed_us = [&](clock_type::time_point tp) {
-          return std::chrono::duration<double, std::micro>(
-              tp - query_begin).count();
-        };
+        qs.query_begin = clock_type::now();
+        qs.ticket = ticket;
+        qs.query_index = query_index;
+        qs.query_bl = vector_buffer(queries.rows[query_index]);
 
-        std::vector<pg_lsh::query_probe_t> probes;
+        qs.probes.clear();
         uint64_t generated_groups = 0;
+        int rr = 0;
         if (options.routing_mode == "pivot") {
           const auto ranked = pivot_rank_pgs(
               queries.rows[query_index].data(), pivot_model->dim,
@@ -1530,274 +1817,352 @@ fanout_query_result_t run_fanout_queries(
               ranked.begin(),
               ranked.begin() + std::min<size_t>(options.m, ranked.size()));
           generated_groups = probe_pgs.size();
-          r = pivot_query_probes(options, probe_pgs, &cache, &probes);
+          rr = pivot_query_probes(options, probe_pgs, &cache, &qs.probes);
         } else {
-          r = pg_lsh::build_query_probes(
-              options.bucket, options.index, query_bl, config,
-              query_params(options), pool_info(options), &cache, &probes,
+          rr = pg_lsh::build_query_probes(
+              options.bucket, options.index, qs.query_bl, config,
+              query_params(options), pool_info(options), &cache, &qs.probes,
               &generated_groups);
         }
+        (void)generated_groups;
         std::unordered_set<uint32_t> unique_pgs;
-        for (const auto& probe : probes) unique_pgs.insert(probe.pg);
-        // Checked for every query, not just the logged sample.
-        // probe_limit_per_pg and the radius options can put several sub_oid
-        // probes on one PG, so this asserts the distinct PG count, not the
-        // probe count.
-        if (r < 0 || unique_pgs.size() != options.m ||
-            !validate_oid(options, probes.front().oid.name,
-                          probes.front().sub_oid_name)) {
+        for (const auto& probe : qs.probes) unique_pgs.insert(probe.pg);
+        qs.distinct_pgs = unique_pgs.size();
+        // Checked on every query, not just the logged sample.
+        // probe_limit_per_pg (and distance_bucket_radius/residual_hamming_
+        // radius) can make probes.size() exceed options.m -- several sub_oid
+        // probes per PG -- so only the PG count is checked, not a 1:1 ratio.
+        if (rr < 0 || unique_pgs.size() != options.m || qs.probes.empty() ||
+            !validate_oid(options, qs.probes.front().oid.name,
+                          qs.probes.front().sub_oid_name)) {
           ++local.failures;
-          local.first_error = r < 0 ? r : -EINVAL;
+          local.first_error = rr < 0 ? rr : -EINVAL;
           int expected = 0;
           first_error.compare_exchange_strong(expected, local.first_error);
           stop.store(true);
-          break;
+          return false;
         }
-        if (local.first_oid.empty()) local.first_oid = probes.front().oid.name;
+        if (local.first_oid.empty()) {
+          local.first_oid = qs.probes.front().oid.name;
+        }
 
-        // build_query_probes() emits probes PG-major, so one ranked PG's
-        // probes are always adjacent. Stages slice by ranked-PG index: a
-        // flat probe index would cut a PG in half as soon as it carries
-        // more than one sub_oid probe.
-        std::vector<std::pair<size_t, size_t>> pg_probe_ranges;
-        for (size_t i = 0; i < probes.size(); ++i) {
-          if (!pg_probe_ranges.empty() &&
-              probes[i].pg == probes[pg_probe_ranges.back().first].pg) {
-            pg_probe_ranges.back().second = i + 1;
+        // build_query_probes() emits probes PG-major: the outer loop walks
+        // the ranked PGs in order and the inner loop emits that PG's
+        // sub_oid probes, so one ranked PG's probes are always adjacent.
+        // Stages therefore slice by ranked-PG index, never by flat probe
+        // index -- the latter would cut a PG in half the moment
+        // distance_bucket_radius/residual_hamming_radius puts more than one
+        // sub_oid probe on it.
+        qs.pg_probe_ranges.clear();
+        for (size_t i = 0; i < qs.probes.size(); ++i) {
+          if (!qs.pg_probe_ranges.empty() &&
+              qs.probes[i].pg == qs.probes[qs.pg_probe_ranges.back().first].pg) {
+            qs.pg_probe_ranges.back().second = i + 1;
           } else {
-            pg_probe_ranges.emplace_back(i, i + 1);
+            qs.pg_probe_ranges.emplace_back(i, i + 1);
           }
         }
-        const auto available_pgs =
-          static_cast<uint32_t>(pg_probe_ranges.size());
+        qs.available_pgs = static_cast<uint32_t>(qs.pg_probe_ranges.size());
 
-        // Dispatches probes [probe_begin, probe_end). "parallel" submits
-        // every probe of the stage before waiting on any of them. A
-        // non-selective run is one stage covering all m PGs, so it takes
-        // this same path.
-        const auto dispatch_probes =
-          [&](size_t probe_begin, size_t probe_end,
-              std::vector<fanout_probe_outcome_t> *outcomes) {
-          const size_t count = probe_end - probe_begin;
-          outcomes->assign(count, fanout_probe_outcome_t{});
-          const auto build_request = [&]() {
-            ceph::rados::query_vectors_request_t req;
-            req.bucket_name = options.bucket;
-            req.index_name = options.index;
-            req.data_type = config.data_type;
-            req.distance_metric = config.distance_metric;
-            req.dimension = config.dimension;
-            req.local_top_k = options.top_k;
-            req.query_vector = query_bl;
-            pg_lsh::apply_boundary_search_config(
-                config, query_params(options), &req);
-            pg_lsh::apply_tree_boundary_search_config(
-                config, query_params(options), &req);
-            return req;
-          };
-          bool failed = false;
-          if (options.fanout_mode == "sequential") {
-            for (size_t i = probe_begin; i < probe_end; ++i) {
-              auto& oc = (*outcomes)[i - probe_begin];
-              oc.pg = probes[i].pg;
-              oc.sub_oid = probes[i].sub_oid_name;
-              oc.submit_us = elapsed_us(clock_type::now());
+        qs.accumulator.emplace(options.top_k);
+        qs.outcomes.clear();
+        qs.stage_outcomes.clear();
+        qs.stage_records.clear();
+        qs.tau_prev.reset();
+        qs.stage = 0;
+        qs.next_probe = 0;
+        qs.probe_end = 0;
+        qs.outstanding = 0;
+        qs.queue_wait_us = 0;
+        qs.blocked_since.reset();
+        qs.query_matching = 0;
+        qs.query_distance = 0;
+        qs.final_cum_m = 0;
+        qs.any_missing = false;
+        qs.decode_error = false;
+        qs.probe_failed = false;
+
+        qs.no_stages = !begin_stage(qs);
+        if (qs.no_stages) {
+          // Empty schedule against the routed PGs: nothing to dispatch.
+          qs.next_probe = 0;
+          qs.probe_end = 0;
+        }
+        qs.active = true;
+        active_order.push_back(slot_index);
+        return true;
+      };
+
+      // A free slot, growing the pool when --io-depth is unbounded.
+      const auto claim_slot = [&]() -> probe_slot_t* {
+        if (free_slots.empty()) {
+          if (bounded_depth && slots.size() >= options.io_depth) {
+            return nullptr;
+          }
+          slots.emplace_back(new probe_slot_t());
+          slots.back()->queue = &done;
+          slots.back()->self = slots.size() - 1;
+          free_slots.push_back(slots.size() - 1);
+        }
+        const size_t index = free_slots.back();
+        free_slots.pop_back();
+        return slots[index].get();
+      };
+
+      // Issues every probe that can be issued right now, oldest query
+      // first. Called before any decode/merge work so a slot is never idle
+      // while this thread is busy on the CPU.
+      const auto submit_ready = [&]() {
+        for (const size_t qi : active_order) {
+          auto& qs = *query_slots[qi];
+          if (!qs.active) continue;
+          while (qs.next_probe < qs.probe_end) {
+            if (sequential_mode) {
+              const size_t pi = qs.next_probe++;
+              auto& oc = qs.stage_outcomes[pi - qs.stage_probe_begin];
+              oc.pg = qs.probes[pi].pg;
+              oc.sub_oid = qs.probes[pi].sub_oid_name;
+              oc.ready_us = qs.stage_begin_us;
+              oc.submit_us = elapsed_us(qs, clock_type::now());
               oc.r = pg_lsh::query_sync(
-                  ioctx, probes[i], build_request(), &oc.reply, &oc.op_rval);
-              oc.complete_us = elapsed_us(clock_type::now());
-              if (oc.r < 0 && oc.r != -ENOENT) { failed = true; break; }
-            }
-            return failed;
-          }
-          struct CompletionReleaser {
-            void operator()(librados::AioCompletion *c) const {
-              if (c != nullptr) c->release();
-            }
-          };
-          std::vector<std::unique_ptr<librados::AioCompletion, CompletionReleaser>>
-            completions;
-          std::vector<pg_lsh::query_op_state_t> op_states(count);
-          completions.reserve(count);
-          for (size_t i = 0; i < count; ++i) {
-            completions.emplace_back(librados::Rados::aio_create_completion());
-          }
-          for (size_t i = probe_begin; i < probe_end; ++i) {
-            auto& oc = (*outcomes)[i - probe_begin];
-            oc.pg = probes[i].pg;
-            oc.sub_oid = probes[i].sub_oid_name;
-            oc.submit_us = elapsed_us(clock_type::now());
-            oc.r = pg_lsh::submit_query(
-                ioctx, probes[i], build_request(), &op_states[i - probe_begin],
-                completions[i - probe_begin].get(), &oc.reply, &oc.op_rval);
-          }
-          for (size_t i = 0; i < count; ++i) {
-            auto& oc = (*outcomes)[i];
-            if (oc.r == 0) {
-              completions[i]->wait_for_complete();
-              oc.r = completions[i]->get_return_value();
-            }
-            oc.complete_us = elapsed_us(clock_type::now());
-            if (oc.r < 0 && oc.r != -ENOENT) failed = true;
-          }
-          return failed;
-        };
-
-        // Ground-truth recall of a candidate result set, without touching
-        // the run-level counters -- the final recall accounting below still
-        // owns those. Only called per stage when a CSV is being written,
-        // since it rebuilds the expected-id set each time.
-        const auto measure_recall =
-          [&](const std::vector<ceph::rados::query_vectors_result_entry_t>&
-                results) -> std::optional<double> {
-          if (groundtruth == nullptr ||
-              query_index >= groundtruth->rows.size()) {
-            return std::nullopt;
-          }
-          const auto& truth = groundtruth->rows[query_index];
-          const size_t truth_k = std::min<size_t>(options.top_k, truth.size());
-          if (truth_k == 0) {
-            return std::nullopt;
-          }
-          std::set<std::string> expected;
-          for (size_t i = 0; i < truth_k; ++i) {
-            expected.insert(expected_entry_id(options, truth[i]));
-          }
-          uint64_t hits = 0;
-          for (const auto& entry : results) {
-            if (expected.erase(entry.entry_id) != 0) ++hits;
-          }
-          return static_cast<double>(hits) / static_cast<double>(truth_k);
-        };
-
-        // Global top-k that survives between stages: each stage merges only
-        // its own new rows in. Capping to top_k after every stage is safe
-        // (later stages only add entries, so anything already outside the
-        // top-k can never re-enter it) and is covered by
-        // unittest_vector_selective_fanout's IncrementalMergeEqualsOneShot.
-        sf::topk_accumulator_t<ceph::rados::query_vectors_result_entry_t>
-          accumulator(options.top_k);
-        std::vector<fanout_probe_outcome_t> outcomes;
-        std::vector<sf::stage_record_t> stage_records;
-        std::optional<float> tau_prev;
-        uint64_t query_matching = 0;
-        uint64_t query_distance = 0;
-        uint32_t final_cum_m = 0;
-        bool any_missing = false;
-        bool decode_error = false;
-        bool probe_failed = false;
-
-        for (size_t stage = 0; stage < policy.schedule.size(); ++stage) {
-          const auto range =
-            sf::stage_range(policy.schedule, stage, available_pgs);
-          if (range.empty()) {
-            continue;
-          }
-          const size_t probe_begin = pg_probe_ranges[range.begin].first;
-          const size_t probe_end = pg_probe_ranges[range.end - 1].second;
-
-          std::vector<fanout_probe_outcome_t> stage_outcomes;
-          const double stage_begin_us = elapsed_us(clock_type::now());
-          probe_failed =
-            dispatch_probes(probe_begin, probe_end, &stage_outcomes);
-          const double stage_end_us = elapsed_us(clock_type::now());
-          if (probe_failed) {
-            break;
-          }
-
-          std::vector<ceph::rados::query_vectors_result_entry_t> stage_entries;
-          uint64_t stage_matching = 0;
-          uint64_t stage_distance = 0;
-          for (auto& oc : stage_outcomes) {
-            if (oc.r == -ENOENT || oc.op_rval == -ENOENT) {
-              any_missing = true;
+                  ioctx, qs.probes[pi], build_request(qs.query_bl),
+                  &oc.reply, &oc.op_rval);
+              oc.complete_us = elapsed_us(qs, clock_type::now());
+              if (oc.r < 0 && oc.r != -ENOENT) {
+                qs.probe_failed = true;
+                qs.next_probe = qs.probe_end;
+              }
               continue;
             }
-            if (oc.reply.length() == 0) { decode_error = true; break; }
-            ceph::rados::query_vectors_result_t partial;
-            try {
-              auto p = oc.reply.cbegin();
-              decode(partial, p);
-              if (!p.end()) throw ceph::buffer::malformed_input("trailing reply");
-            } catch (const ceph::buffer::error&) { decode_error = true; break; }
-            oc.matching_records = partial.local_matching_entries;
-            oc.distance_computations = partial.local_distance_computations;
-            stage_matching += partial.local_matching_entries;
-            stage_distance += partial.local_distance_computations;
-            if (partial.tree_stats) {
-              const auto& ts = *partial.tree_stats;
-              ++local.tree_stats_probes;
-              local.tree_primary_candidate_count += ts.primary_candidate_count;
-              local.tree_expanded_subtree_count += ts.expanded_subtree_count;
-              local.tree_pruned_distance_count += ts.pruned_distance_count;
-              local.tree_pruned_residual_count += ts.pruned_residual_count;
-              local.tree_opened_onode_count += ts.opened_onode_count;
-              local.tree_candidates_seen += ts.candidates_seen;
+            probe_slot_t *slot = claim_slot();
+            if (slot == nullptr) break;
+            const size_t pi = qs.next_probe++;
+            slot->query_slot = qi;
+            slot->probe_index = pi;
+            slot->outcome_index = pi - qs.stage_probe_begin;
+            slot->op_state.reset(new pg_lsh::query_op_state_t());
+            slot->completion = librados::Rados::aio_create_completion(
+                slot, probe_complete_cb);
+            auto& oc = qs.stage_outcomes[slot->outcome_index];
+            oc.pg = qs.probes[pi].pg;
+            oc.sub_oid = qs.probes[pi].sub_oid_name;
+            oc.ready_us = qs.stage_begin_us;
+            oc.submit_us = elapsed_us(qs, clock_type::now());
+            note_depth();
+            ++outstanding_total;
+            ++qs.outstanding;
+            if (outstanding_total > max_inflight) {
+              max_inflight = outstanding_total;
             }
-            for (auto& entry : partial.entries) {
-              stage_entries.push_back(std::move(entry));
+            oc.r = pg_lsh::submit_query(
+                ioctx, qs.probes[pi], build_request(qs.query_bl),
+                slot->op_state.get(), slot->completion, &oc.reply,
+                &oc.op_rval);
+            if (oc.r != 0) {
+              // Never reached the wire, so no callback will ever fire for
+              // this slot: retire it here.
+              note_depth();
+              --outstanding_total;
+              --qs.outstanding;
+              oc.complete_us = elapsed_us(qs, clock_type::now());
+              slot->completion->release();
+              slot->completion = nullptr;
+              free_slots.push_back(slot->self);
+              if (oc.r != -ENOENT) qs.probe_failed = true;
             }
           }
-          if (decode_error) {
-            break;
+          if (qs.stage_end_us == 0 && qs.outstanding == 0 &&
+              qs.next_probe >= qs.probe_end) {
+            qs.stage_end_us = elapsed_us(qs, clock_type::now());
           }
-
-          // Merge dedups by entry_id, which comes straight from the LIST
-          // scan, rather than by entry.key, whose server-side restoration
-          // from OMAP is unreliable.
-          const uint64_t dupes_before = accumulator.dropped_duplicates();
-          const uint32_t replacements = accumulator.merge_stage(stage_entries);
-          local.duplicate_entries +=
-            accumulator.dropped_duplicates() - dupes_before;
-
-          query_matching += stage_matching;
-          query_distance += stage_distance;
-          final_cum_m = range.end;
-
-          sf::stage_record_t record;
-          record.stage = stage;
-          record.cum_m = range.end;
-          record.batch_pg_count = range.count();
-          record.d1 = accumulator.current_d1();
-          record.tau = accumulator.current_tau();
-          record.topk_replacements = replacements;
-          record.topk_size =
-            static_cast<uint32_t>(accumulator.results().size());
-          record.batch_candidates = stage_matching;
-          record.cum_candidates = query_matching;
-          record.batch_distance_computations = stage_distance;
-          record.cum_distance_computations = query_distance;
-          record.batch_latency_us = stage_end_us - stage_begin_us;
-          record.cum_latency_us = stage_end_us;
-          if (selective_csv != nullptr) {
-            record.recall = measure_recall(accumulator.results());
-          }
-          sf::finalize_stage_record(tau_prev, &record);
-          tau_prev = record.tau;
-
-          outcomes.insert(outcomes.end(),
-                          std::make_move_iterator(stage_outcomes.begin()),
-                          std::make_move_iterator(stage_outcomes.end()));
-          stage_records.push_back(std::move(record));
-
-          if (!sf::should_expand(policy, stage_records.back())) {
-            break;
+          // Queue wait is only the time this query was starved for a slot
+          // -- not the time its own ops were on the wire.
+          const bool blocked = qs.next_probe < qs.probe_end;
+          const auto now = clock_type::now();
+          if (blocked && !qs.blocked_since) {
+            qs.blocked_since = now;
+          } else if (!blocked && qs.blocked_since) {
+            qs.queue_wait_us += std::chrono::duration<double, std::micro>(
+                now - *qs.blocked_since).count();
+            qs.blocked_since.reset();
           }
         }
+      };
 
-        if (probe_failed || decode_error) {
+      const auto reap_done = [&]() {
+        std::vector<size_t> reaped;
+        {
+          std::unique_lock<std::mutex> locker(done.lock);
+          done.cv.wait(locker, [&] { return !done.slots.empty(); });
+          reaped.swap(done.slots);
+        }
+        for (const size_t slot_index : reaped) {
+          auto& slot = *slots[slot_index];
+          auto& qs = *query_slots[slot.query_slot];
+          auto& oc = qs.stage_outcomes[slot.outcome_index];
+          oc.r = slot.completion->get_return_value();
+          oc.complete_us = elapsed_us(qs, clock_type::now());
+          slot.completion->release();
+          slot.completion = nullptr;
+          note_depth();
+          --outstanding_total;
+          --qs.outstanding;
+          if (qs.outstanding == 0 && qs.next_probe >= qs.probe_end) {
+            qs.stage_end_us = oc.complete_us;
+          }
+          if (oc.r < 0 && oc.r != -ENOENT) qs.probe_failed = true;
+          free_slots.push_back(slot_index);
+        }
+      };
+
+      // Everything that happens once a stage's probes have all landed:
+      // decode, per-probe stats, global top-k merge, stage record, and the
+      // selective-fan-out stop decision. Returns true when the logical
+      // query is finished (schedule exhausted, stop rule fired, or the
+      // stage failed). Stage decisions stay strictly sequential WITHIN a
+      // query -- only distinct logical queries ever overlap -- so the
+      // candidate set is identical to the pre-pipeline dispatcher's.
+      const auto finish_stage = [&](query_slot_t& qs) -> bool {
+        auto& accumulator = *qs.accumulator;
+        auto& stage_outcomes = qs.stage_outcomes;
+        auto& outcomes = qs.outcomes;
+        auto& stage_records = qs.stage_records;
+        auto& tau_prev = qs.tau_prev;
+        auto& any_missing = qs.any_missing;
+        auto& decode_error = qs.decode_error;
+        auto& query_matching = qs.query_matching;
+        auto& query_distance = qs.query_distance;
+        auto& final_cum_m = qs.final_cum_m;
+        const size_t stage = qs.stage;
+        const sf::stage_range_t range{qs.stage_range_begin, qs.stage_range_end};
+        const double stage_begin_us = qs.stage_begin_us;
+        const double stage_end_us = qs.stage_end_us;
+        if (qs.no_stages) {
+          return true;
+        }
+        if (qs.probe_failed) {
+          return true;
+        }
+        std::vector<ceph::rados::query_vectors_result_entry_t> stage_entries;
+        uint64_t stage_matching = 0;
+        uint64_t stage_distance = 0;
+        for (auto& oc : stage_outcomes) {
+          if (oc.r == -ENOENT || oc.op_rval == -ENOENT) {
+            any_missing = true;
+            continue;
+          }
+          if (oc.reply.length() == 0) { decode_error = true; break; }
+          ceph::rados::query_vectors_result_t partial;
+          try {
+            auto p = oc.reply.cbegin();
+            decode(partial, p);
+            if (!p.end()) throw ceph::buffer::malformed_input("trailing reply");
+          } catch (const ceph::buffer::error&) { decode_error = true; break; }
+          oc.matching_records = partial.local_matching_entries;
+          oc.distance_computations = partial.local_distance_computations;
+          stage_matching += partial.local_matching_entries;
+          stage_distance += partial.local_distance_computations;
+          if (partial.tree_stats) {
+            const auto& ts = *partial.tree_stats;
+            ++local.tree_stats_probes;
+            local.tree_primary_candidate_count += ts.primary_candidate_count;
+            local.tree_expanded_subtree_count += ts.expanded_subtree_count;
+            local.tree_pruned_distance_count += ts.pruned_distance_count;
+            local.tree_pruned_residual_count += ts.pruned_residual_count;
+            local.tree_opened_onode_count += ts.opened_onode_count;
+            local.tree_candidates_seen += ts.candidates_seen;
+            local.tree_containment_violations += ts.containment_violations;
+          }
+          for (auto& entry : partial.entries) {
+            stage_entries.push_back(std::move(entry));
+          }
+        }
+        if (decode_error) {
+          return true;
+        }
+
+        // Global merge dedups by entry_id, not entry.key. entry.key is
+        // restored server-side from OMAP per entry_id (pg_backend.cc's
+        // query_vectors handler) and that restoration is currently
+        // unreliable (separate, undiagnosed issue -- see
+        // expected_entry_id()'s comment above); entry_id itself is
+        // returned verbatim from the LIST scan and does not depend on it.
+        const uint64_t dupes_before = accumulator.dropped_duplicates();
+        const auto merge_begin = clock_type::now();
+        const uint32_t replacements = accumulator.merge_stage(stage_entries);
+        local.duplicate_entries +=
+          accumulator.dropped_duplicates() - dupes_before;
+
+        query_matching += stage_matching;
+        query_distance += stage_distance;
+        final_cum_m = range.end;
+
+        sf::stage_record_t record;
+        record.stage = stage;
+        record.cum_m = range.end;
+        record.batch_pg_count = range.count();
+        record.d1 = accumulator.current_d1();
+        record.tau = accumulator.current_tau();
+        record.topk_replacements = replacements;
+        record.topk_size =
+          static_cast<uint32_t>(accumulator.results().size());
+        record.batch_candidates = stage_matching;
+        record.cum_candidates = query_matching;
+        record.batch_distance_computations = stage_distance;
+        record.cum_distance_computations = query_distance;
+        record.batch_latency_us = stage_end_us - stage_begin_us;
+        record.cum_latency_us = stage_end_us;
+        if (selective_csv != nullptr) {
+          record.recall =
+            measure_recall(qs.query_index, accumulator.results());
+        }
+        sf::finalize_stage_record(tau_prev, &record);
+        tau_prev = record.tau;
+
+        outcomes.insert(outcomes.end(),
+                        std::make_move_iterator(stage_outcomes.begin()),
+                        std::make_move_iterator(stage_outcomes.end()));
+        stage_records.push_back(std::move(record));
+
+        if (!sf::should_expand(policy, stage_records.back())) {
+          return true;
+        }
+        ++qs.stage;
+        return !begin_stage(qs);
+      };
+
+      // Retires a finished logical query. The end-to-end latency keeps its
+      // old meaning exactly -- query_begin to query_end, slot queueing
+      // included -- and the queue/active split is reported alongside it so
+      // a depth sweep stays comparable with pre-pipeline runs.
+      const auto complete_query = [&](query_slot_t& qs) {
+        auto& accumulator = *qs.accumulator;
+        const auto& probes = qs.probes;
+        const auto& outcomes = qs.outcomes;
+        const auto& stage_records = qs.stage_records;
+        const size_t query_index = qs.query_index;
+        const uint64_t ticket = qs.ticket;
+        const auto& query_bl = qs.query_bl;
+        const uint32_t final_cum_m = qs.final_cum_m;
+        if (qs.blocked_since) {
+          qs.queue_wait_us += std::chrono::duration<double, std::micro>(
+              clock_type::now() - *qs.blocked_since).count();
+          qs.blocked_since.reset();
+        }
+        if (qs.probe_failed || qs.decode_error) {
           ++local.failures;
           local.first_error = -EIO;
           int expected = 0;
           first_error.compare_exchange_strong(expected, -EIO);
           stop.store(true);
-          break;
+          return;
         }
 
         const auto& merged = accumulator.results();
-        if (any_missing && merged.empty()) ++local.missing_objects;
+        if (qs.any_missing && merged.empty()) ++local.missing_objects;
         local.returned_entries += merged.size();
-        local.probe_matching_records += query_matching;
-        local.probe_distance_computations += query_distance;
+        local.probe_matching_records += qs.query_matching;
+        local.probe_distance_computations += qs.query_distance;
         local.selective_final_m_sum += final_cum_m;
         local.selective_stages_sum += stage_records.size();
         ++local.selective_final_m_histogram[final_cum_m];
@@ -1815,12 +2180,19 @@ fanout_query_result_t run_fanout_queries(
         }
 
         const auto query_end = clock_type::now();
+        const double end_to_end_us = std::chrono::duration<double, std::micro>(
+            query_end - qs.query_begin).count();
         ++local.completed;
+        // queue_wait: time this query had an issuable probe but no free
+        // slot. active = end-to-end minus that -- the span where its ops
+        // were actually on the wire, server-side queueing included.
+        const double queue_wait_us = std::min(qs.queue_wait_us, end_to_end_us);
+        local.queue_wait_us_sum += static_cast<uint64_t>(queue_wait_us);
+        local.active_us_sum +=
+            static_cast<uint64_t>(end_to_end_us - queue_wait_us);
         if (measure) {
-          local.latency_us.push_back(std::chrono::duration<double, std::micro>(
-              query_end - query_begin).count());
+          local.latency_us.push_back(end_to_end_us);
         }
-
         if (selective_csv != nullptr) {
           std::ostringstream rows;
           for (const auto& record : stage_records) {
@@ -1844,7 +2216,7 @@ fanout_query_result_t run_fanout_queries(
             block << probes[i].pg;
           }
           block << "]\n"
-                << "runtime_distinct_pgs=" << unique_pgs.size() << '\n'
+                << "runtime_distinct_pgs=" << qs.distinct_pgs << '\n'
                 << "stages_run=" << stage_records.size() << '\n'
                 << "final_cum_m=" << final_cum_m << '\n';
           for (const auto& record : stage_records) {
@@ -1868,14 +2240,86 @@ fanout_query_result_t run_fanout_queries(
                   << " table_vote_count_ref_only=" << probes[i].table_vote_count
                   << " matching_records=" << outcomes[i].matching_records
                   << " distance_computations=" << outcomes[i].distance_computations
+                  << " r=" << outcomes[i].r
+                  << " op_rval=" << outcomes[i].op_rval
+                  << " ready_us=" << outcomes[i].ready_us
                   << " submit_us=" << outcomes[i].submit_us
-                  << " complete_us=" << outcomes[i].complete_us << '\n';
+                  << " complete_us=" << outcomes[i].complete_us;
+            block << '\n';
           }
           std::lock_guard<std::mutex> locker(log_lock);
           *fanout_log << block.str() << "---\n";
           fanout_log->flush();
         }
+      };
+
+      // Finishes every query whose current stage has fully landed. Runs
+      // after submit_ready(), never before it.
+      const auto finish_ready_stages = [&]() {
+        for (size_t idx = 0; idx < active_order.size(); ) {
+          auto& qs = *query_slots[active_order[idx]];
+          if (qs.outstanding != 0 || qs.next_probe < qs.probe_end) {
+            ++idx;
+            continue;
+          }
+          if (finish_stage(qs)) {
+            complete_query(qs);
+            qs.active = false;
+            qs.probes.clear();
+            qs.outcomes.clear();
+            qs.stage_outcomes.clear();
+            qs.accumulator.reset();
+            active_order.erase(active_order.begin() + idx);
+          } else {
+            ++idx;
+          }
+        }
+      };
+
+      for (;;) {
+        submit_ready();
+        while (admitting) {
+          size_t idle_slot = query_slots.size();
+          for (size_t i = 0; i < query_slots.size(); ++i) {
+            if (!query_slots[i]->active) { idle_slot = i; break; }
+          }
+          if (idle_slot == query_slots.size()) break;
+          // Only admit when a probe slot is actually available: admitting
+          // into a saturated pipeline would grow the backlog (and the
+          // reported end-to-end latency) without raising queue depth.
+          if (!sequential_mode && free_slots.empty() && bounded_depth &&
+              slots.size() >= options.io_depth) {
+            break;
+          }
+          if (!admit_query(*query_slots[idle_slot], idle_slot)) {
+            admitting = false;
+            break;
+          }
+          submit_ready();
+        }
+        if (active_order.empty() && outstanding_total == 0) {
+          break;
+        }
+        if (outstanding_total != 0) {
+          reap_done();
+          // Refill before any decode/merge work so no slot idles while
+          // this thread is on the CPU -- this ordering is what actually
+          // holds the queue depth.
+          submit_ready();
+        }
+        finish_ready_stages();
       }
+      // Callbacks reference worker-local slots, so nothing may go out of
+      // scope while an op is still outstanding. The loop above only exits
+      // at zero, but a future early return must drain here too.
+      while (outstanding_total != 0) {
+        reap_done();
+      }
+      note_depth();
+      local.inflight_integral_us += inflight_integral_us;
+      local.pipeline_wall_us += std::chrono::duration<double, std::micro>(
+          clock_type::now() - pipeline_begin).count();
+      if (max_inflight > local.max_inflight) local.max_inflight = max_inflight;
     });
   }
   for (auto& worker : workers) worker.join();
@@ -1904,11 +2348,17 @@ fanout_query_result_t run_fanout_queries(
     result.tree_pruned_residual_count += local.tree_pruned_residual_count;
     result.tree_opened_onode_count += local.tree_opened_onode_count;
     result.tree_candidates_seen += local.tree_candidates_seen;
+    result.tree_containment_violations += local.tree_containment_violations;
     result.selective_final_m_sum += local.selective_final_m_sum;
     result.selective_stages_sum += local.selective_stages_sum;
     for (const auto& [final_m, count] : local.selective_final_m_histogram) {
       result.selective_final_m_histogram[final_m] += count;
     }
+    result.queue_wait_us_sum += local.queue_wait_us_sum;
+    result.active_us_sum += local.active_us_sum;
+    result.inflight_integral_us += local.inflight_integral_us;
+    result.pipeline_wall_us += local.pipeline_wall_us;
+    result.max_inflight = std::max(result.max_inflight, local.max_inflight);
   }
   return result;
 }
@@ -1979,10 +2429,33 @@ void print_fanout_result(const options_t& options, const fanout_query_result_t& 
         << average(result.tree_pruned_distance_count, result.completed)
         << " tree_pruned_residual_per_query="
         << average(result.tree_pruned_residual_count, result.completed)
+        << " tree_containment_violations="
+        << result.tree_containment_violations
         << " tree_opened_onodes_per_query="
         << average(result.tree_opened_onode_count, result.completed)
         << " tree_candidates_seen_per_query="
         << average(result.tree_candidates_seen, result.completed);
+  }
+  // avg_inflight is the time-average outstanding-op count per worker: it is
+  // what shows the depth was actually held, and slot_idle_ratio how much of
+  // the configured depth went unused. avg_queue_wait_us is the part of
+  // end-to-end latency a query spent waiting for a slot; avg_active_us is
+  // the rest, which still contains server-side queueing.
+  {
+    const double avg_inflight = result.pipeline_wall_us > 0 ?
+        result.inflight_integral_us / result.pipeline_wall_us : 0.0;
+    std::cout
+        << " io_depth=" << options.io_depth
+        << " avg_queue_wait_us="
+        << average(result.queue_wait_us_sum, result.completed)
+        << " avg_active_us="
+        << average(result.active_us_sum, result.completed)
+        << " avg_inflight=" << avg_inflight
+        << " max_inflight=" << result.max_inflight;
+    if (options.io_depth > 0) {
+      std::cout << " slot_idle_ratio="
+                << (1.0 - avg_inflight / static_cast<double>(options.io_depth));
+    }
   }
   std::cout << '\n';
 }
@@ -1995,6 +2468,7 @@ void print_load_result(const load_result_t& result)
             << " seconds=" << result.seconds
             << " actual_put_targets_per_vector="
             << average(result.put_targets, result.completed + result.failures)
+            << " rank_skipped=" << result.rank_skipped
             << " target_violations=" << result.target_violations
             << " vector_object_count=" << result.vector_oids.size() << '\n'
             << "PUT_OID_EXAMPLE " << result.first_oid << '\n';

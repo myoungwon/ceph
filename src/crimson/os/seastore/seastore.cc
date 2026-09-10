@@ -1794,34 +1794,55 @@ SeaStore::Shard::query_vectors_tree_boundary(
               return crimson::ct_error::input_output_error::make();
             }
 
-            // Both range edges must belong to the anchor's tree-ordering
-            // PG band. Object names do not define that boundary.
-            auto in_anchor_pg = [anchor](const ghobject_t &b) {
-              return b.shard_id == anchor.shard_id &&
-                     b.hobj.pool == anchor.hobj.pool &&
-                     b.hobj.get_hash() == anchor.hobj.get_hash();
+            // Where a bound sits relative to the anchor's tree-ordering PG
+            // band: -1 before it, 0 inside it, 1 after it. Compares the same
+            // components tree order does, in the same order.
+            auto pg_band_cmp = [anchor](const ghobject_t &b) -> int {
+              if (b.max != anchor.max) {
+                return b.max < anchor.max ? -1 : 1;
+              }
+              if (b.shard_id != anchor.shard_id) {
+                return b.shard_id < anchor.shard_id ? -1 : 1;
+              }
+              if (b.hobj.pool != anchor.hobj.pool) {
+                return b.hobj.pool < anchor.hobj.pool ? -1 : 1;
+              }
+              const auto bk = b.hobj.get_bitwise_key();
+              const auto ak = anchor.hobj.get_bitwise_key();
+              if (bk != ak) {
+                return bk < ak ? -1 : 1;
+              }
+              return 0;
             };
-            auto range_confined_to_anchor_pg =
-                [in_anchor_pg](const std::optional<ghobject_t> &lower,
-                                const std::optional<ghobject_t> &upper) {
-              return lower && upper &&
-                     in_anchor_pg(*lower) && in_anchor_pg(*upper);
+            // A child range is admissible when it OVERLAPS the anchor's band,
+            // not only when both edges sit inside it. Every FLTree node is
+            // field type N0, so a leaf holds whatever fits its byte budget
+            // and the first and last leaf of a PG's key run necessarily abut
+            // a neighbouring PG. Demanding both edges be inside refuses those
+            // two leaves whole, discarding the anchor PG's own keys in them.
+            auto range_overlaps_anchor_pg =
+                [pg_band_cmp](const std::optional<ghobject_t> &lower,
+                              const std::optional<ghobject_t> &upper) {
+              if (!lower || !upper) {
+                return false;
+              }
+              return pg_band_cmp(*lower) <= 0 && pg_band_cmp(*upper) >= 0;
             };
 
             // Normalized buckets are suitable only for ordering because tau
             // is a raw Euclidean distance. Raw-Euclidean buckets share tau's
             // metric space and can therefore safely exclude subtrees.
             auto make_priority = [Dq, bits, residual_bits,
-                                   range_confined_to_anchor_pg, geometry,
+                                   range_overlaps_anchor_pg, geometry,
                                    raw_scale, enable_pruning, &tree_stats]
                 (std::optional<float> tau) {
               return crimson::os::seastore::tree_boundary_priority_fn_t(
-                [Dq, bits, residual_bits, range_confined_to_anchor_pg,
+                [Dq, bits, residual_bits, range_overlaps_anchor_pg,
                  geometry, raw_scale, enable_pruning, tau, &tree_stats](
                     const std::optional<ghobject_t> &lower,
                     const std::optional<ghobject_t> &upper)
                     -> std::optional<double> {
-                  if (!range_confined_to_anchor_pg(lower, upper)) {
+                  if (!range_overlaps_anchor_pg(lower, upper)) {
                     return std::nullopt;
                   }
                   auto buckets = conservative_bucket_range_for_child(
@@ -1876,6 +1897,14 @@ SeaStore::Shard::query_vectors_tree_boundary(
                     }
                   }
                 }
+              }
+              // Admitting a range that only overlaps the anchor's band lets
+              // the traversal walk into a neighbouring PG's keys, so every
+              // candidate is audited before it is opened. Must stay 0.
+              if (cand.oid.shard_id != anchor.shard_id ||
+                  cand.oid.hobj.pool != anchor.hobj.pool ||
+                  cand.oid.hobj.get_hash() != anchor.hobj.get_hash()) {
+                ++tree_stats.containment_violations;
               }
               ++opened_onodes;
               return manager.read_vector_node(
